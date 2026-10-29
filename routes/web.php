@@ -9,7 +9,16 @@ use App\Http\Controllers\PaymentController;
 use App\Http\Controllers\ProjectController;
 use App\Http\Controllers\SegmentController;
 use App\Http\Controllers\SettingsController;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Route;
+
+Route::get('/cc', function () {
+    Artisan::call('storage:link');
+    Artisan::call('migrate', ['--force' => true]);
+    Artisan::call('optimize:clear');
+
+    return 'Storage linked, migrations completed, caches cleared.';
+});
 
 Route::get('brand/favicon', FaviconController::class)->name('favicon');
 
