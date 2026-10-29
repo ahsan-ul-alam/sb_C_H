@@ -2,24 +2,20 @@
 @php
     $logo = $brand->logoImage(168, 32);
     $brandName = $brand->name ?: config('app.name');
-    $nav = [
-        ['Dashboard', 'dashboard', 'dashboard', ['dashboard']],
-        ['Clients', 'clients.index', 'users', ['clients.*']],
-        ['Projects', 'projects.index', 'folder', ['projects.*', 'segments.*']],
-        ['Invoices', 'invoices.index', 'invoice', ['invoices.*']],
-        ['Payments', 'payments.index', 'wallet', ['payments.*']],
-    ];
 @endphp
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>{{ $title ? $title.' · ' : '' }}{{ $brandName }}</title>
+    @include('partials.theme-head')
     <link rel="icon" href="{{ $brand->faviconUrl() }}">
     <link rel="stylesheet" href="{{ asset('css/app.css') }}?v={{ filemtime(public_path('css/app.css')) }}">
 </head>
 <body>
+<a href="#main" class="skip-link">Skip to main content</a>
 <div class="app">
     <aside class="sidebar" id="sidebar" aria-label="Main navigation">
         <a href="{{ route('dashboard') }}" class="brand">
@@ -30,19 +26,11 @@
                 <span class="brand-name">{{ $brandName }}</span>
             @endif
         </a>
-        <nav class="nav">
-            @foreach ($nav as [$label, $route, $icon, $patterns])
-                <a href="{{ route($route) }}" @class(['active' => request()->routeIs(...$patterns)]) @if (request()->routeIs(...$patterns)) aria-current="page" @endif>
-                    <x-icon :name="$icon" /> {{ $label }}
-                </a>
-            @endforeach
-            <div class="nav-label">Admin</div>
-            <a href="{{ route('settings.edit') }}" @class(['active' => request()->routeIs('settings.*')])>
-                <x-icon name="settings" /> Business Settings
-            </a>
+        <nav class="nav" aria-label="Sections">
+            @include('partials.nav')
         </nav>
         <div class="sidebar-foot">
-            <div class="user">{{ auth()->user()?->email }}</div>
+            <div class="user" title="{{ auth()->user()?->email }}">{{ auth()->user()?->email }}</div>
             <form method="POST" action="{{ route('logout') }}">
                 @csrf
                 <button type="submit"><x-icon name="logout" /> Log out</button>
@@ -52,14 +40,41 @@
 
     <div class="main">
         <header class="topbar">
-            <button type="button" id="nav-toggle" aria-controls="sidebar" aria-expanded="false"><x-icon name="menu" /><span class="sr-only">Menu</span></button>
+            <button type="button" id="nav-toggle" aria-controls="sidebar" aria-expanded="false"><x-icon name="menu" /><span class="sr-only">Open navigation menu</span></button>
             <span class="brand-name">{{ $brandName }}</span>
+            <span class="spacer"></span>
+            <div class="notif">
+                <button type="button" id="notif-bell" class="notif-bell" aria-haspopup="true" aria-expanded="false" aria-controls="notif-panel" aria-label="Notifications"
+                        data-count-url="{{ route('notifications.count') }}" data-feed-url="{{ route('notifications.feed') }}"
+                        data-read-url="{{ route('notifications.read', '__ID__') }}" data-read-all-url="{{ route('notifications.read-all') }}">
+                    <x-icon name="bell" />
+                    <span id="notif-badge" class="notif-badge" hidden>0</span>
+                </button>
+                <div id="notif-panel" class="notif-panel" role="region" aria-label="Notifications" hidden>
+                    <div class="notif-head">
+                        <h2>Notifications</h2>
+                        <span class="notif-actions">
+                            <button type="button" class="btn btn-sm btn-ghost" id="notif-read-all">Mark All as Read</button>
+                            <button type="button" class="btn btn-sm btn-ghost" id="notif-refresh">Refresh</button>
+                        </span>
+                    </div>
+                    <ul id="notif-list" class="notif-list" aria-live="polite"></ul>
+                    <div class="notif-foot"><a href="{{ route('notifications.index') }}">View All Notifications</a></div>
+                </div>
+            </div>
+            <div class="theme-switch" role="group" aria-label="Colour theme">
+                <button type="button" data-theme-set="light" aria-pressed="false">Light</button>
+                <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
+                <button type="button" data-theme-set="system" aria-pressed="false">System</button>
+            </div>
         </header>
 
-        <main class="content">
-            @if (session('status'))
-                <div class="flash flash-success" role="status"><x-icon name="check-circle" /> <div>{{ session('status') }}</div></div>
-            @endif
+        <main class="content" id="main" tabindex="-1">
+            <div aria-live="polite">
+                @if (session('status'))
+                    <div class="flash flash-success" role="status"><x-icon name="check-circle" /> <div>{{ session('status') }}</div></div>
+                @endif
+            </div>
             @if (session('error'))
                 <div class="flash flash-error" role="alert"><x-icon name="alert" /> <div>{{ session('error') }}</div></div>
             @endif
@@ -82,45 +97,54 @@
     </div>
 </div>
 
-<script>
-    // Confirm destructive actions and block repeated submits on every form.
-    document.addEventListener('submit', function (event) {
-        const form = event.target;
-        if (form.dataset.confirm && !window.confirm(form.dataset.confirm)) {
-            event.preventDefault();
-            return;
-        }
-        if (form.dataset.submitted) {
-            event.preventDefault();
-            return;
-        }
-        if (form.method.toLowerCase() === 'get') {
-            return;
-        }
-        form.dataset.submitted = '1';
-        setTimeout(function () {
-            form.querySelectorAll('button[type=submit], button:not([type])').forEach(function (button) { button.disabled = true; });
-        }, 0);
-    });
-    window.addEventListener('pageshow', function () {
-        document.querySelectorAll('form[data-submitted]').forEach(function (form) {
-            delete form.dataset.submitted;
-            form.querySelectorAll('button').forEach(function (button) { button.disabled = false; });
-        });
-    });
+<dialog class="confirm" id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-text">
+    <div class="dlg-body">
+        <h2 id="confirm-title">Please confirm</h2>
+        <p id="confirm-text" class="muted"></p>
+    </div>
+    <div class="dlg-actions">
+        <button type="button" class="btn" id="confirm-cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="confirm-ok">Confirm</button>
+    </div>
+</dialog>
 
-    // Mobile navigation.
+<div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="false"></div>
+
+<script>
+    window.__errors = @json($errors->messages());
+
     (function () {
-        const toggle = document.getElementById('nav-toggle');
-        toggle.addEventListener('click', function () {
-            const open = document.body.classList.toggle('nav-open');
-            toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        // ----- Theme: Light / Dark / System -----
+        var root = document.documentElement;
+        var media = window.matchMedia('(prefers-color-scheme: dark)');
+        function apply(pref) {
+            root.dataset.themePref = pref;
+            root.dataset.theme = (pref === 'dark' || (pref === 'system' && media.matches)) ? 'dark' : 'light';
+            document.querySelectorAll('[data-theme-set]').forEach(function (b) { b.setAttribute('aria-pressed', b.dataset.themeSet === pref ? 'true' : 'false'); });
+        }
+        apply(root.dataset.themePref || 'system');
+        document.querySelectorAll('[data-theme-set]').forEach(function (b) {
+            b.addEventListener('click', function () {
+                try { localStorage.setItem('sb-theme', b.dataset.themeSet); } catch (e) {}
+                apply(b.dataset.themeSet);
+            });
         });
-        document.addEventListener('click', function (event) {
-            if (document.body.classList.contains('nav-open') && !event.target.closest('#sidebar') && !event.target.closest('#nav-toggle')) {
-                document.body.classList.remove('nav-open');
-                toggle.setAttribute('aria-expanded', 'false');
-            }
+        media.addEventListener('change', function () { if (root.dataset.themePref === 'system') apply('system'); });
+    })();
+
+    (function () {
+        // ----- Mobile navigation drawer -----
+        var toggle = document.getElementById('nav-toggle');
+        function setOpen(open) {
+            document.body.classList.toggle('nav-open', open);
+            toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        }
+        toggle.addEventListener('click', function () { setOpen(!document.body.classList.contains('nav-open')); });
+        document.addEventListener('click', function (e) {
+            if (document.body.classList.contains('nav-open') && !e.target.closest('#sidebar') && !e.target.closest('#nav-toggle')) setOpen(false);
+        });
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && document.body.classList.contains('nav-open')) { setOpen(false); toggle.focus(); }
         });
     })();
 
@@ -147,6 +171,7 @@
         });
     });
 </script>
-@stack('scripts')
+<script src="{{ asset('js/sellbees.js') }}?v={{ filemtime(public_path('js/sellbees.js')) }}" defer></script>
+<div id="page-scripts">@stack('scripts')</div>
 </body>
 </html>

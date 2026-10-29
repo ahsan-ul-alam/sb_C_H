@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Middleware\AjaxResponses;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -12,7 +13,12 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        //
+        // Forwarded headers are trusted ONLY from the proxy IPs/CIDRs listed in TRUSTED_PROXIES (comma separated).
+        // Unset (default) = trust nobody. Never use "*" unless the app is reachable solely through the proxy.
+        if ($proxies = array_filter(array_map('trim', explode(',', (string) env('TRUSTED_PROXIES', ''))))) {
+            $middleware->trustProxies(at: $proxies);
+        }
+        $middleware->web(append: [AjaxResponses::class]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(

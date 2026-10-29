@@ -83,7 +83,7 @@
                 </div>
                 <div class="field full">
                     <input type="hidden" name="show_watermark" value="0">
-                    <label class="checkbox"><input type="checkbox" name="show_watermark" value="1" @checked(old('show_watermark', $settings->show_watermark))> Show a faint watermark on invoices</label>
+                    <label class="checkbox"><input type="checkbox" class="switch" role="switch" name="show_watermark" value="1" @checked(old('show_watermark', $settings->show_watermark))> Show a faint watermark on invoices</label>
                 </div>
             </div>
         </div>

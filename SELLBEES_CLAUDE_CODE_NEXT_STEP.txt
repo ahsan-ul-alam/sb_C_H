@@ -1,0 +1,50 @@
+You are Claude Code working in the EXISTING SellBees ClientHub + Finance/Governance ERP repository.
+
+THIS IS A CONTINUATION, NOT A REBUILD. The previous pass added finance routes, migrations, models, workflows, and screens but has NOT run migrations or feature tests. Do not claim the ERP works until verified in a safe environment.
+
+FIRST, READ ./SellBees_3_Partner_ERP_Spec.md COMPLETELY. This file has now been provided to the project owner and must be copied into the repo root. In conflicts, follow the complete spec and flag any signed-policy decision that is not yet approved. Read the existing repo/code, git diff/status, and current migrations before touching anything. Work directly in the existing codebase.
+
+URGENT PRIORITIES — IN ORDER:
+
+P0 SECURITY FIRST:
+1) REMOVE the public unauthenticated /cc endpoint in routes/web.php that runs `migrate --force`. Database migrations must be CLI/deployment-only, NEVER publicly callable. Confirm no alternate public migration/seed endpoints exist.
+2) FIX the new users.role column default of super_admin. A safe default is a low-privilege role or nullable/unassigned; only explicitly authorized, existing known admin accounts should retain Super Admin after migration. Do not mass-grant Super Admin to every current or new user. Inspect existing role mapping and backfill carefully. Prevent users from editing their own role through public registration, profile updates, or mass-assignment. Keep existing authorized ClientHub admins working.
+3) Recheck server-side RBAC, partner record scoping, no self-approval, no finance approval/posting by Super Admin alone, and no privilege escalation via user-supplied IDs.
+
+P0 SAFE DATABASE ENABLEMENT:
+4) The previous pass could not connect to a DB: WSL PHP 8.5 lacks pdo_sqlite and the operator does not have the MySQL root password. DO NOT require MySQL root access. Inspect the project's existing .env/database configuration without printing secrets. An existing application database user is sufficient IF it has the needed migration permissions. Use a safe local/dev DB (or separately approved staging DB); do not run unreviewed migrations/seeds on production. Back up any DB with real data. Check connectivity, migration status and SQL/migration compatibility, then run the finance migration and ONLY the targeted finance seeder when safe. Never run `migrate:fresh`, destructive drops, or indiscriminate `db:seed` on a populated DB. If DB access or privileges genuinely do not exist, explain the exact blocker and leave unapplied changes ready; do not invent results.
+5) Check the finance migration's MySQL compatibility, foreign keys, indexes, defaults, precision and no unintended alteration of ClientHub records. If the original migration is already applied in another environment, use a forward-only corrective migration there; if nowhere applied, patch it safely.
+
+P1 COMPLETE BUSINESS RULES FROM THE SPEC:
+6) Add the missing Employee Increment calculation (not merely an approved previous/new salary record):
+   Annual Profit Rate (%) = Approved Available Annual Net Profit / Original Total Investment * 100.
+   Below 80%: no automatic theoretical increment; leave Board decision explicit.
+   80%-100% inclusive: 10 + ((Profit Rate - 80)/20)*10.
+   Above 100%: 20 + ((Profit Rate - 100)/100)*5.
+   Example: 80=>10%, 90=>15%, 100=>20%, 150=>22.5%, 200=>25%, 300=>30%.
+   Show theoretical and Board-approved actual rates separately, with approved amount, effective date, and salary history. Never automatically grant a theoretical increment.
+7) Complete Partner Exit settlement PREVIEW and approved accounting workflow:
+   Adjusted Investment = posted investment - approved unadjusted allocated losses - applicable approved unadjusted expense/liability charges - earlier capital withdrawals.
+   Exit incentive = VERIFIED NEW Company Fund allocations over the trailing 12 months multiplied by the exiting partner's applicable PROFIT-FUND ratio (A40%, B30%, C30% for periods governed by the approved three-partner policy). Do NOT use current Company Fund balance or 1/3 ownership. If the trailing window crosses policies, apply each period's effective ratio.
+   Final Settlement = Adjusted Investment + Exit Incentive + unpaid approved entitlements - other verified outstanding liabilities (no double subtraction).
+   Show all inputs, adjustments, source references and pending obligations. Keep payout separate from approval; create a payable/settlement record and paid/partial/unpaid status as required by current accounting. Do not mark legal ownership transferred or irrevocably exit a partner before the required approval/documents/effective date; do not invent an actual payment. Preserve old Partner D history if it exists.
+8) FIX closed-period integrity: once a ClientHub payment has contributed to a closed period, prevent in-place edits/deletions of the recognized payment/revenue facts. For necessary corrections use a traceable reversal/adjustment in an authorized OPEN period; don't silently change previously reported closed net profit. Check refunds, voids and revenue source classification, so payment receipts aren't blindly treated as profit. Do not introduce a new accounting engine.
+9) Add the smallest usable Partner Management UI for existing partners: list/detail/add as authorized, capital contributions, status, policy mapping. Treat investment commitments, legal ownership, profit rights and loss sharing as separate fields. Never allow casual editing of signed ratios. Old Partner D history, if any, remains historical/inactive and is not allocated in new periods.
+
+UNALTERED THREE-PARTNER RULES:
+- Investment COMMITMENT A:B:C = 40:30:30; actual paid capital is verified separately.
+- Ownership A=B=C exactly 1/3 each, UI may show 33.33 each with total 100%.
+- Internal loss 1/3 each with exact paisa rounding.
+- Partners' Profit Fund A:B:C = 40:30:30, subject to separate signed confirmation before live posting.
+- Closed positive net profit => Salary 20%, Office/Growth 5%, Emergency 25%, A20%, B15%, C15% (total 100%).
+- No profit posting while three-partner policy is draft or unsigned; signed policy, effective date, partner mapping and separate profit ratio confirmation are a GO-LIVE GATE.
+- Preview never writes to financial balances, post once per approved period, all posted journals balanced, immutable, reversible only by audit-trailed corrections.
+
+EXECUTION STYLE:
+- No architecture rewrite; reuse ClientHub and finance code. No unnecessary libraries or new abstractions; no gratuitous tests.
+- Fix actual code immediately; do not stop with a plan.
+- Run quick lint/view/routes checks, and the ALREADY-WRITTEN tests/Feature/FinanceRulesTest.php if a SAFE compatible dev test DB is available. If it cannot run, report it as NOT RUN, and manually verify the high-risk financial/RBAC flows using a safe DB if possible.
+- Verify: unauthorized /cc unavailable; newly created users aren't super_admin; real authorized admin access remains; partner self-approval forbidden; BDT 1,000,000 waterfall correct; 100 paisa loss 34/33/33; preview read-only; one-time posting; closed payment edits denied or corrected by adjustment; annual increment examples; B exit incentive from BDT 400,000 Company Fund allocation = BDT 120,000; older history preserved.
+- Return a concise report: changed files, migration/seed run status & environment, exact checks ACTUALLY performed, what is still blocked, and the minimal operator action needed. Never call code syntax checks an end-to-end verified ERP.
+
+START NOW.

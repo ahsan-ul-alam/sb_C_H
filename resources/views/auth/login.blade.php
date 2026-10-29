@@ -9,6 +9,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Log in · {{ $brandName }}</title>
+    @include('partials.theme-head')
     <link rel="icon" href="{{ $brand->faviconUrl() }}">
     <link rel="stylesheet" href="{{ asset('css/app.css') }}?v={{ filemtime(public_path('css/app.css')) }}">
 </head>
@@ -30,7 +31,7 @@
                     <div class="field">
                         <label for="email">Email</label>
                         <input type="email" id="email" name="email" value="{{ old('email') }}" required autofocus autocomplete="username" @class(['is-invalid' => $errors->has('email')])>
-                        @error('email') <span class="error">{{ $message }}</span> @enderror
+                        @error('email') <span class="error" role="alert">{{ $message }}</span> @enderror
                     </div>
                     <div class="field">
                         <label for="password">Password</label>

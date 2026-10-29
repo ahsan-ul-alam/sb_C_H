@@ -33,6 +33,12 @@ class UserFactory extends Factory
         ];
     }
 
+    /** Test users default to Super Admin, matching the application's original admin. */
+    public function configure(): static
+    {
+        return $this->afterCreating(fn ($user) => $user->setRoles(['super_admin']));
+    }
+
     /**
      * Indicate that the model's email address should be unverified.
      */
