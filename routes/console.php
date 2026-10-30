@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\Invoice;
 use App\Models\User;
 use App\Services\Audit;
 use App\Support\Permissions;
@@ -31,6 +32,37 @@ Artisan::command('user:set-password {email}', function (string $email) {
     Audit::log('user.password_rotated', $user->email);
     $this->info('Password updated and existing sessions for this user were ended.');
 })->purpose('Securely change one user\'s password');
+
+// Recalculates amount paid / status of existing invoices from saved payments and segment payments.
+// It never creates or edits payments, is idempotent, and --dry-run only reports what would change.
+Artisan::command('invoices:reconcile {--dry-run : Report changes without saving}', function () {
+    $dryRun = (bool) $this->option('dry-run');
+    $changed = 0;
+
+    Invoice::query()->orderBy('id')->each(function (Invoice $invoice) use ($dryRun, &$changed) {
+        DB::transaction(function () use ($invoice, $dryRun, &$changed) {
+            $invoice = Invoice::whereKey($invoice->id)->lockForUpdate()->first();
+            $before = [$invoice->amount_paid, $invoice->status];
+            $invoice->refreshPaymentStatus();
+
+            if ($before !== [$invoice->amount_paid, $invoice->status]) {
+                $changed++;
+                $this->line("{$invoice->number}: paid {$before[0]} -> {$invoice->amount_paid}, {$before[1]->value} -> {$invoice->status->value}");
+            }
+
+            if ($dryRun) {
+                DB::rollBack();
+                DB::beginTransaction();
+            }
+        });
+    });
+
+    if (! $dryRun && $changed > 0) {
+        Audit::log('invoices.reconciled', 'console', "{$changed} invoice(s) recalculated");
+    }
+
+    $this->info(($dryRun ? 'Dry run: ' : '')."{$changed} invoice(s) ".($dryRun ? 'would change.' : 'updated.'));
+})->purpose('Recalculate invoice paid amounts and statuses (safe to re-run; no payments are created or changed)');
 
 // One-time, owner-authorised role grant from the server shell (for the account that cannot edit its own roles).
 // It adds a single role, needs an explicit "yes", and is written to the audit log as a console action.

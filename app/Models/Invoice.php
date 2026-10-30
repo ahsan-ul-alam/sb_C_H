@@ -102,11 +102,72 @@ class Invoice extends Model
     }
 
     /**
+     * Money already received directly on the segments billed here (payments recorded on the segment,
+     * not on an invoice). It counts toward this invoice, capped at what the invoice bills per segment,
+     * so the same money is never asked for twice. It is not a payment of this invoice and is not re-counted as received.
+     *
+     * When several invoices bill one segment, the segment's direct payments are consumed by the oldest
+     * invoice first (lowest id); a later invoice only gets credit for what earlier invoices left over.
+     */
+    public function segmentPaymentsCredit(): int
+    {
+        $billed = $this->items()->whereNotNull('segment_id')->get()
+            ->groupBy('segment_id')->map(fn ($items) => (int) $items->sum('amount'));
+
+        if ($billed->isEmpty()) {
+            return 0;
+        }
+
+        $received = PaymentAllocation::query()
+            ->whereIn('segment_id', $billed->keys())
+            ->whereHas('payment', fn ($query) => $query->whereNull('invoice_id'))
+            ->selectRaw('segment_id, SUM(amount) as total')
+            ->groupBy('segment_id')
+            ->pluck('total', 'segment_id');
+
+        $billedByEarlierInvoices = InvoiceItem::query()
+            ->whereIn('segment_id', $billed->keys())
+            ->whereIn('invoice_id', static::query()->where('id', '<', $this->id)->select('id'))
+            ->selectRaw('segment_id, SUM(amount) as total')
+            ->groupBy('segment_id')
+            ->pluck('total', 'segment_id');
+
+        $credit = (int) $billed->sum(fn (int $amount, int $segmentId) => min(
+            $amount,
+            max(0, (int) ($received[$segmentId] ?? 0) - (int) ($billedByEarlierInvoices[$segmentId] ?? 0)),
+        ));
+
+        return max(0, min($credit, $this->total - (int) $this->payments()->sum('amount')));
+    }
+
+    /**
+     * Recalculate every invoice billing any of these segments (optionally skipping one already refreshed).
+     * Segments are locked first, in id order, so concurrent payment/invoice changes serialise and cannot credit twice.
+     *
+     * @param  array<int, int>  $segmentIds
+     */
+    public static function refreshBillingSegments(array $segmentIds, ?int $exceptInvoiceId = null): void
+    {
+        if ($segmentIds === []) {
+            return;
+        }
+
+        Segment::whereIn('id', $segmentIds)->orderBy('id')->lockForUpdate()->get('id');
+
+        static::query()
+            ->whereHas('items', fn ($query) => $query->whereIn('segment_id', $segmentIds))
+            ->when($exceptInvoiceId, fn ($query) => $query->whereKeyNot($exceptInvoiceId))
+            ->orderBy('id')
+            ->get()
+            ->each->refreshPaymentStatus();
+    }
+
+    /**
      * Recalculate paid amount and status from saved payments. Called after any payment change.
      */
     public function refreshPaymentStatus(): void
     {
-        $this->amount_paid = (int) $this->payments()->sum('amount');
+        $this->amount_paid = (int) $this->payments()->sum('amount') + $this->segmentPaymentsCredit();
         $this->status = match (true) {
             $this->total > 0 && $this->amount_paid >= $this->total => InvoiceStatus::Paid,
             $this->amount_paid > 0 => InvoiceStatus::Partial,

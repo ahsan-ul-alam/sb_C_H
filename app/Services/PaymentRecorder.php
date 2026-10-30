@@ -41,7 +41,7 @@ class PaymentRecorder
                 if ($invoice) {
                     $invoice = Invoice::whereKey($invoice->id)->lockForUpdate()->firstOrFail();
                     $alreadyPaid = (int) $invoice->payments()->when($exceptId, fn ($q) => $q->whereKeyNot($exceptId))->sum('amount');
-                    $remaining = $invoice->total - $alreadyPaid;
+                    $remaining = $invoice->total - $alreadyPaid - $invoice->segmentPaymentsCredit();
 
                     if ($amount > $remaining) {
                         throw ValidationException::withMessages([
@@ -80,6 +80,7 @@ class PaymentRecorder
                 }
 
                 $invoice?->refreshPaymentStatus();
+                Invoice::refreshBillingSegments(array_keys(array_filter($allocations)), $invoice?->id);
 
                 return $payment;
             });
@@ -92,8 +93,10 @@ class PaymentRecorder
     {
         DB::transaction(function () use ($payment): void {
             $invoice = $payment->invoice;
+            $segmentIds = $payment->allocations()->pluck('segment_id')->all();
             $payment->delete();
             $invoice?->refreshPaymentStatus();
+            Invoice::refreshBillingSegments($segmentIds, $invoice?->id);
         });
     }
 

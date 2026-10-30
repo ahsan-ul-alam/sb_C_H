@@ -7,6 +7,7 @@ use App\Models\BusinessSetting;
 use App\Models\Client;
 use App\Models\Invoice;
 use App\Models\Project;
+use App\Models\Segment;
 use App\Support\DateRange;
 use App\Support\ListFilters;
 use App\Support\Money;
@@ -158,7 +159,12 @@ class InvoiceController extends Controller
         }
 
         $project = $invoice->project;
-        $invoice->delete();
+        $segmentIds = $invoice->items()->whereNotNull('segment_id')->pluck('segment_id')->unique()->values()->all();
+
+        DB::transaction(function () use ($invoice, $segmentIds): void {
+            $invoice->delete();
+            Invoice::refreshBillingSegments($segmentIds);
+        });
 
         return redirect()->route('projects.show', $project)->with('status', 'Invoice deleted.');
     }
@@ -265,9 +271,16 @@ class InvoiceController extends Controller
      */
     private function syncItems(Invoice $invoice, array $items): void
     {
+        $segmentIds = $invoice->items()->whereNotNull('segment_id')->pluck('segment_id')
+            ->merge(array_column($items, 'segment_id'))->filter()->unique()->values()->all();
+
+        Segment::whereIn('id', $segmentIds)->orderBy('id')->lockForUpdate()->get('id');
+
         $invoice->items()->delete();
         $invoice->items()->createMany($items);
         $invoice->total = array_sum(array_column($items, 'amount'));
         $invoice->refreshPaymentStatus();
+
+        Invoice::refreshBillingSegments($segmentIds, $invoice->id);
     }
 }
