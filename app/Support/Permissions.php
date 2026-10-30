@@ -26,7 +26,7 @@ class Permissions
     /** Approvals that represent a Board decision. */
     public const GOVERNANCE = [
         'policy.approve', 'allocation.approve', 'payout.approve', 'resolution.decide', 'period.verify',
-        'exit.approve', 'capital.verify', 'expense.verify', 'opening.approve',
+        'exit.approve', 'capital.verify', 'expense.verify', 'opening.approve', 'sourcing.fund.approve', 'sourcing.negative_margin',
     ];
 
     /**
@@ -37,14 +37,18 @@ class Permissions
         $view = ['finance.view'];
         $roles = [
             'board_member' => [...$view, 'policy.create', 'policy.approve', 'allocation.approve', 'payout.approve',
-                'resolution.create', 'resolution.decide', 'period.verify', 'exit.approve', 'partner.manage', 'capital.verify', 'expense.verify', 'opening.approve', 'document.upload'],
+                'resolution.create', 'resolution.decide', 'period.verify', 'exit.approve', 'partner.manage', 'capital.verify', 'expense.verify', 'opening.approve', 'document.upload',
+                'sourcing.view', 'sourcing.reports', 'sourcing.price.approve', 'sourcing.negative_margin', 'sourcing.fund.approve', 'sourcing.supplier.secrets', 'commission.view'],
             'finance' => ['clienthub', ...$view, 'capital.record', 'expense.record', 'period.close', 'allocation.prepare',
-                'allocation.post', 'payout.pay', 'resolution.pay', 'exit.prepare', 'exit.pay', 'policy.create', 'revenue.record', 'opening.prepare', 'document.upload'],
+                'allocation.post', 'payout.pay', 'resolution.pay', 'exit.prepare', 'exit.pay', 'policy.create', 'revenue.record', 'opening.prepare', 'document.upload',
+                'sourcing.view', 'sourcing.reports', 'sourcing.manage', 'sourcing.override', 'sourcing.price.approve', 'sourcing.payment.record',
+                'sourcing.fund.request', 'sourcing.fund.utilize', 'sourcing.settle', 'sourcing.supplier.secrets',
+                'commission.view', 'commission.manage', 'commission.rates'],
             'hr' => ['resolution.create'],
             'partner' => ['own.view', 'payout.request', 'resolution.create'],
-            'client_management' => ['clienthub'],
+            'client_management' => ['clienthub', 'sourcing.view', 'sourcing.manage', 'sourcing.fund.request', 'commission.view', 'commission.manage'],
             'employee' => [],
-            'auditor' => $view,
+            'auditor' => [...$view, 'sourcing.view', 'sourcing.reports', 'commission.view'],
         ];
 
         $everything = array_values(array_unique([...array_merge(...array_values($roles)), 'clienthub', 'users.manage', ...$view]));

@@ -17,6 +17,16 @@
         @php($lines = collect($preview)->map(fn ($l) => (object) $l)) @php($label = 'Preview (not posted)')
     @endif
 
+    @if ($obligations && $obligations['total'] > 0 && ! $allocation)
+        <div class="flash flash-warning" role="status"><x-icon name="alert" /> <div><strong>Profit is held back.</strong> Sourcing obligations of {{ Money::format($obligations['total']) }} (supplier payables {{ Money::format($obligations['suppliers']) }}, unpaid lot costs {{ Money::format($obligations['costs']) }}, payments awaiting verification {{ Money::format($obligations['pending']) }}) are not yet in the ledger. Income is cash-based, so this profit is not safely distributable until they are paid and verified.</div></div>
+    @endif
+    @if ($period->net_profit < 0 && $heldCoverage > 0 && ! $allocation)
+        <div class="flash flash-warning" role="status"><x-icon name="alert" /> <div>Emergency Fund coverage of {{ Money::format($heldCoverage) }} is held for sourcing losses.
+            @if ($coverageApproved) It is applied below and reduces the partner loss charge; the accounting loss is unchanged.
+            @else It does NOT yet reduce the partner loss: the Board must approve a resolution (type Other) titled "{{ \App\Services\SourcingObligations::COVERAGE_RESOLUTION }}".
+            @endif</div></div>
+    @endif
+
     @if ($period->net_profit === 0)
         <div class="flash flash-error"><x-icon name="alert" /> <div>Net profit is zero; nothing is distributed.</div></div>
     @elseif ($lines->isNotEmpty())
@@ -29,7 +39,7 @@
                 <thead><tr><th>Destination</th><th class="num">Amount</th></tr></thead>
                 <tbody>
                 @foreach ($lines as $l)
-                    <tr><td>{{ match ($l->account) { 'fund.salary' => 'Salary Fund', 'fund.office' => 'Office & Growth Fund', 'fund.emergency' => 'Emergency Reserve', 'partner.payable' => 'Partner '.$partners[$l->partner_id].' — profit entitlement', 'partner.capital' => 'Partner '.$partners[$l->partner_id].' — loss charge', default => $l->account } }}</td>
+                    <tr><td>{{ match ($l->account) { 'fund.salary' => 'Salary Fund', 'fund.office' => 'Office & Growth Fund', 'fund.emergency' => 'Emergency Reserve', 'fund.coverage' => 'Emergency Fund coverage (absorbs this part of the loss)', 'partner.payable' => 'Partner '.$partners[$l->partner_id].' — profit entitlement', 'partner.capital' => 'Partner '.$partners[$l->partner_id].' — loss charge', default => $l->account } }}</td>
                         <td class="num">{{ Money::format((int) $l->amount) }}</td></tr>
                 @endforeach
                 <tr><td class="strong">Total</td><td class="num strong">{{ Money::format((int) $lines->sum('amount')) }}</td></tr>

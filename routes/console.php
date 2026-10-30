@@ -3,10 +3,12 @@
 use App\Models\Invoice;
 use App\Models\User;
 use App\Services\Audit;
+use App\Services\PeriodProcessor;
 use App\Support\Permissions;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schedule;
 
 Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
@@ -83,3 +85,19 @@ Artisan::command('user:grant-role {email} {role}', function (string $email, stri
     Audit::log('user.role_granted_console', $user->email, $role.' (granted from the server console)');
     $this->info('Role granted and recorded in the audit log.');
 })->purpose('Grant one role to a user from the server console, with confirmation and audit');
+
+// Month-end close, verification, profit allocation and release of unneeded Emergency coverage — ONLY under the Board's
+// approved standing policies, one finished month at a time. Idempotent: safe to re-run. Anything it cannot do is printed
+// and written to the audit log as an exception. Runs from the normal cPanel cron entry (php artisan schedule:run).
+Artisan::command('finance:process', function () {
+    $result = PeriodProcessor::run();
+    foreach ($result['processed'] as $line) {
+        $this->info($line);
+    }
+    foreach ($result['exceptions'] as $x) {
+        $this->warn("{$x['month']}: {$x['reason']}");
+    }
+    $this->line(count($result['processed']).' action(s), '.count($result['exceptions']).' exception(s).');
+})->purpose('Run the standing-policy month-end automation (safe to re-run)');
+
+Schedule::command('finance:process')->dailyAt('02:30')->withoutOverlapping();

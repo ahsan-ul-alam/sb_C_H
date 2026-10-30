@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\AccountingPeriod;
 use App\Models\Allocation;
 use App\Models\CapitalEntry;
+use App\Models\EmergencyFundRequest;
 use App\Models\ExitSettlement;
 use App\Models\Expense;
 use App\Models\OpeningBatch;
@@ -13,6 +14,7 @@ use App\Models\Payout;
 use App\Models\PolicyVersion;
 use App\Models\Resolution;
 use App\Models\RevenueAdjustment;
+use App\Models\SourcingLot;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -32,6 +34,9 @@ class Notifier
             [RevenueAdjustment::class, 'expense.verify', 'finance.revenue', 'Advance/refund record'],
         ] as [$model, $permission, $route, $label]) {
             self::listen($model, 'created', function ($m) use ($permission, $route, $label) {
+                if (($m->status ?? 'pending') !== 'pending') {
+                    return; // already verified under a standing policy: nothing for a person to do
+                }
                 Notify::send(Notify::withPermission($permission, [$m->created_by]), $label.' awaiting verification', 'A new '.strtolower($label).' needs a Board verification.', $route, 'approval', strtolower(class_basename($m)).':'.$m->id.':verify');
             });
             self::listen($model, 'updated', function ($m) use ($route, $label) {
@@ -41,19 +46,19 @@ class Notifier
             });
         }
 
-        self::listen(AccountingPeriod::class, 'created', fn ($p) => Notify::send(Notify::withPermission('period.verify', [$p->closed_by]), 'Period awaiting verification', 'Period '.$p->month.' was closed and needs verification.', 'finance.periods.show', 'approval', 'period:'.$p->id.':verify', [$p]));
+        self::listen(AccountingPeriod::class, 'created', fn ($p) => $p->closed_by === null ? null : Notify::send(Notify::withPermission('period.verify', [$p->closed_by]), 'Period awaiting verification', 'Period '.$p->month.' was closed and needs verification.', 'finance.periods.show', 'approval', 'period:'.$p->id.':verify', [$p]));
         self::listen(AccountingPeriod::class, 'updated', function ($p) {
-            if ($p->wasChanged('status') && $p->status === 'verified') {
+            if ($p->wasChanged('status') && $p->status === 'verified' && $p->verified_by !== null) {
                 Notify::send(Notify::user($p->closed_by)->merge(Notify::withPermission('allocation.prepare', [$p->verified_by])), 'Period verified', 'Period '.$p->month.' is verified and ready for allocation.', 'finance.periods.show', 'result', 'period:'.$p->id.':verified', [$p]);
             }
         });
 
-        self::listen(Allocation::class, 'created', fn ($a) => Notify::send(Notify::withPermission('allocation.approve', [$a->prepared_by]), 'Allocation awaiting approval', 'A '.$a->kind.' allocation needs Board approval.', 'finance.periods.show', 'approval', 'allocation:'.$a->id.':approve', [$a->accounting_period_id]));
+        self::listen(Allocation::class, 'created', fn ($a) => $a->prepared_by === null ? null : Notify::send(Notify::withPermission('allocation.approve', [$a->prepared_by]), 'Allocation awaiting approval', 'A '.$a->kind.' allocation needs Board approval.', 'finance.periods.show', 'approval', 'allocation:'.$a->id.':approve', [$a->accounting_period_id]));
         self::listen(Allocation::class, 'updated', function ($a) {
             if (! $a->wasChanged('status')) {
                 return;
             }
-            if ($a->status === 'approved') {
+            if ($a->status === 'approved' && $a->approved_by !== null) {
                 Notify::send(Notify::withPermission('allocation.post')->merge(Notify::user($a->prepared_by)), 'Allocation approved', 'An approved allocation is ready to post.', 'finance.periods.show', 'approval', 'allocation:'.$a->id.':post', [$a->accounting_period_id]);
             }
             if ($a->status === 'posted' && $a->kind === 'profit') {
@@ -135,6 +140,27 @@ class Notifier
             }
             if ($e->wasChanged('status') && $e->status === 'cancelled') {
                 Notify::send($own->merge(Notify::user($e->prepared_by)), 'Exit settlement cancelled', 'An unpaid exit settlement was cancelled for recalculation.', 'finance.exits', 'partner', 'exit:'.$e->id.':cancelled');
+            }
+        });
+
+        // Sourcing: Board decides fund coverage (never the requester); Finance utilises once approved.
+        self::listen(EmergencyFundRequest::class, 'created', fn ($r) => $r->status !== 'pending' ? null : Notify::send(
+            Notify::withPermission('sourcing.fund.approve', [$r->requested_by]),
+            'Emergency Fund request awaiting approval', 'A sourcing loss coverage request needs a Board decision.', 'sourcing.lots.show', 'approval', 'fundreq:'.$r->id.':approve', [$r->sourcing_lot_id]));
+        self::listen(EmergencyFundRequest::class, 'updated', function ($r) {
+            if (! $r->wasChanged('status')) {
+                return;
+            }
+            if ($r->status === 'approved') {
+                Notify::send(Notify::withPermission('sourcing.fund.utilize', [$r->decided_by]), 'Emergency Fund coverage approved', 'Approved coverage is ready to be utilised.', 'sourcing.lots.show', 'approval', 'fundreq:'.$r->id.':utilise', [$r->sourcing_lot_id]);
+            }
+            if (in_array($r->status, ['approved', 'rejected', 'utilised', 'reversed'], true)) {
+                Notify::send(Notify::user($r->requested_by), 'Emergency Fund request '.$r->status, 'Your coverage request is now '.$r->status.'.', 'sourcing.lots.show', 'result', 'fundreq:'.$r->id.':'.$r->status, [$r->sourcing_lot_id]);
+            }
+        });
+        self::listen(SourcingLot::class, 'updated', function ($l) {
+            if ($l->wasChanged('status') && $l->status === 'priced') {
+                Notify::send(Notify::withPermission('sourcing.price.approve', [$l->priced_by]), 'Sourcing pricing awaiting approval', $l->number.' is priced and needs approval.', 'sourcing.lots.show', 'approval', 'lot:'.$l->id.':price', [$l->id]);
             }
         });
     }

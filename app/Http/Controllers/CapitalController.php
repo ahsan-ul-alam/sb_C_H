@@ -51,6 +51,12 @@ class CapitalController extends Controller
         if ($covered) {
             return back()->with('error', 'This partner\'s capital up to that date is already in an opening balance batch. Do not record it again.')->withInput();
         }
+        // A repeated submit (double click, retry) of the same entry must not create a second postable record.
+        $duplicate = CapitalEntry::where('partner_id', $data['partner_id'])->where('amount', $amount)->whereDate('paid_on', $data['paid_on'])
+            ->where('reference', $data['reference'] ?? null)->where('status', '!=', 'rejected')->exists();
+        if ($duplicate) {
+            return back()->with('error', 'An identical capital entry (same partner, amount, date and reference) already exists. If this is a genuine second contribution, give it a different reference.')->withInput();
+        }
         $entry = CapitalEntry::create([...$data, 'amount' => $amount, 'created_by' => $request->user()->id]);
         Audit::log('capital.recorded', 'capital '.$entry->id, (string) $amount);
 

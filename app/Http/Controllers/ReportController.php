@@ -25,7 +25,7 @@ class ReportController extends Controller
         'liabilities' => 'Supplier / other liabilities', 'fund.salary' => 'Salary Fund', 'fund.office' => 'Office & Business Growth Fund',
         'fund.emergency' => 'Emergency Reserve', 'equity.opening' => 'Opening equity', 'income' => 'Income account (net of refunds)',
         'expense' => 'Expenses account', 'exit.incentive' => 'Exit incentives paid', 'exit.adjustment' => 'Exit settlement adjustments',
-        'profit.pool' => 'Profit pool (allocated)', 'loss.pool' => 'Loss pool (allocated)',
+        'fund.coverage' => 'Sourcing losses covered by Emergency Reserve (awaiting Board application)', 'profit.pool' => 'Profit pool (allocated)', 'loss.pool' => 'Loss pool (allocated)',
     ];
 
     public function index(Request $request): View|StreamedResponse

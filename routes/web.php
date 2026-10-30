@@ -1,17 +1,21 @@
 <?php
 
 use App\Http\Controllers\Auth\LoginController;
+use App\Http\Controllers\AutomationController;
 use App\Http\Controllers\CapitalController;
 use App\Http\Controllers\ClientController;
 use App\Http\Controllers\DocumentController;
+use App\Http\Controllers\EmergencyFundController;
 use App\Http\Controllers\ExitController;
 use App\Http\Controllers\ExpenseController;
 use App\Http\Controllers\FaviconController;
 use App\Http\Controllers\FinanceController;
+use App\Http\Controllers\FinancialStatementsController;
 use App\Http\Controllers\HomeController;
 use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\OpeningController;
+use App\Http\Controllers\OrderCommissionController;
 use App\Http\Controllers\PartnerController;
 use App\Http\Controllers\PaymentController;
 use App\Http\Controllers\PayoutController;
@@ -23,6 +27,10 @@ use App\Http\Controllers\ResolutionController;
 use App\Http\Controllers\RevenueController;
 use App\Http\Controllers\SegmentController;
 use App\Http\Controllers\SettingsController;
+use App\Http\Controllers\SourcingLotController;
+use App\Http\Controllers\SourcingReportController;
+use App\Http\Controllers\SupplierController;
+use App\Http\Controllers\SupplierProductController;
 use App\Http\Controllers\UserController;
 use Illuminate\Support\Facades\Route;
 
@@ -77,6 +85,60 @@ Route::middleware('auth')->group(function () {
         Route::put('settings', [SettingsController::class, 'update'])->name('settings.update');
     });
 
+    // Suppliers & Sourcing. Every write route carries its own permission; reads need sourcing.view.
+    Route::middleware('can:sourcing.view')->prefix('sourcing')->name('sourcing.')->group(function () {
+        Route::get('/', [SourcingReportController::class, 'overview'])->name('overview');
+        Route::get('reports', [SourcingReportController::class, 'reports'])->name('reports')->middleware('can:sourcing.reports');
+        Route::get('payments', [SourcingReportController::class, 'payments'])->name('payments.index');
+
+        Route::get('suppliers', [SupplierController::class, 'index'])->name('suppliers.index');
+        Route::get('suppliers/create', [SupplierController::class, 'create'])->name('suppliers.create')->middleware('can:sourcing.manage');
+        Route::post('suppliers', [SupplierController::class, 'store'])->name('suppliers.store')->middleware('can:sourcing.manage');
+        Route::get('suppliers/{supplier}', [SupplierController::class, 'show'])->name('suppliers.show');
+        Route::get('suppliers/{supplier}/edit', [SupplierController::class, 'edit'])->name('suppliers.edit')->middleware('can:sourcing.manage');
+        Route::put('suppliers/{supplier}', [SupplierController::class, 'update'])->name('suppliers.update')->middleware('can:sourcing.manage');
+        Route::patch('suppliers/{supplier}/archive', [SupplierController::class, 'toggleArchive'])->name('suppliers.archive')->middleware('can:sourcing.manage');
+
+        Route::get('products', [SupplierProductController::class, 'index'])->name('products.index');
+        Route::post('products', [SupplierProductController::class, 'store'])->name('products.store')->middleware('can:sourcing.manage');
+        Route::get('products/{product}/edit', [SupplierProductController::class, 'edit'])->name('products.edit')->middleware('can:sourcing.manage');
+        Route::put('products/{product}', [SupplierProductController::class, 'update'])->name('products.update')->middleware('can:sourcing.manage');
+
+        Route::get('lots', [SourcingLotController::class, 'index'])->name('lots.index');
+        Route::get('lots/create', [SourcingLotController::class, 'create'])->name('lots.create')->middleware('can:sourcing.manage');
+        Route::post('lots', [SourcingLotController::class, 'store'])->name('lots.store')->middleware('can:sourcing.manage');
+        Route::get('lots/{lot}', [SourcingLotController::class, 'show'])->name('lots.show');
+
+        Route::middleware('can:sourcing.manage')->group(function () {
+            Route::post('lots/{lot}/lines', [SourcingLotController::class, 'addLine'])->name('lots.lines.store');
+            Route::put('lines/{line}', [SourcingLotController::class, 'updateLine'])->name('lines.update');
+            Route::delete('lines/{line}', [SourcingLotController::class, 'removeLine'])->name('lines.destroy');
+            Route::post('lots/{lot}/costs', [SourcingLotController::class, 'addCost'])->name('lots.costs.store');
+            Route::delete('costs/{cost}', [SourcingLotController::class, 'removeCost'])->name('costs.destroy');
+            Route::post('lots/{lot}/pricing', [SourcingLotController::class, 'savePricing'])->name('lots.pricing');
+            Route::post('lots/{lot}/advance', [SourcingLotController::class, 'advance'])->name('lots.advance');
+            Route::post('lots/{lot}/cancel', [SourcingLotController::class, 'cancel'])->name('lots.cancel');
+            Route::post('lots/{lot}/allocations', [SourcingLotController::class, 'allocate'])->name('lots.allocations.store');
+            Route::delete('allocations/{allocation}', [SourcingLotController::class, 'removeAllocation'])->name('allocations.destroy');
+            Route::post('allocations/{allocation}/bill', [SourcingLotController::class, 'bill'])->name('allocations.bill');
+        });
+        Route::post('lots/{lot}/approve', [SourcingLotController::class, 'approve'])->name('lots.approve')->middleware('can:sourcing.price.approve');
+        Route::post('lots/{lot}/settle', [SourcingLotController::class, 'settle'])->name('lots.settle')->middleware('can:sourcing.settle');
+        Route::post('lots/{lot}/reopen', [SourcingLotController::class, 'reopen'])->name('lots.reopen')->middleware('can:sourcing.settle');
+
+        Route::middleware('can:sourcing.payment.record')->group(function () {
+            Route::post('lots/{lot}/payments', [SourcingLotController::class, 'recordPayment'])->name('lots.payments.store');
+            Route::post('payments/{payment}/void', [SourcingLotController::class, 'voidPayment'])->name('payments.void');
+            Route::post('costs/{cost}/pay', [SourcingLotController::class, 'payCost'])->name('costs.pay');
+        });
+
+        Route::post('lots/{lot}/fund', [EmergencyFundController::class, 'store'])->name('lots.fund.store')->middleware('can:sourcing.fund.request');
+        Route::post('fund/{fundRequest}/decide', [EmergencyFundController::class, 'decide'])->name('fund.decide')->middleware('can:sourcing.fund.approve');
+        Route::post('fund/{fundRequest}/utilise', [EmergencyFundController::class, 'utilise'])->name('fund.utilise')->middleware('can:sourcing.fund.utilize');
+        Route::post('fund/{fundRequest}/reverse', [EmergencyFundController::class, 'reverse'])->name('fund.reverse')->middleware('can:sourcing.fund.utilize');
+        Route::post('fund/{fundRequest}/cancel', [EmergencyFundController::class, 'cancel'])->name('fund.cancel')->middleware('can:sourcing.fund.request');
+    });
+
     Route::middleware('can:users.manage')->group(function () {
         Route::get('users', [UserController::class, 'index'])->name('users.index');
         Route::post('users', [UserController::class, 'store'])->name('users.store');
@@ -112,8 +174,25 @@ Route::middleware('auth')->group(function () {
             Route::get('revenue', [RevenueController::class, 'index'])->name('revenue');
             Route::get('opening', [OpeningController::class, 'index'])->name('opening');
             Route::get('reports', [ReportController::class, 'index'])->name('reports');
+            Route::get('investment', [FinancialStatementsController::class, 'investment'])->name('investment');
+            Route::get('position', [FinancialStatementsController::class, 'position'])->name('position');
+            Route::get('profit-loss', [FinancialStatementsController::class, 'profitLoss'])->name('pnl');
+            Route::get('automation', [AutomationController::class, 'index'])->name('automation');
             Route::get('documents/{document}', [DocumentController::class, 'download'])->name('documents.download');
         });
+
+        Route::get('orders', [OrderCommissionController::class, 'index'])->name('orders')->middleware('can:commission.view');
+        Route::middleware('can:commission.manage')->group(function () {
+            Route::post('orders', [OrderCommissionController::class, 'store'])->name('orders.store');
+            Route::post('orders/{order}/success', [OrderCommissionController::class, 'success'])->name('orders.success');
+            Route::post('orders/{order}/cancel', [OrderCommissionController::class, 'cancel'])->name('orders.cancel');
+            Route::post('orders/{order}/adjust', [OrderCommissionController::class, 'adjust'])->name('orders.adjust');
+            Route::post('orders/{order}/bill', [OrderCommissionController::class, 'bill'])->name('orders.bill');
+            Route::post('orders/{order}/reduce-invoiced', [OrderCommissionController::class, 'reduceInvoiced'])->name('orders.reduce');
+        });
+        Route::post('commission-rates', [OrderCommissionController::class, 'rates'])->name('orders.rates')->middleware('can:commission.rates');
+        Route::post('automation/run', [AutomationController::class, 'run'])->name('automation.run')->middleware('can:period.close');
+        Route::post('automation/revoke/{key}', [AutomationController::class, 'revoke'])->name('automation.revoke')->middleware('can:resolution.decide');
 
         Route::post('policies', [PolicyController::class, 'store'])->name('policies.store')->middleware('can:policy.create');
         Route::post('policies/{policy}/approve', [PolicyController::class, 'approve'])->name('policies.approve')->middleware('can:policy.approve');

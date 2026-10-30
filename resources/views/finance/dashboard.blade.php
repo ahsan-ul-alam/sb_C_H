@@ -8,6 +8,14 @@
         <div class="flash flash-error" role="alert"><x-icon name="alert" /> <div><strong>Live profit and loss posting is blocked.</strong> {{ $blocker }}</div></div>
     @endif
 
+    <div style="display:flex; gap:.5rem; flex-wrap:wrap; margin-bottom:1rem">
+        <a class="btn" href="{{ route('finance.investment') }}">Investment Overview</a>
+        <a class="btn" href="{{ route('finance.position') }}">Financial Position</a>
+        <a class="btn" href="{{ route('finance.pnl') }}">Profit &amp; Loss</a>
+        @can('commission.view')<a class="btn" href="{{ route('finance.orders') }}">Order Commission</a>@endcan
+        @can('sourcing.view')<a class="btn" href="{{ route('sourcing.overview') }}">Suppliers &amp; Sourcing</a>@endcan
+    </div>
+
     <h2 class="metric-group-label">Financial summary</h2>
     <div class="metrics-auto">
         @foreach ($totals as $label => $amount)

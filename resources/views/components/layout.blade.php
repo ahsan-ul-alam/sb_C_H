@@ -78,6 +78,9 @@
             @if (session('error'))
                 <div class="flash flash-error" role="alert"><x-icon name="alert" /> <div>{{ session('error') }}</div></div>
             @endif
+            @if (session('warning'))
+                <div class="flash flash-warning" role="status"><x-icon name="alert" /> <div>{{ session('warning') }}</div></div>
+            @endif
             @if ($errors->any())
                 <div class="flash flash-error" role="alert">
                     <x-icon name="alert" />

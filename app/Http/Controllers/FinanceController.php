@@ -12,8 +12,11 @@ use App\Models\Partner;
 use App\Models\Payout;
 use App\Models\PolicyVersion;
 use App\Models\Resolution;
+use App\Models\SourcingLot;
 use App\Models\User;
 use App\Services\Ledger;
+use App\Services\LotFinancials;
+use App\Services\SourcingObligations;
 use App\Support\Money;
 use Illuminate\Http\Request;
 use Illuminate\View\View;
@@ -41,6 +44,9 @@ class FinanceController extends Controller
                 'Revenue (closed periods)' => (int) AccountingPeriod::sum('income'),
                 'Expenses (closed periods)' => (int) AccountingPeriod::sum('expenses'),
                 'Net profit (closed periods)' => (int) AccountingPeriod::sum('net_profit'),
+                'Open sourcing obligations (unpaid; holds back profit allocation)' => SourcingObligations::outstanding()['total'],
+                'Sourcing result (settled lots, accrual view — info only)' => (int) SourcingLot::where('status', 'settled')->get()
+                    ->sum(fn ($lot) => LotFinancials::for($lot)['profit']),
             ],
             'partnerFund' => (int) $partners->sum('payable'),
             'advances' => Ledger::creditBalance('customer.advances'),

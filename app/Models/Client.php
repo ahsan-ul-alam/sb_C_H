@@ -8,7 +8,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['name', 'address', 'country', 'mobile', 'mobile_alt', 'email', 'id_type', 'id_number', 'notes'])]
+#[Fillable(['name', 'address', 'country', 'mobile', 'mobile_alt', 'email', 'id_type', 'id_number', 'notes', 'commission_bps'])]
 class Client extends Model
 {
     /**

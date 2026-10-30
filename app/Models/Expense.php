@@ -10,6 +10,6 @@ class Expense extends Model
 
     protected function casts(): array
     {
-        return ['spent_on' => 'date', 'verified_at' => 'datetime'];
+        return ['spent_on' => 'date', 'verified_at' => 'datetime', 'is_asset' => 'boolean'];
     }
 }
