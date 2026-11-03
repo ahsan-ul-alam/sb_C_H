@@ -158,6 +158,10 @@ class FinancialReportingService
             'accounts_payable' => self::accountsPayable(),
             'loans_outstanding' => Ledger::creditBalance('loans.payable'),
             'loans_receivable' => Ledger::debitBalance('assets.loans_receivable'),
+            'supplier_advances' => Ledger::debitBalance('assets.supplier_advances'),
+            'inventory' => Ledger::debitBalance('assets.inventory'),
+            'customer_advances' => Ledger::creditBalance('customer.advances'),
+            'pending_approvals' => PendingApprovals::count(),
         ];
     }
 
@@ -172,7 +176,9 @@ class FinancialReportingService
     /** Verified expenses (and nothing else) not yet paid. */
     public static function accountsPayable(): int
     {
-        return (int) Expense::where('status', 'verified')->whereNull('reverses_id')->whereIn('payment_status', ['unpaid', 'partial'])->sum(DB::raw('amount - paid_amount'));
+        // Unpaid bills (including capitalised transport payables) plus accepted goods not yet paid for under the supplier-advance model.
+        return (int) Expense::where('status', 'verified')->whereNull('reverses_id')->whereIn('payment_status', ['unpaid', 'partial'])->sum(DB::raw('amount - paid_amount'))
+            + AdvanceSettlementService::payablesOutstanding();
     }
 
     /**

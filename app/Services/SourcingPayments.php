@@ -74,16 +74,23 @@ class SourcingPayments
                 }
                 // Accrual basis (forward-only, Board-approved): the payment is a SUPPLIER ADVANCE, an asset, and must say what it paid for.
                 $advance = SourcingBasis::accrualOn($data['paid_on']);
+                // Accepted goods not yet paid for are a payable: paying it is a settlement of that liability (Dr payable / Cr cash), not a new advance.
+                $payableDue = $advance ? AdvanceSettlementService::payableOutstanding($lot, $supplierId) : 0;
+                if ($payableDue > 0 && $data['amount'] > $payableDue) {
+                    throw new RuntimeException('The supplier is owed '.Money::format($payableDue).' for accepted goods; pay that amount (or less) first.');
+                }
                 if ($advance) {
-                    foreach (['purchase_order' => 'the purchase order', 'reference' => 'the payment reference', 'evidence_reference' => 'the supporting evidence (supplier invoice, proforma or payment slip)'] as $field => $label) {
+                    $required = $payableDue > 0 ? ['reference' => 'the payment reference']
+                        : ['purchase_order' => 'the purchase order', 'reference' => 'the payment reference', 'evidence_reference' => 'the supporting evidence (supplier invoice, proforma or payment slip)'];
+                    foreach ($required as $field => $label) {
                         if (trim((string) ($data[$field] ?? '')) === '') {
-                            throw new RuntimeException('A supplier advance needs '.$label.'.');
+                            throw new RuntimeException('A supplier '.($payableDue > 0 ? 'payment' : 'advance').' needs '.$label.'.');
                         }
                     }
                 }
                 $expense = self::expenseFor('Sourcing: supplier payment', $lot->number.' — supplier #'.$supplierId.($data['reference'] ?? null ? ' ref '.$data['reference'] : ''),
                     $data['amount'], $data['paid_on'], $user, ['sourcing' => true, 'lot_ok' => self::pricingApproved($lot)],
-                    $advance ? ['classification' => 'supplier_advance', 'financial_account_id' => $data['financial_account_id'] ?? null, 'vendor' => $lot->lines->firstWhere('supplier_id', $supplierId)?->supplier?->name] : []);
+                    $advance ? ['classification' => $payableDue > 0 ? 'supplier_payable' : 'supplier_advance', 'financial_account_id' => $data['financial_account_id'] ?? null, 'vendor' => $lot->lines->firstWhere('supplier_id', $supplierId)?->supplier?->name] : []);
                 $payment = SupplierPayment::create([
                     'supplier_id' => $supplierId, 'sourcing_lot_id' => $lot->id, 'amount' => $data['amount'], 'paid_on' => $data['paid_on'],
                     'method' => $data['method'] ?? null, 'reference' => $data['reference'] ?? null, 'notes' => $data['notes'] ?? null,
@@ -111,9 +118,9 @@ class SourcingPayments
      * - Verified: the posted entry is never edited. A separate correcting expense states the real economic event and
      *   needs Board verification (never automatic); only then do the ledger and the payable change.
      */
-    public static function voidSupplierPayment(SupplierPayment $payment, string $reason, User $user, string $type = 'recording_error', ?int $amount = null, ?string $reference = null): void
+    public static function voidSupplierPayment(SupplierPayment $payment, string $reason, User $user, string $type = 'recording_error', ?int $amount = null, ?string $reference = null, ?int $refundAccountId = null): void
     {
-        DB::transaction(function () use ($payment, $reason, $user, $type, $amount, $reference) {
+        DB::transaction(function () use ($payment, $reason, $user, $type, $amount, $reference, $refundAccountId) {
             $payment = SupplierPayment::whereKey($payment->id)->lockForUpdate()->firstOrFail();
             $expense = Expense::whereKey($payment->expense_id)->lockForUpdate()->firstOrFail();
             if ($payment->isVoided()) {
@@ -137,7 +144,8 @@ class SourcingPayments
                 }
                 $reversal = self::expenseFor('Sourcing: supplier payment correction', 'Reverses expense #'.$expense->id.' ('.$type.') — '.$reason.($reference ? ' ref '.$reference : ''), $amount, today()->toDateString(), $user, [],
                     // Money coming back goes to the account it left from (never silently to the default account).
-                    ['reverses_id' => $expense->id, 'correction_type' => $type, 'financial_account_id' => $expense->financial_account_id]);
+                    // Money coming back goes to the account that actually receives it: the one chosen here, else the one it left from.
+                    ['reverses_id' => $expense->id, 'correction_type' => $type, 'financial_account_id' => $type === 'credit_note' ? $expense->financial_account_id : ($refundAccountId ?? $expense->financial_account_id)]);
                 $payment->update(['reversal_expense_id' => $reversal->id, 'void_reason' => $reason]);
                 Audit::log('sourcing.supplier_payment.correction_requested', 'lot '.optional($payment->lot)->number, $type.' '.$amount.': '.$reason);
 
@@ -173,9 +181,9 @@ class SourcingPayments
     /**
      * Pay a recorded ACTUAL cost (transport, VAT, ...). Creates its expense once; a rejected expense lets it be paid again.
      */
-    public static function payCost(SourcingLotCost $cost, string $paidOn, User $user, ?int $accountId = null): void
+    public static function payCost(SourcingLotCost $cost, string $paidOn, User $user, ?int $accountId = null, bool $asPayable = false): void
     {
-        DB::transaction(function () use ($cost, $paidOn, $user, $accountId) {
+        DB::transaction(function () use ($cost, $paidOn, $user, $accountId, $asPayable) {
             $lot = SourcingLot::whereKey($cost->sourcing_lot_id)->lockForUpdate()->firstOrFail();
             $cost = SourcingLotCost::with('expense')->findOrFail($cost->id);
             if ($lot->isClosed()) {
@@ -184,13 +192,19 @@ class SourcingPayments
             if ($cost->kind !== 'actual') {
                 throw new RuntimeException('Record the actual cost before paying it.');
             }
-            if ($cost->isPaid()) {
-                throw new RuntimeException('This cost is already paid.');
+            if ($cost->expense_id && $cost->expense?->status !== 'rejected') {
+                throw new RuntimeException($cost->isPaid() ? 'This cost is already paid.' : 'This cost is already recorded as a payable; pay it under Expenses → Payments.');
+            }
+            $accrual = SourcingBasis::accrualOn($paidOn);
+            if ($asPayable && ! $accrual) {
+                throw new RuntimeException('Recording a cost as a payable needs the accrual sourcing basis; under the cash basis a cost is recorded when it is paid.');
             }
             $expense = self::expenseFor('Sourcing: '.$cost->category, $lot->number.($cost->description ? ' — '.$cost->description : ''), $cost->amount, $paidOn, $user,
                 ['sourcing' => true, 'lot_ok' => self::pricingApproved($lot), 'unexpected' => $cost->is_unexpected],
-                // Accrual basis: a paid transport/loading/handling cost is part of the product's acquisition cost (inventory), not an expense.
-                SourcingBasis::accrualOn($paidOn) ? ['classification' => 'acquisition', 'financial_account_id' => $accountId] : ($accountId ? ['financial_account_id' => $accountId] : []));
+                // Accrual basis: a transport/loading/handling cost is part of the product's acquisition cost (inventory), not an expense. Paid now:
+                // Dr inventory / Cr cash account (even if the service is still to come: the cost stays in inventory, never in profit). Incurred but
+                // unpaid: Dr inventory / Cr payable, paid later through the normal expense payment, which cannot deduct cash twice.
+                $accrual ? ['classification' => 'acquisition', 'financial_account_id' => $accountId, 'payment_status' => $asPayable ? 'unpaid' : 'paid', 'vendor' => $cost->payee] : ($accountId ? ['financial_account_id' => $accountId] : []));
             $cost->update(['expense_id' => $expense->id]);
             Audit::log('sourcing.cost_paid', 'lot '.$lot->number, $cost->category.' '.$cost->amount.($expense->auto_policy_id ? ' (auto-verified, policy #'.$expense->auto_policy_id.')' : ''));
         });

@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\ApprovalController;
 use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\AutomationController;
 use App\Http\Controllers\CapitalController;
@@ -103,6 +104,10 @@ Route::middleware('auth')->group(function () {
         Route::get('reports', [SourcingReportController::class, 'reports'])->name('reports')->middleware('can:sourcing.reports');
         Route::get('payments', [SourcingReportController::class, 'payments'])->name('payments.index');
         Route::get('project-margins', [ProjectSourcingController::class, 'index'])->name('projects')->middleware('can:sourcing.reports');
+        Route::get('projects/{project}', [ProjectSourcingController::class, 'show'])->name('projects.show')->middleware('can:sourcing.reports')->whereNumber('project');
+        Route::get('documents/{document}', [SourcingLotController::class, 'downloadDocument'])->name('documents.download')->whereNumber('document');
+        Route::post('lots/{lot}/procurement', [SourcingLotController::class, 'procurement'])->name('lots.procurement')->middleware('can:sourcing.manage');
+        Route::post('lots/{lot}/documents', [SourcingLotController::class, 'uploadDocument'])->name('lots.documents.store')->middleware('can:sourcing.manage');
         Route::post('lines/{line}/arrival', [ProjectSourcingController::class, 'arrival'])->name('lines.arrival')->middleware('can:sourcing.manage');
 
         Route::get('suppliers', [SupplierController::class, 'index'])->name('suppliers.index');
@@ -210,6 +215,7 @@ Route::middleware('auth')->group(function () {
             Route::get('loans-receivable', [LoanReceivableController::class, 'index'])->name('loans-receivable');
             Route::get('statements', [StatementController::class, 'index'])->name('statements');
             Route::get('completeness', [FinancialCompletenessController::class, 'index'])->name('completeness');
+            Route::get('approvals', [ApprovalController::class, 'index'])->name('approvals');
             Route::get('other-income', [OtherIncomeController::class, 'index'])->name('other-income');
             Route::get('reconciliation', [ReconciliationController::class, 'index'])->name('reconciliation');
             Route::get('reconciliation.csv', [ReconciliationController::class, 'csv'])->name('reconciliation.csv');

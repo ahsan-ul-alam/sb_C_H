@@ -1,6 +1,6 @@
 @use('App\Support\Money')
 @php
-    $tabs = ['overview' => 'Overview', 'lines' => 'Lines & costs', 'pricing' => 'Costing & pricing', 'billing' => 'Client billing', 'payments' => 'Payments & settlement', 'emergency' => 'Emergency', 'activity' => 'Activity'];
+    $tabs = ['overview' => 'Overview', 'lines' => 'Lines & costs', 'receiving' => 'Receiving & documents', 'pricing' => 'Costing & pricing', 'billing' => 'Client billing', 'payments' => 'Payments & settlement', 'emergency' => 'Emergency', 'activity' => 'Activity'];
     $nextLabel = ['draft' => 'Move to costing', 'costing' => 'Submit pricing for approval', 'approved' => 'Start work', 'in_progress' => 'Mark completed'][$lot->status] ?? null;
     $isLoss = $f['profit'] < 0;
 @endphp
@@ -11,7 +11,9 @@
             @if ($isLoss)<span class="badge badge-unpaid">Loss {{ Money::format(-$f['profit']) }}</span>@endif
             @if ($f['fund_pending'] > 0)<span class="badge badge-partial">Fund request pending</span>@endif
         </x-slot:badges>
-        <x-slot:meta>Lifecycle: Draft → Costing → Priced → Approved → In progress → Completed → Financially settled</x-slot:meta>
+        <x-slot:meta>Lifecycle: Draft → Costing → Priced → Approved → In progress → Completed → Financially settled.
+            @if ($lot->purchase_order) PO {{ $lot->purchase_order }} · @endif Goods: {{ \App\Models\SourcingLot::PROCUREMENT[$lot->procurement_status] ?? $lot->procurement_status }}
+            @if ($lot->project_id) · <a href="{{ route('sourcing.projects.show', $lot->project_id) }}">Project financial overview</a> @endif</x-slot:meta>
         <x-slot:actions>
             @can('sourcing.manage')
                 @if ($nextLabel)

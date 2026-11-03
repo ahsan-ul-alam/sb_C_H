@@ -39,7 +39,12 @@ class Expense extends Model
      */
     public function scopeExcludingSourcingAssets(Builder $query): Builder
     {
-        return $query->whereNotIn('classification', ['supplier_advance', 'acquisition']);
+        return $query->whereNotIn('classification', ['supplier_advance', 'acquisition', 'supplier_payable']);
+    }
+
+    public function creator(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'created_by');
     }
 
     public function project(): BelongsTo

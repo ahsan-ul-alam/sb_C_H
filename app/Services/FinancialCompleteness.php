@@ -158,9 +158,11 @@ class FinancialCompleteness
     }
 
     /** @return array<string, mixed> */
-    private static function finding(string $severity, string $message, ?int $amount = null, ?string $evidence = null, ?string $month = null, ?string $layer = null): array
+    private static function finding(string $severity, string $message, ?int $amount = null, ?string $evidence = null, ?string $month = null, ?string $layer = null, ?string $link = null, ?string $linkLabel = null): array
     {
-        return ['severity' => $severity, 'message' => $message, 'amount' => $amount, 'evidence' => $evidence, 'month' => $month, 'layer' => $layer];
+        // Every finding leads somewhere: the screen where it can be completed (the reconciliation is the fallback for pure ledger checks).
+        return ['severity' => $severity, 'message' => $message, 'amount' => $amount, 'evidence' => $evidence, 'month' => $month, 'layer' => $layer,
+            'link' => $link ?? route('finance.reconciliation'), 'link_label' => $linkLabel ?? 'Review'];
     }
 
     /**
@@ -178,13 +180,15 @@ class FinancialCompleteness
             $uncovered = $rows->filter(fn ($r) => ! $r['covered']);
             if ($uncovered->isNotEmpty()) {
                 $findings[] = self::finding('blocker', $uncovered->count().' product-sourcing receipt(s) in '.$month.' have no sourcing record: '.$label($uncovered).'.', (int) $uncovered->sum(fn ($r) => $r['payment']->amount),
-                    'Supplier bills and payments, transport and loading receipts, the arrival date and the lot they belong to; then bill them from a lot or record the lot allocation.', $month, 'sourcing');
+                    'Supplier bills and payments, transport and loading receipts, the arrival date and the lot they belong to; then bill them from a lot or record the lot allocation.', $month, 'sourcing',
+                    route('sourcing.lots.create'), 'Create the sourcing lot');
             }
             $unclassified = $rows->filter(fn ($r) => $r['nature'] === null);
             if ($unclassified->isNotEmpty()) {
                 $blocks = $enforced !== null && $month >= $enforced;
                 $findings[] = self::finding($blocks ? 'blocker' : 'warning', $unclassified->count().' receipt(s) in '.$month.' are not classified (service, product sourcing or other): '.$label($unclassified).'.', (int) $unclassified->sum(fn ($r) => $r['payment']->amount),
-                    'The owner states what each receipt is for. A product-sourcing receipt then needs its supplier cost and lot.', $month, 'classification');
+                    'The owner states what each receipt is for. A product-sourcing receipt then needs its supplier cost and lot.', $month, 'classification',
+                    route('finance.completeness').'#receipts', 'Classify the receipts');
             }
         }
 
@@ -307,7 +311,7 @@ class FinancialCompleteness
         $unlinked = self::receipts()->filter(fn ($r) => $r['payment']->invoice_id === null);
         if ($unlinked->isNotEmpty()) {
             $findings[] = self::finding('warning', $unlinked->count().' receipt(s) are not linked to an invoice: '.$unlinked->map(fn ($r) => 'payment #'.$r['payment']->id.' ('.Money::format($r['payment']->amount).')')->implode(', ').'.',
-                (int) $unlinked->sum(fn ($r) => $r['payment']->amount), 'Link each to the invoice it settles, or state why none exists.');
+                (int) $unlinked->sum(fn ($r) => $r['payment']->amount), 'Link each to the invoice it settles, or state why none exists.', null, null, route('finance.completeness').'#receipts', 'See the receipts');
         }
 
         return $findings;
@@ -319,7 +323,8 @@ class FinancialCompleteness
         $findings = [];
         foreach (SourcingLot::whereIn('status', ['completed', 'settled'])->get() as $lot) {
             if (($blockers = self::lotBlockers($lot)) !== []) {
-                $findings[] = self::finding('warning', 'Lot '.$lot->number.' is '.strtolower($lot->statusLabel()).' with no arrival on record. '.$blockers[0], null, 'Arrival date and received quantity for each line.');
+                $findings[] = self::finding('warning', 'Lot '.$lot->number.' is '.strtolower($lot->statusLabel()).' with no arrival on record. '.$blockers[0], null, 'Arrival date and received quantity for each line.', null, null,
+                    route('sourcing.lots.show', [$lot, 'tab' => 'receiving']), 'Record the arrival');
             }
         }
 
@@ -336,12 +341,12 @@ class FinancialCompleteness
             ->where(fn ($q) => $q->where('category', 'like', '%loan%')->orWhere('description', 'like', '%loan%'))->get();
         foreach ($loanLike as $e) {
             $findings[] = self::finding('warning', 'Expense #'.$e->id.' ("'.$e->category.': '.$e->description.'", '.Money::format($e->amount).') looks like a loan but is booked as an '.$e->classification.' expense.', (int) $e->amount,
-                'The Board states whether it is a recoverable loan (then reclassify it) or a genuine cost.', $e->spent_on->format('Y-m'));
+                'The Board states whether it is a recoverable loan (then reclassify it) or a genuine cost.', $e->spent_on->format('Y-m'), null, route('finance.loans-receivable'), 'Reclassify as a loan');
         }
         $undocumented = Expense::where('status', 'verified')->whereNull('reverses_id')->whereNull('document_id');
         if ($undocumented->count() > 0) {
             $largest = (clone $undocumented)->orderByDesc('amount')->limit(3)->get()->map(fn ($e) => '#'.$e->id.' '.Money::format($e->amount))->implode(', ');
-            $findings[] = self::finding('warning', $undocumented->count().' verified expense(s) have no supporting document attached (largest: '.$largest.'); their classification as expense or asset rests on no evidence.', (int) $undocumented->sum('amount'), 'Invoice, receipt or voucher for each, so each can be classified (expense, asset, prepaid) on evidence.');
+            $findings[] = self::finding('warning', $undocumented->count().' verified expense(s) have no supporting document attached (largest: '.$largest.'); their classification as expense or asset rests on no evidence.', (int) $undocumented->sum('amount'), 'Invoice, receipt or voucher for each, so each can be classified (expense, asset, prepaid) on evidence.', null, null, route('finance.expenses'), 'Open the expenses');
         }
 
         return $findings;
@@ -354,13 +359,13 @@ class FinancialCompleteness
         $legacy = AccountingService::balance(null);
         if ($legacy !== 0) {
             $findings[] = self::finding('warning', 'Unassigned (legacy) cash of '.Money::format($legacy).' is not in any financial account, so no statement can verify it.', $legacy,
-                'Move it into the right accounts with the opening cash allocation, using verified statement balances.');
+                'Move it into the right accounts with the opening cash allocation, using verified statement balances.', null, null, route('finance.cash-allocation'), 'Allocate opening cash');
         }
         $verified = StatementReconciliationService::latestVerified()->pluck('financial_account_id')->all();
         foreach (FinancialAccount::where('is_active', true)->get() as $account) {
             if (! in_array($account->id, $verified, true)) {
                 $findings[] = self::finding('warning', $account->name.' has no verified statement: its balance of '.Money::format(AccountingService::balance($account->id)).' is calculated, not verified.', AccountingService::balance($account->id),
-                    'The balance on a real statement or cash count, its date and a reference, then a second person verifies it.');
+                    'The balance on a real statement or cash count, its date and a reference, then a second person verifies it.', null, null, route('finance.statements'), 'Record the statement');
             }
         }
 

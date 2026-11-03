@@ -62,6 +62,37 @@ class AdvanceSettlementService
         return (int) self::advancePayments($lot, $supplierId)->sum(fn (SupplierPayment $p) => self::held($p, true));
     }
 
+    /** Verified payments of a lot's supplier made under the cash basis (already expensed): they are cost already, never inventory or advance. */
+    public static function legacyPaid(SourcingLot $lot, int $supplierId): int
+    {
+        return (int) $lot->payments()->with(['expense', 'corrections'])->get()
+            ->filter(fn (SupplierPayment $p) => $p->supplier_id === $supplierId && ! $p->isVoided() && $p->expense?->status === 'verified'
+                && ! in_array($p->expense->classification, ['supplier_advance', 'supplier_payable'], true))
+            ->sum(fn (SupplierPayment $p) => $p->effectiveAmount());
+    }
+
+    /**
+     * Accepted goods the supplier has not been paid for yet (a payable): verified "payable" settlements minus verified payments that settle
+     * them (supplier payments classified supplier_payable).
+     */
+    public static function payableOutstanding(SourcingLot $lot, int $supplierId): int
+    {
+        $owed = (int) AdvanceSettlement::where('sourcing_lot_id', $lot->id)->where('supplier_id', $supplierId)->where('kind', 'payable')->where('status', 'verified')->sum('amount');
+        $paid = (int) $lot->payments()->with(['expense', 'corrections'])->get()
+            ->filter(fn (SupplierPayment $p) => $p->supplier_id === $supplierId && ! $p->isVoided() && $p->expense?->classification === 'supplier_payable' && $p->expense->status === 'verified')
+            ->sum(fn (SupplierPayment $p) => $p->effectiveAmount());
+
+        return max(0, $owed - $paid);
+    }
+
+    /** Every supplier payable still owed for goods accepted under the advance model (all lots). */
+    public static function payablesOutstanding(): int
+    {
+        return (int) SourcingLot::whereHas('advanceSettlements', fn ($q) => $q->where('kind', 'payable')->where('status', 'verified'))->get()
+            ->sum(fn (SourcingLot $lot) => $lot->advanceSettlements()->where('kind', 'payable')->where('status', 'verified')->distinct()->pluck('supplier_id')
+                ->sum(fn ($supplierId) => self::payableOutstanding($lot, (int) $supplierId)));
+    }
+
     /** Purchase value of the goods ACCEPTED so far for a supplier: accepted quantity × the unit price, only for lines with a recorded arrival. */
     public static function acceptedValue(SourcingLot $lot, int $supplierId): int
     {
@@ -92,7 +123,9 @@ class AdvanceSettlementService
                     throw new RuntimeException('Enter the supplier delivery or inspection reference for: '.$undocumented->pluck('description')->implode(', ').'.');
                 }
 
-                $need = self::acceptedValue($lot, $supplierId) - (int) AdvanceSettlement::where('sourcing_lot_id', $lot->id)->where('supplier_id', $supplierId)->whereIn('status', ['pending', 'verified'])->sum('amount');
+                // Accepted goods not yet covered by a settlement, nor by money already paid and expensed under the cash basis.
+                $need = self::acceptedValue($lot, $supplierId) - self::legacyPaid($lot, $supplierId)
+                    - (int) AdvanceSettlement::where('sourcing_lot_id', $lot->id)->where('supplier_id', $supplierId)->whereIn('status', ['pending', 'verified'])->sum('amount');
                 $date = $received->max('arrived_on')?->toDateString() ?? today()->toDateString();
                 $created = collect();
                 foreach (self::advancePayments($lot, $supplierId) as $payment) {
@@ -104,10 +137,18 @@ class AdvanceSettlementService
                         continue;
                     }
                     $created->push(AdvanceSettlement::create([
-                        'sourcing_lot_id' => $lot->id, 'supplier_id' => $supplierId, 'supplier_payment_id' => $payment->id, 'amount' => $take, 'settled_on' => $date,
+                        'sourcing_lot_id' => $lot->id, 'supplier_id' => $supplierId, 'supplier_payment_id' => $payment->id, 'kind' => 'advance', 'amount' => $take, 'settled_on' => $date,
                         'created_by' => $user->id, 'idempotency_key' => 'adv-'.$lot->id.'-'.$supplierId.'-p'.$payment->id.'-'.self::settledAmount($payment),
                     ]));
                     $need -= $take;
+                }
+                // Accepted goods beyond the money advanced are owed to the supplier: a payable, capitalised with the goods.
+                if ($need > 0) {
+                    $owed = (int) AdvanceSettlement::where('sourcing_lot_id', $lot->id)->where('supplier_id', $supplierId)->where('kind', 'payable')->whereIn('status', ['pending', 'verified'])->sum('amount');
+                    $created->push(AdvanceSettlement::create([
+                        'sourcing_lot_id' => $lot->id, 'supplier_id' => $supplierId, 'supplier_payment_id' => null, 'kind' => 'payable', 'amount' => $need, 'settled_on' => $date,
+                        'created_by' => $user->id, 'idempotency_key' => 'pay-'.$lot->id.'-'.$supplierId.'-'.$owed,
+                    ]));
                 }
                 foreach ($created as $s) {
                     Audit::log('sourcing.advance.settlement_proposed', 'lot '.$lot->number, 'supplier '.$supplierId.' '.$s->amount);
@@ -132,19 +173,25 @@ class AdvanceSettlementService
                 throw new RuntimeException('You cannot verify a settlement you proposed.');
             }
             if ($approve) {
-                $payment = SupplierPayment::with(['expense', 'corrections'])->findOrFail($settlement->supplier_payment_id);
-                if ($payment->isVoided() || $payment->expense?->status !== 'verified') {
-                    throw new RuntimeException('The supplier advance behind this settlement is no longer in force.');
-                }
-                if ($settlement->amount > self::held($payment, true)) {
-                    throw new RuntimeException('That advance no longer holds enough to settle (a refund or another settlement came first).');
-                }
                 if (AccountingService::isClosed($settlement->settled_on->toDateString())) {
                     throw new RuntimeException('That month is already closed; the settlement cannot be dated in it.');
                 }
-                Ledger::post($settlement->settled_on->toDateString(), 'Supplier advance settled into product acquisition: lot '.$lot->number, 'advance_settlement', $settlement->id, [
-                    ['assets.inventory', null, (int) $settlement->amount, 0], ['assets.supplier_advances', null, 0, (int) $settlement->amount],
-                ], $user->id);
+                if ($settlement->kind === 'payable') {
+                    Ledger::post($settlement->settled_on->toDateString(), 'Accepted goods not yet paid for (supplier payable): lot '.$lot->number, 'advance_settlement', $settlement->id, [
+                        ['assets.inventory', null, (int) $settlement->amount, 0], ['liabilities', null, 0, (int) $settlement->amount],
+                    ], $user->id);
+                } else {
+                    $payment = SupplierPayment::with(['expense', 'corrections'])->findOrFail($settlement->supplier_payment_id);
+                    if ($payment->isVoided() || $payment->expense?->status !== 'verified') {
+                        throw new RuntimeException('The supplier advance behind this settlement is no longer in force.');
+                    }
+                    if ($settlement->amount > self::held($payment, true)) {
+                        throw new RuntimeException('That advance no longer holds enough to settle (a refund or another settlement came first).');
+                    }
+                    Ledger::post($settlement->settled_on->toDateString(), 'Supplier advance settled into product acquisition: lot '.$lot->number, 'advance_settlement', $settlement->id, [
+                        ['assets.inventory', null, (int) $settlement->amount, 0], ['assets.supplier_advances', null, 0, (int) $settlement->amount],
+                    ], $user->id);
+                }
             }
             $settlement->update(['status' => $approve ? 'verified' : 'rejected', 'verified_by' => $user->id, 'verified_at' => now()]);
             Audit::log('sourcing.advance.settlement_'.($approve ? 'verified' : 'rejected'), 'lot '.$lot->number, (string) $settlement->amount);
@@ -168,6 +215,9 @@ class AdvanceSettlementService
             }
             if (AccountingService::isClosed($settlement->settled_on->toDateString())) {
                 throw new RuntimeException('The month of this settlement is closed.');
+            }
+            if ($settlement->kind === 'payable' && self::payableOutstanding($lot, $settlement->supplier_id) < $settlement->amount) {
+                throw new RuntimeException('Part of this payable has already been paid; refund or correct that payment first.');
             }
             $original = JournalEntry::where('source_type', 'advance_settlement')->where('source_id', $settlement->id)->firstOrFail();
             Ledger::reverse($original, $original->entry_date->toDateString(), 'Reversal of advance settlement #'.$settlement->id.': '.$reason, 'advance_settlement_rev', $settlement->id, $user->id);

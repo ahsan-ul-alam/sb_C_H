@@ -83,9 +83,14 @@
                 <td class="num">{{ Money::format($c->amount) }}</td>
                 <td>@if ($c->kind === 'actual' && ! $isReplaced)
                         @if ($c->isPaid())<x-status :value="$c->expense->status === 'verified' ? 'paid' : 'pending'" />
+                        @elseif ($c->isPayable())<span class="badge badge-partial">Payable — {{ $c->expense->status === 'verified' ? 'pay it under Expenses → Payments' : 'awaiting Board verification' }}</span>
                         @else <span class="muted">Unpaid</span>
                             @can('sourcing.payment.record') @unless ($lot->isClosed())
-                            <form method="POST" action="{{ route('sourcing.costs.pay', $c) }}" class="inline-form">@csrf<input type="date" name="paid_on" value="{{ today()->toDateString() }}"><button class="btn btn-sm">Pay</button></form>
+                            <form method="POST" action="{{ route('sourcing.costs.pay', $c) }}" class="inline-form">@csrf<input type="date" name="paid_on" value="{{ today()->toDateString() }}">
+                                <select name="financial_account_id" title="Paid from"><option value="">Default account</option>@foreach (\App\Models\FinancialAccount::where('is_active', true)->orderBy('name')->get() as $a)<option value="{{ $a->id }}">{{ $a->name }}</option>@endforeach</select>
+                                <button class="btn btn-sm" name="mode" value="paid">Pay now</button>
+                                @if (\App\Services\SourcingBasis::accrualOn(today()->toDateString()))<button class="btn btn-sm" name="mode" value="payable" title="Cost incurred, to be paid later">Record as payable</button>@endif
+                            </form>
                             @endunless @endcan
                         @endif
                     @endif</td>

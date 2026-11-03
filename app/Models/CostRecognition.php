@@ -14,6 +14,11 @@ class CostRecognition extends Model
         return ['amount' => 'integer', 'recognised_on' => 'date', 'verified_at' => 'datetime'];
     }
 
+    public function creator(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'created_by');
+    }
+
     public function lot(): BelongsTo
     {
         return $this->belongsTo(SourcingLot::class, 'sourcing_lot_id');

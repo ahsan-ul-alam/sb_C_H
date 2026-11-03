@@ -35,9 +35,18 @@ class SourcingLotCost extends Model
         return $this->belongsTo(Expense::class);
     }
 
-    /** Paid once an expense exists that Finance has not rejected; a rejected expense frees the cost to be paid again. */
+    /**
+     * Paid once an expense exists that Finance has not rejected and that is not still an unpaid or part-paid payable; a rejected
+     * expense frees the cost to be paid again.
+     */
     public function isPaid(): bool
     {
-        return $this->expense_id !== null && $this->expense?->status !== 'rejected';
+        return $this->expense_id !== null && $this->expense?->status !== 'rejected' && ! in_array($this->expense?->payment_status, ['unpaid', 'partial'], true);
+    }
+
+    /** Recorded (capitalised) as a payable that has not been fully paid yet. */
+    public function isPayable(): bool
+    {
+        return $this->expense_id !== null && $this->expense?->status !== 'rejected' && in_array($this->expense?->payment_status, ['unpaid', 'partial'], true);
     }
 }

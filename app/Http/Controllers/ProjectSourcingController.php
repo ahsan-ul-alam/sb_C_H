@@ -3,7 +3,9 @@
 namespace App\Http\Controllers;
 
 use App\Models\Project;
+use App\Models\SourcingLot;
 use App\Models\SourcingLotLine;
+use App\Services\ProjectFinancialOverview;
 use App\Services\ProjectSourcingReport;
 use App\Services\SourcingArrival;
 use Illuminate\Http\RedirectResponse;
@@ -20,6 +22,13 @@ class ProjectSourcingController extends Controller
             'projects' => $report['projects'], 'lots' => $report['lots'],
             'names' => Project::with('client')->whereIn('id', array_keys($report['projects']))->get()->keyBy('id'),
         ]);
+    }
+
+    public function show(Project $project): View
+    {
+        $lots = SourcingLot::where('status', '!=', 'cancelled')->where(fn ($q) => $q->where('project_id', $project->id)->orWhereHas('allocations', fn ($a) => $a->where('project_id', $project->id)))->orderBy('id')->get();
+
+        return view('sourcing.project-overview', ['o' => ProjectFinancialOverview::for($project->load('client')), 'lots' => $lots]);
     }
 
     public function arrival(Request $request, SourcingLotLine $line): RedirectResponse

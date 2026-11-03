@@ -7,7 +7,8 @@
     <div class="metric"><div class="label">Other costs unpaid</div><div class="value">{{ Money::format($f['costs_unpaid']) }}</div></div>
     <div class="metric"><div class="label">Cash still required</div><div class="value">{{ Money::format($f['cash_required']) }}</div></div>
 </div>
-<p class="muted">Cost stays the same whether or not it is paid. A payment becomes a Main Finance expense once (after Board verification), never in addition to the cost.</p>
+<p class="muted">Cost stays the same whether or not it is paid. A payment becomes a Main Finance expense once (after Board verification), never in addition to the cost.
+    @if (\App\Services\SourcingBasis::accrualOn(today()->toDateString())) Supplier payments here are <strong>advances</strong> (an asset) until the goods are accepted. <a href="{{ route('sourcing.advances') }}">Advances, settlements and cost release →</a>@endif</p>
 
 <section class="panel">
     <div class="panel-head"><h2>Supplier payables</h2></div>
@@ -48,6 +49,7 @@
                         @if ($p->expense->status === 'verified')
                             <select name="type" title="What actually happened?">@foreach (\App\Services\SourcingPayments::CORRECTIONS as $k => $label)<option value="{{ $k }}">{{ \Illuminate\Support\Str::before($label, ' —') }}</option>@endforeach</select>
                             <input name="amount" size="8" placeholder="amount (blank = all)" inputmode="decimal"><input name="reference" size="10" placeholder="receipt / credit-note ref">
+                            <select name="refund_account_id" title="Account that receives a refund"><option value="">Refund to the account it left from</option>@foreach (\App\Models\FinancialAccount::where('is_active', true)->orderBy('name')->get() as $a)<option value="{{ $a->id }}">{{ $a->name }}</option>@endforeach</select>
                         @endif
                         <input name="reason" placeholder="reason" required><button class="btn btn-sm btn-danger">{{ $p->expense->status === 'verified' ? 'Request correction' : 'Void' }}</button></form>
                     @endif

@@ -23,6 +23,17 @@
             ['Total project contract value', $kpis['contract_value'], 'To date · agreed charges on all projects', null],
             ['Outstanding receivables', $kpis['outstanding_receivables'], 'To date · agreed charges not yet paid — not cash', null],
         ]],
+        ['Cash by account type', collect($cashByType)->map(fn ($v, $k) => [$k, (int) $v, 'To date · calculated from the ledger (see Account Statements for verified balances)', null])->values()->all()],
+        ['Supplier advances, inventory & customer advances', [
+            ['Supplier advances (asset)', $kpis['supplier_advances'], 'To date · paid to suppliers, goods not yet accepted — not an expense', null],
+            ['Inventory / acquisition cost held', $kpis['inventory'], 'To date · accepted goods and capitalised costs not yet released to profit', null],
+            ['Customer advances', $kpis['customer_advances'], 'To date · received before it is earned — a liability, not revenue', null],
+        ]],
+        ['Product sourcing margin', [
+            ['Actual margin — provisional', $sourcing['provisional'], 'Lots not finished yet: can still change', null],
+            ['Actual margin — final', $sourcing['final'], 'Finished lots with every cost and arrival on record', null],
+            ['Recognised sourcing profit', $sourcing['recognised'], 'Only after the approved recognition event', null],
+        ]],
         ['Expenses', [
             ['Total project expenses', $kpis['project_expenses'], 'Direct project and sourcing costs in the period', null],
             ['Office & operating expenses', $kpis['operating_expenses'], 'Operating, other and tax expenses in the period', null],
@@ -55,6 +66,10 @@
     </form>
 
     <div class="flash" role="note"><x-icon name="alert" /> <div><strong>Profit is not cash.</strong> Profit counts revenue when it is earned and costs when they are verified. Cash is what is in your accounts. Owner investments, unpaid invoices and unpaid bills change one but not the other.</div></div>
+
+    @if ($kpis['pending_approvals'] > 0)
+    <div class="flash" role="note"><x-icon name="alert" /> <div><strong>{{ $kpis['pending_approvals'] }} financial approval(s) waiting.</strong> <a href="{{ route('finance.approvals') }}">Open the approvals list →</a></div></div>
+    @endif
 
     @foreach ($cards as [$heading, $items])
         <h2 class="metric-group-label">{{ $heading }}</h2>

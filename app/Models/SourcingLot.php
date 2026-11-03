@@ -18,6 +18,9 @@ class SourcingLot extends Model
 
     protected $guarded = [];
 
+    /** Where the goods are (operational). Kept apart from the financial position, which is derived from the books. */
+    public const PROCUREMENT = ['ordered' => 'Purchase order placed', 'preparing' => 'Supplier preparing', 'dispatched' => 'Dispatched', 'in_transit' => 'In transit', 'arrived' => 'Arrived at our room'];
+
     protected function casts(): array
     {
         return [

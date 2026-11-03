@@ -15,10 +15,11 @@
         <div class="panel-head"><h2>{{ $layer['title'] }}</h2><div class="strong">{{ ucfirst($layer['status']) }}</div></div>
         @if ($layer['findings'])
         <div class="table-wrap"><table class="table table-min-640">
-            <thead><tr><th>Severity</th><th>Finding</th><th class="num">Amount</th><th>Evidence or decision needed</th></tr></thead>
+            <thead><tr><th>Severity</th><th>What is missing</th><th class="num">Amount affected</th><th>Required action</th><th></th></tr></thead>
             <tbody>
             @foreach ($layer['findings'] as $f)
-                <tr><td>{{ ucfirst($f['severity']) }}</td><td>{{ $f['message'] }}</td><td class="num">{{ $f['amount'] !== null ? Money::format($f['amount'], $cur) : '' }}</td><td class="muted">{{ $f['evidence'] }}</td></tr>
+                <tr><td>{{ ucfirst($f['severity']) }}</td><td>{{ $f['message'] }}</td><td class="num">{{ $f['amount'] !== null ? Money::format($f['amount'], $cur) : '' }}</td><td class="muted">{{ $f['evidence'] }}</td>
+                    <td class="num"><a class="btn btn-sm" href="{{ $f['link'] }}">{{ $f['link_label'] }}</a></td></tr>
             @endforeach
             </tbody>
         </table></div>
@@ -42,7 +43,7 @@
     </section>
     @endif
 
-    <section class="panel">
+    <section class="panel" id="receipts">
         <div class="panel-head"><h2>Customer receipts and what they are for</h2></div>
         <div class="table-wrap"><table class="table table-min-640">
             <thead><tr><th>Date</th><th>Invoice</th><th>Project</th><th class="num">Amount</th><th>Classified as</th><th>Sourcing record</th><th></th></tr></thead>

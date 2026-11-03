@@ -53,6 +53,7 @@ class ExpenseVerifier
     {
         return match (true) {
             $e->classification === 'supplier_advance' => 'assets.supplier_advances',
+            $e->classification === 'supplier_payable' => 'liabilities', // paying a supplier payable already in the books: Dr payable / Cr cash
             $e->classification === 'acquisition' => 'assets.inventory',
             $e->classification === 'prepaid' => 'assets.prepaid',
             (bool) $e->is_asset => 'assets.equipment',

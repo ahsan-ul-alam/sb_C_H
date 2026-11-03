@@ -27,7 +27,7 @@ use App\Support\Costing;
  */
 class ProjectSourcingReport
 {
-    private const FIELDS = ['agreed', 'billed', 'received', 'cost', 'supplier_paid', 'supplier_outstanding', 'costs_paid', 'costs_unpaid', 'estimates_open', 'recognised_cost'];
+    private const FIELDS = ['agreed', 'billed', 'received', 'cost', 'supplier_paid', 'supplier_outstanding', 'costs_paid', 'costs_unpaid', 'estimates_open', 'recognised_cost', 'purchase_cost'];
 
     /**
      * @return array{projects: array<int, array<string, mixed>>, lots: list<array<string, mixed>>}
@@ -101,6 +101,11 @@ class ProjectSourcingReport
             foreach (Costing::allocateShared((int) $row['landed'], $weights) as $key => $share) {
                 $b[$key] ??= $blank;
                 $b[$key]['cost'] += $share;
+            }
+            // The supplier purchase price alone, split the same way (so purchase + handling always equals the landed cost, to the paisa).
+            foreach (Costing::allocateShared((int) $row['purchase'], $weights) as $key => $share) {
+                $b[$key] ??= $blank;
+                $b[$key]['purchase_cost'] += $share;
             }
         }
 

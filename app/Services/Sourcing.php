@@ -60,6 +60,7 @@ class Sourcing
             $lot = SourcingLot::create([
                 'number' => SourcingLot::nextNumber(), 'title' => $data['title'],
                 'allocation_basis' => $data['allocation_basis'] ?? 'value', 'notes' => $data['notes'] ?? null,
+                'purchase_order' => ($data['purchase_order'] ?? null) ?: null, 'project_id' => ($data['project_id'] ?? null) ?: null,
                 'created_by' => $user->id,
             ]);
             self::log($lot, 'lot.created');
@@ -211,8 +212,8 @@ class Sourcing
     {
         self::locked($cost->lot, function (SourcingLot $lot) use ($cost) {
             $cost = $lot->costs()->findOrFail($cost->id);
-            if ($cost->isPaid()) {
-                throw new RuntimeException('This cost has been paid and is part of the books; it cannot be removed.');
+            if ($cost->expense_id && $cost->expense?->status !== 'rejected') {
+                throw new RuntimeException('This cost is recorded in the books (paid or as a payable); it cannot be removed.');
             }
             if ($lot->costs()->where('replaces_id', $cost->id)->exists()) {
                 throw new RuntimeException('Remove the actual cost that replaced this estimate first.');

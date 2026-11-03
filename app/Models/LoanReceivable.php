@@ -15,6 +15,11 @@ class LoanReceivable extends Model
         return ['lent_on' => 'date', 'verified_at' => 'datetime', 'principal' => 'integer'];
     }
 
+    public function creator(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'created_by');
+    }
+
     public function expense(): BelongsTo
     {
         return $this->belongsTo(Expense::class);
