@@ -9,6 +9,7 @@ use App\Models\Expense;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
 use App\Models\Loan;
+use App\Models\LoanReceivable;
 use App\Models\Partner;
 use App\Models\Payment;
 use App\Models\Project;
@@ -128,6 +129,8 @@ class ReconciliationService
         $add('Prepaid', 'Prepaid expenses: ledger asset vs paid-but-not-yet-expensed', Ledger::debitBalance('assets.prepaid'), PrepaidService::unreleased(), 'Releases and purchases must move the asset together.', 'Run finance:release-prepaid for the missing month(s).');
         $loanOutstanding = (int) Loan::all()->sum(fn ($l) => $l->outstanding());
         $add('Loans', 'Loans payable: ledger vs verified receipts minus repayments', Ledger::creditBalance('loans.payable'), $loanOutstanding, 'Every verified loan entry must be journaled once.', 'Review the loan entries without a journal entry.');
+        $receivable = (int) LoanReceivable::where('status', 'verified')->get()->sum(fn ($l) => $l->outstanding());
+        $add('Loans', 'Loans receivable: ledger vs verified principal minus repayments', Ledger::debitBalance('assets.loans_receivable'), $receivable, 'Every verified reclassification and repayment must be journaled once.', 'Review the loan receivable records without a journal entry.');
 
         // 12. The profit the dashboard reports against the journal, and against what was frozen for distribution.
         $months = AccountingPeriod::orderBy('month')->pluck('month');

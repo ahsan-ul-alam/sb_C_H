@@ -5,9 +5,12 @@ use App\Models\Expense;
 use App\Models\ExpensePayment;
 use App\Models\FinancialAccount;
 use App\Models\JournalEntry;
+use App\Models\LoanReceivable;
+use App\Models\LoanReceivableRepayment;
 use App\Models\Payment;
 use App\Services\AccountingService;
 use App\Services\Ledger;
+use App\Services\LoanReceivableService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
@@ -74,7 +77,7 @@ function ccRun(string $operation, int $count, callable $argsFor): array
     $start = microtime(true) + 4.0;
     $procs = [];
     for ($i = 0; $i < $count; $i++) {
-        $args = json_encode([...$argsFor($i), 'user' => test()->co->users['finance']->id, 'start' => $start]);
+        $args = json_encode(['user' => test()->co->users['finance']->id, ...$argsFor($i), 'start' => $start]);
         $cmd = [PHP_BINARY, __DIR__.'/../Support/concurrency_worker.php', $operation, $args];
         $procs[$i] = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes[$i], null, [...getenv(), 'FINANCE_REALTIME_FROM' => '2026-11-01']);
     }
@@ -122,6 +125,49 @@ it('never pays more than an expense owes when payments race', function () {
     expect(collect($results)->where('ok', true)->where('recorded', true)->count())->toBe(1)
         ->and(ExpensePayment::count())->toBe(1)->and($expense->refresh()->paid_amount)->toBe(6_000_00)
         ->and(AccountingService::totalCash())->toBe(94_000_00);
+});
+
+/** A verified loan of 8,000 lent on 2026-10-26 (the "Loan for Ahsan" correction), committed so the worker processes see it. */
+function ccLoan(): LoanReceivable
+{
+    $co = test()->co;
+    $expense = $co->expense('Loan', 'Loan for Ahsan', '8000', '2026-10-26');
+    $loan = LoanReceivableService::propose($expense, ['borrower_partner_id' => $co->partner('B')->id], $co->users['finance']);
+    LoanReceivableService::decide($loan, true, $co->users['board']);
+
+    return $loan->refresh();
+}
+
+it('lets only one of several simultaneous loan repayments through when together they would exceed the loan', function () {
+    $loan = ccLoan();
+    // Four different 5,000 repayments race against 8,000 still owed: pending repayments reserve the balance, so only one fits.
+    $results = ccRun('loan_repay', 4, fn () => ['loan' => $loan->id, 'amount' => 5_000_00, 'date' => '2026-11-06', 'key' => (string) Str::uuid()]);
+
+    expect(collect($results)->where('ok', true)->where('recorded', true)->count())->toBe(1)
+        ->and(collect($results)->where('ok', false)->every(fn ($r) => str_contains($r['error'], 'cannot exceed')))->toBeTrue()
+        ->and(LoanReceivableRepayment::count())->toBe(1)->and($loan->refresh()->pendingRepayments())->toBe(5_000_00)->and($loan->outstanding())->toBe(8_000_00);
+});
+
+it('records one loan repayment submitted four times at once exactly once', function () {
+    $loan = ccLoan();
+    $key = (string) Str::uuid();
+    $results = ccRun('loan_repay', 4, fn () => ['loan' => $loan->id, 'amount' => 3_000_00, 'date' => '2026-11-06', 'key' => $key]);
+
+    expect(collect($results)->where('ok', true)->where('recorded', true)->count())->toBe(1)->and(LoanReceivableRepayment::count())->toBe(1);
+});
+
+it('posts a loan repayment once when four verifications race', function () {
+    $loan = ccLoan();
+    $repayment = LoanReceivableService::recordRepayment($loan, ['amount' => 3_000_00, 'repaid_on' => '2026-11-06'], $this->co->users['finance']);
+    $cash = AccountingService::totalCash();
+
+    $results = ccRun('loan_repay_verify', 4, fn () => ['repayment' => $repayment->id, 'user' => $this->co->users['board']->id]);
+
+    expect(collect($results)->where('ok', true)->count())->toBe(1)
+        ->and(collect($results)->where('ok', false)->every(fn ($r) => str_contains($r['error'], 'Already decided')))->toBeTrue()
+        ->and(JournalEntry::where('source_type', 'loan_receivable_repayment')->count())->toBe(1)
+        ->and(AccountingService::totalCash())->toBe($cash + 3_000_00)->and($loan->refresh()->outstanding())->toBe(5_000_00);
+    expect(ledgerAudit()['unbalanced'])->toBe(0)->and(ledgerAudit()['duplicates'])->toBe(0);
 });
 
 it('records a customer payment submitted four times at once exactly once', function () {

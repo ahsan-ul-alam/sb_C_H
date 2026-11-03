@@ -6,6 +6,7 @@ use App\Models\Expense;
 use App\Models\ExpenseAllocation;
 use App\Models\ExpensePayment;
 use App\Models\JournalEntry;
+use App\Models\LoanReceivable;
 use App\Models\PrepaidRelease;
 use App\Models\User;
 use App\Support\Money;
@@ -133,6 +134,9 @@ class ExpenseService
             }
             if ($original->payment_status === 'reversed' || Expense::where('reverses_id', $original->id)->whereIn('status', ['pending', 'verified'])->exists()) {
                 throw new RuntimeException('This expense already has a reversal.');
+            }
+            if (LoanReceivable::where('expense_id', $original->id)->whereIn('status', ['pending', 'verified'])->exists()) {
+                throw new RuntimeException('This expense is being reclassified as a loan receivable; reverse that reclassification first.');
             }
             if ($original->classification === 'prepaid' && PrepaidRelease::where('expense_id', $original->id)->exists()) {
                 throw new RuntimeException('Part of this prepaid expense has already been expensed; it cannot be reversed. Record an adjustment instead.');

@@ -18,6 +18,7 @@ use App\Http\Controllers\FinancialStatementsController;
 use App\Http\Controllers\HomeController;
 use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\LoanController;
+use App\Http\Controllers\LoanReceivableController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\OpeningController;
 use App\Http\Controllers\OrderCommissionController;
@@ -193,6 +194,7 @@ Route::middleware('auth')->group(function () {
             Route::get('expense-payments', [ExpensePaymentController::class, 'index'])->name('expense-payments');
             Route::get('cash-allocation', [CashAllocationController::class, 'index'])->name('cash-allocation');
             Route::get('loans', [LoanController::class, 'index'])->name('loans');
+            Route::get('loans-receivable', [LoanReceivableController::class, 'index'])->name('loans-receivable');
             Route::get('other-income', [OtherIncomeController::class, 'index'])->name('other-income');
             Route::get('reconciliation', [ReconciliationController::class, 'index'])->name('reconciliation');
             Route::get('reconciliation.csv', [ReconciliationController::class, 'csv'])->name('reconciliation.csv');
@@ -235,6 +237,12 @@ Route::middleware('auth')->group(function () {
         Route::post('loans/{loan}/interest', [LoanController::class, 'interest'])->name('loans.interest')->middleware('can:loan.record');
         Route::post('loan-entries/{entry}/decide', [LoanController::class, 'decide'])->name('loans.entries.decide')->middleware('can:loan.verify');
         Route::post('loan-entries/{entry}/reverse', [LoanController::class, 'reverse'])->name('loans.entries.reverse')->middleware('can:loan.verify');
+        Route::post('loans-receivable', [LoanReceivableController::class, 'store'])->name('loans-receivable.store')->middleware('can:loan.record');
+        Route::post('loans-receivable/{loan}/decide', [LoanReceivableController::class, 'decide'])->name('loans-receivable.decide')->middleware('can:loan.verify');
+        Route::post('loans-receivable/{loan}/reverse', [LoanReceivableController::class, 'reverse'])->name('loans-receivable.reverse')->middleware('can:loan.verify');
+        Route::post('loans-receivable/{loan}/repayments', [LoanReceivableController::class, 'repay'])->name('loans-receivable.repay')->middleware('can:loan.record');
+        Route::post('loan-receivable-repayments/{repayment}/decide', [LoanReceivableController::class, 'decideRepayment'])->name('loans-receivable.repayments.decide')->middleware('can:loan.verify');
+        Route::post('loan-receivable-repayments/{repayment}/reverse', [LoanReceivableController::class, 'reverseRepayment'])->name('loans-receivable.repayments.reverse')->middleware('can:loan.verify');
         Route::post('other-income', [OtherIncomeController::class, 'store'])->name('other-income.store')->middleware('can:income.record');
         Route::post('other-income/{income}/decide', [OtherIncomeController::class, 'decide'])->name('other-income.decide')->middleware('can:income.verify');
         Route::post('other-income/{income}/reverse', [OtherIncomeController::class, 'reverse'])->name('other-income.reverse')->middleware('can:income.verify');

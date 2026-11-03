@@ -23,7 +23,7 @@ class FinancialStatements
     public static function expenses(CarbonImmutable $start, CarbonImmutable $end, bool $sourcingOnly = false): int
     {
         $accounting = self::usesAccountingBasis();
-        $query = fn (bool $reversal) => Expense::where('status', 'verified')
+        $query = fn (bool $reversal) => Expense::where('status', 'verified')->notReclassifiedAsLoan()
             ->when($reversal, fn ($q) => $q->whereNotNull('reverses_id'), fn ($q) => $q->whereNull('reverses_id'))
             ->where('is_asset', false)
             // Legacy basis: a prepaid cost counts in full when paid. Accounting basis: it counts as it is released, month by month.
@@ -151,10 +151,11 @@ class FinancialStatements
             'fund.salary' => 'Salary Fund', 'fund.office' => 'Office & Growth Fund', 'fund.emergency' => 'Emergency Reserve', 'fund.coverage' => 'Emergency coverage held for partner losses',
             'equity.opening' => 'Opening equity', 'assets.equipment' => 'Office equipment & fixed assets (at cost, not depreciated)', 'supplier.credit' => 'Supplier credit notes receivable',
             'assets.prepaid' => 'Prepaid expenses (not yet used)', 'loans.payable' => 'Loans payable (principal owed)', 'income.other' => 'Other income',
+            'assets.loans_receivable' => 'Loans receivable (money lent, to be repaid)',
         ];
         foreach ($balances as $account => $debit) {
             $bucket = match (true) {
-                in_array($account, ['cash', 'receivables', 'assets.equipment', 'assets.prepaid', 'supplier.credit'], true) => 'assets',
+                in_array($account, ['cash', 'receivables', 'assets.equipment', 'assets.prepaid', 'assets.loans_receivable', 'supplier.credit'], true) => 'assets',
                 in_array($account, ['customer.advances', 'liabilities', 'partner.payable', 'loans.payable'], true) => 'liabilities',
                 $account === 'partner.capital' || $account === 'equity.opening' => 'capital',
                 str_starts_with($account, 'fund.') => 'funds',

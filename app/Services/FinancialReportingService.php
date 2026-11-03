@@ -115,7 +115,7 @@ class FinancialReportingService
     public static function expenseTotals(CarbonImmutable $from, CarbonImmutable $to): array
     {
         // Prepaid purchases are an asset, not an expense, until released (month by month) below.
-        $rows = Expense::query()->where('status', 'verified')->where('is_asset', false)->where('classification', '!=', 'prepaid')
+        $rows = Expense::query()->where('status', 'verified')->notReclassifiedAsLoan()->where('is_asset', false)->where('classification', '!=', 'prepaid')
             ->whereDate('spent_on', '>=', $from)->whereDate('spent_on', '<=', $to)
             ->selectRaw("CASE WHEN classification = 'direct' OR category LIKE 'Sourcing:%' THEN 'direct' ELSE classification END AS cost_role, SUM(CASE WHEN reverses_id IS NULL THEN CAST(amount AS SIGNED) ELSE -CAST(amount AS SIGNED) END) AS total")
             ->groupBy('cost_role')->pluck('total', 'cost_role');
@@ -155,6 +155,7 @@ class FinancialReportingService
             'available_cash' => AccountingService::totalCash(),
             'accounts_payable' => self::accountsPayable(),
             'loans_outstanding' => Ledger::creditBalance('loans.payable'),
+            'loans_receivable' => Ledger::debitBalance('assets.loans_receivable'),
         ];
     }
 
@@ -213,7 +214,7 @@ class FinancialReportingService
             });
 
         $expenses = $zero;
-        Expense::query()->where('status', 'verified')->where('is_asset', false)->whereDate('spent_on', '>=', $start)->whereDate('spent_on', '<=', $end)
+        Expense::query()->where('status', 'verified')->notReclassifiedAsLoan()->where('is_asset', false)->whereDate('spent_on', '>=', $start)->whereDate('spent_on', '<=', $end)
             ->get(['spent_on', 'amount', 'reverses_id'])->each(function ($e) use (&$expenses, $monthOf) {
                 $expenses[$monthOf($e->spent_on)] += $e->reverses_id ? -(int) $e->amount : (int) $e->amount;
             });
@@ -259,7 +260,7 @@ class FinancialReportingService
      */
     public static function expenseCategories(CarbonImmutable $from, CarbonImmutable $to): Collection
     {
-        return Expense::query()->where('status', 'verified')->where('is_asset', false)->whereDate('spent_on', '>=', $from)->whereDate('spent_on', '<=', $to)
+        return Expense::query()->where('status', 'verified')->notReclassifiedAsLoan()->where('is_asset', false)->whereDate('spent_on', '>=', $from)->whereDate('spent_on', '<=', $to)
             ->selectRaw('category, SUM(CASE WHEN reverses_id IS NULL THEN CAST(amount AS SIGNED) ELSE -CAST(amount AS SIGNED) END) AS total')->groupBy('category')->orderByDesc('total')->get()
             ->map(fn ($r) => ['category' => $r->category, 'total' => (int) $r->total])->filter(fn ($r) => $r['total'] !== 0)->values();
     }

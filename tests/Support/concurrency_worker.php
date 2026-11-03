@@ -1,11 +1,14 @@
 <?php
 
 use App\Models\Expense;
+use App\Models\LoanReceivable;
+use App\Models\LoanReceivableRepayment;
 use App\Models\Payment;
 use App\Models\Project;
 use App\Models\User;
 use App\Services\AccountingService;
 use App\Services\ExpenseService;
+use App\Services\LoanReceivableService;
 use App\Services\PaymentRecorder;
 use Illuminate\Contracts\Console\Kernel;
 
@@ -36,6 +39,12 @@ try {
     $result = match ($argv[1]) {
         'transfer' => AccountingService::transfer(['from' => $args['from'], 'to' => $args['to'], 'amount' => $args['amount'], 'date' => $args['date'], 'idempotency_key' => $args['key']], auth()->user()) !== null,
         'pay_expense' => ExpenseService::pay(Expense::findOrFail($args['expense']), ['amount' => $args['amount'], 'paid_on' => $args['date'], 'idempotency_key' => $args['key']], auth()->user()) !== null,
+        'loan_repay' => LoanReceivableService::recordRepayment(LoanReceivable::findOrFail($args['loan']), ['amount' => $args['amount'], 'repaid_on' => $args['date'], 'idempotency_key' => $args['key']], auth()->user()) !== null,
+        'loan_repay_verify' => (function () use ($args) {
+            LoanReceivableService::decideRepayment(LoanReceivableRepayment::findOrFail($args['repayment']), true, auth()->user());
+
+            return true;
+        })(),
         'payment' => (function () use ($args) {
             $project = Project::findOrFail($args['project']);
 
