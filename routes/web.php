@@ -107,6 +107,8 @@ Route::middleware('auth')->group(function () {
         Route::get('projects/{project}', [ProjectSourcingController::class, 'show'])->name('projects.show')->middleware('can:sourcing.reports')->whereNumber('project');
         Route::get('documents/{document}', [SourcingLotController::class, 'downloadDocument'])->name('documents.download')->whereNumber('document');
         Route::post('lots/{lot}/procurement', [SourcingLotController::class, 'procurement'])->name('lots.procurement')->middleware('can:sourcing.manage');
+        Route::post('lots/{lot}/details', [SourcingLotController::class, 'details'])->name('lots.details')->middleware('can:sourcing.manage');
+        Route::post('costs/{cost}/service', [SourcingLotController::class, 'confirmService'])->name('costs.service')->middleware('can:sourcing.advance.approve');
         Route::post('lots/{lot}/documents', [SourcingLotController::class, 'uploadDocument'])->name('lots.documents.store')->middleware('can:sourcing.manage');
         Route::post('lines/{line}/arrival', [ProjectSourcingController::class, 'arrival'])->name('lines.arrival')->middleware('can:sourcing.manage');
 

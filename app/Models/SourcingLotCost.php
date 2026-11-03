@@ -16,7 +16,7 @@ class SourcingLotCost extends Model
 
     protected function casts(): array
     {
-        return ['amount' => 'integer', 'incurred_on' => 'date', 'is_unexpected' => 'boolean'];
+        return ['amount' => 'integer', 'incurred_on' => 'date', 'service_completed_on' => 'date', 'is_unexpected' => 'boolean'];
     }
 
     /**

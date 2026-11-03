@@ -19,6 +19,11 @@ class CostRecognition extends Model
         return $this->belongsTo(User::class, 'created_by');
     }
 
+    public function verifier(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'verified_by');
+    }
+
     public function lot(): BelongsTo
     {
         return $this->belongsTo(SourcingLot::class, 'sourcing_lot_id');

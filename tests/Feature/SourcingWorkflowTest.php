@@ -9,10 +9,12 @@ use App\Models\Supplier;
 use App\Models\SupplierPayment;
 use App\Services\AccountingService;
 use App\Services\AdvanceSettlementService;
+use App\Services\CostRecognitionService;
 use App\Services\ExpenseService;
 use App\Services\FinancialCompleteness;
 use App\Services\FinancialReportingService;
 use App\Services\LotFinancials;
+use App\Services\LotStatus;
 use App\Services\PendingApprovals;
 use App\Services\ProjectFinancialOverview;
 use App\Services\Sourcing;
@@ -226,8 +228,8 @@ it('runs the lot workflow end to end through the screens: create, receive, docum
     $co->post('finance', 'sourcing.lots.lines.store', ['supplier_id' => (string) $this->supplier->id, 'description' => 'Hoodie', 'quantity' => '10', 'unit_price' => '4000.00'], $lot)->assertSessionHasNoErrors();
     $line = $lot->lines()->firstOrFail();
 
-    $co->post('finance', 'sourcing.lots.procurement', ['procurement_status' => 'in_transit'], $lot)->assertSessionHasNoErrors();
-    expect($lot->refresh()->procurement_status)->toBe('in_transit');
+    $co->post('finance', 'sourcing.lots.procurement', ['procurement_status' => 'in_transit'], $lot)->assertSessionHas('error');   // cannot skip steps
+    expect($lot->refresh()->procurement_status)->toBe('ordered');
     $co->post('finance', 'sourcing.lots.procurement', ['procurement_status' => 'bogus'], $lot)->assertSessionHasErrors('procurement_status');
 
     $co->post('finance', 'sourcing.lots.documents.store', ['name' => 'Supplier proforma', 'file' => UploadedFile::fake()->create('proforma.pdf', 20, 'application/pdf')], $lot)->assertSessionHasNoErrors();
@@ -254,6 +256,70 @@ it('runs the lot workflow end to end through the screens: create, receive, docum
     $co->post('finance', 'sourcing.lots.payments.store', ['supplier_id' => (string) $this->supplier->id, 'amount' => '40000.00', 'paid_on' => '2026-11-03', 'reference' => 'SLIP-1', 'evidence_reference' => 'INV-S1',
         'financial_account_id' => (string) $this->bank->id, 'idempotency_key' => (string) Str::uuid()], $lot)->assertSessionHasNoErrors()->assertSessionMissing('error');
     expect(SupplierPayment::firstOrFail()->purchase_order)->toBe('PO-SCREEN')->and(SupplierPayment::first()->expense->financial_account_id)->toBe($this->bank->id);
+});
+
+it('books transport paid before the service as a prepayment, and moves it to cost once the Board confirms the service', function () {
+    [$lot, , $costs] = p7Lot([['Transportation', 200_000, null]]);
+    $cash = AccountingService::totalCash();
+
+    expect(fn () => SourcingPayments::payCost($costs[0], '2026-11-05', $this->finance, $this->cash->id, asPayable: true, prepaid: true))->toThrow(RuntimeException::class);
+    SourcingPayments::payCost($costs[0], '2026-11-05', $this->finance, $this->cash->id, prepaid: true);
+    expect(dr('assets.transport_prepaid'))->toBe(0);                       // nothing posts before verification
+    p7Verify($costs[0]->refresh()->expense);
+    expect($costs[0]->expense->classification)->toBe('transport_prepayment')->and(AccountingService::totalCash())->toBe($cash - 200_000)
+        ->and(dr('assets.transport_prepaid'))->toBe(200_000)->and(dr('assets.inventory'))->toBe(0)->and(dr('expense'))->toBe(0)
+        ->and(CostRecognitionService::unconfirmedPrepayments($lot))->toBe(200_000)->and(CostRecognitionService::held($lot))->toBe(0);
+
+    // Only a Board member who did not record it can confirm; the confirmation moves no cash.
+    expect(fn () => SourcingPayments::completeService($costs[0], '2026-11-09', $this->finance))->toThrow(RuntimeException::class);
+    SourcingPayments::completeService($costs[0]->refresh(), '2026-11-09', $this->board);
+    expect(dr('assets.transport_prepaid'))->toBe(0)->and(dr('assets.inventory'))->toBe(200_000)->and(dr('expense'))->toBe(0)->and(AccountingService::totalCash())->toBe($cash - 200_000)
+        ->and(CostRecognitionService::unconfirmedPrepayments($lot))->toBe(0)->and(CostRecognitionService::held($lot))->toBe(200_000);
+
+    // Confirming twice never recognises the cost twice, and the cost cannot be paid again.
+    expect(fn () => SourcingPayments::completeService($costs[0]->refresh(), '2026-11-09', $this->board))->toThrow(RuntimeException::class)
+        ->and(fn () => SourcingPayments::payCost($costs[0]->refresh(), '2026-11-09', $this->finance, $this->cash->id))->toThrow(RuntimeException::class);
+    expect(dr('assets.inventory'))->toBe(200_000)->and(ledgerAudit()['unbalanced'])->toBe(0)->and(ledgerAudit()['duplicates'])->toBe(0);
+});
+
+it('moves the procurement step forward one step at a time and only after the supplier is paid', function () {
+    [$lot, $line] = p7Lot();
+
+    expect(fn () => LotStatus::moveProcurement($lot, 'preparing'))->toThrow(RuntimeException::class, 'Pay the supplier');
+    expect(LotStatus::operational($lot)['label'])->toBe('Awaiting supplier payment');
+    p7Pay($lot, 4_000_000, $this->bank);
+    expect(LotStatus::operational($lot->refresh())['label'])->toBe('Supplier paid');
+
+    expect(fn () => LotStatus::moveProcurement($lot, 'in_transit'))->toThrow(RuntimeException::class, 'one step at a time');
+    LotStatus::moveProcurement($lot, 'preparing');
+    LotStatus::moveProcurement($lot->refresh(), 'dispatched');
+    expect(fn () => LotStatus::moveProcurement($lot->refresh(), 'ordered'))->toThrow(RuntimeException::class, 'cannot go back')
+        ->and(LotStatus::operational($lot)['label'])->toBe('Procurement in progress');
+    LotStatus::moveProcurement($lot, 'in_transit');
+    expect(fn () => LotStatus::moveProcurement($lot->refresh(), 'arrived'))->toThrow(RuntimeException::class, 'arrival of every product line');
+
+    p7Arrive($line, '9', '8');
+    expect($lot->refresh()->procurement_status)->toBe('arrived')->and(LotStatus::operational($lot)['label'])->toBe('Partially received')
+        ->and(LotStatus::flags($lot))->not->toBeEmpty()->and(LotStatus::financial($lot)['label'])->not->toBe('Financially completed')
+        ->and(collect(LotStatus::steps($lot))->firstWhere('label', 'Goods received and inspected')['done'])->toBeTrue();
+});
+
+it('requires a reason to reject, records it, shows it in the approval history, and enforces maker-checker in the backend', function () {
+    [$lot, $line] = p7Lot();
+    $payment = p7Pay($lot, 4_000_000, $this->bank);
+    p7Arrive($line);
+    $settlement = AdvanceSettlementService::propose($lot, $this->supplier->id, $this->finance)->first();
+
+    expect(fn () => AdvanceSettlementService::decide($settlement, false, $this->board))->toThrow(RuntimeException::class, 'reason')
+        ->and(fn () => AdvanceSettlementService::decide($settlement, true, $this->finance))->toThrow(RuntimeException::class);   // not the maker, not without the permission
+    $this->co->post('finance', 'sourcing.advances.decide', ['decision' => 'reject', 'reason' => 'x'], $settlement)->assertForbidden();
+
+    $this->co->post('board', 'sourcing.advances.decide', ['decision' => 'reject', 'reason' => 'Wrong quantity accepted'], $settlement)->assertSessionHasNoErrors()->assertSessionMissing('error');
+    expect($settlement->refresh()->status)->toBe('rejected')->and($settlement->decision_note)->toBe('Wrong quantity accepted')->and($settlement->verified_by)->toBe($this->board->id);
+
+    $history = collect(PendingApprovals::history());
+    expect($history->pluck('note')->all())->toContain('Wrong quantity accepted')->and($history->pluck('status')->all())->toContain('rejected')->toContain('verified');
+    $this->co->as('board')->get(route('finance.approvals'))->assertOk()->assertSee('Approval history')->assertSee('Wrong quantity accepted');
 });
 
 it('gives every completeness finding a link to the screen that fixes it', function () {

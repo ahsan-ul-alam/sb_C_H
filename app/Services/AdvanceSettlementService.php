@@ -161,9 +161,12 @@ class AdvanceSettlementService
         }
     }
 
-    public static function decide(AdvanceSettlement $settlement, bool $approve, User $user): void
+    public static function decide(AdvanceSettlement $settlement, bool $approve, User $user, ?string $note = null): void
     {
-        DB::transaction(function () use ($settlement, $approve, $user) {
+        if (! $approve && trim((string) $note) === '') {
+            throw new RuntimeException('Give a reason for rejecting.');
+        }
+        DB::transaction(function () use ($settlement, $approve, $user, $note) {
             $lot = SourcingLot::whereKey($settlement->sourcing_lot_id)->lockForUpdate()->firstOrFail();
             $settlement = AdvanceSettlement::whereKey($settlement->id)->lockForUpdate()->firstOrFail();
             if ($settlement->status !== 'pending') {
@@ -193,7 +196,7 @@ class AdvanceSettlementService
                     ], $user->id);
                 }
             }
-            $settlement->update(['status' => $approve ? 'verified' : 'rejected', 'verified_by' => $user->id, 'verified_at' => now()]);
+            $settlement->update(['status' => $approve ? 'verified' : 'rejected', 'verified_by' => $user->id, 'verified_at' => now(), 'decision_note' => trim((string) $note) ?: null]);
             Audit::log('sourcing.advance.settlement_'.($approve ? 'verified' : 'rejected'), 'lot '.$lot->number, (string) $settlement->amount);
         });
     }

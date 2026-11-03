@@ -90,7 +90,10 @@ class ExpenseController extends Controller
                 if ($expense->created_by === $request->user()->id) {
                     throw new RuntimeException('You cannot verify an expense you recorded.');
                 }
-                $expense->update(['status' => $approve ? 'verified' : 'rejected', 'verified_by' => $request->user()->id, 'verified_at' => now()]);
+                if (! $approve && trim((string) $request->input('reason')) === '' && $request->boolean('reason_required')) {
+                    throw new RuntimeException('Give a reason for rejecting.');
+                }
+                $expense->update(['status' => $approve ? 'verified' : 'rejected', 'verified_by' => $request->user()->id, 'verified_at' => now(), 'decision_note' => trim((string) $request->input('reason')) ?: null]);
                 if ($approve) {
                     ExpenseVerifier::post($expense, $request->user()->id);
                 }

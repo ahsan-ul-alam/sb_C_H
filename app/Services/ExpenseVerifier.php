@@ -55,6 +55,7 @@ class ExpenseVerifier
             $e->classification === 'supplier_advance' => 'assets.supplier_advances',
             $e->classification === 'supplier_payable' => 'liabilities', // paying a supplier payable already in the books: Dr payable / Cr cash
             $e->classification === 'acquisition' => 'assets.inventory',
+            $e->classification === 'transport_prepayment' => 'assets.transport_prepaid', // paid before the service: a prepayment until the service is confirmed
             $e->classification === 'prepaid' => 'assets.prepaid',
             (bool) $e->is_asset => 'assets.equipment',
             default => 'expense',

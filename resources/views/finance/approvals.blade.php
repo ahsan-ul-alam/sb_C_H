@@ -19,9 +19,8 @@
                     <td class="num">{{ $r['amount_text'] }}</td>
                     <td class="num">
                         @if ($r['can_decide'])
-                            @foreach (['verify' => 'btn-success', 'reject' => 'btn-danger'] as $d => $cls)
-                                <form method="POST" action="{{ route($r['route'], $r['param']) }}" style="display:inline">@csrf<input type="hidden" name="decision" value="{{ $d }}"><button class="btn btn-sm {{ $cls }}">{{ ucfirst($d) }}</button></form>
-                            @endforeach
+                            <form method="POST" action="{{ route($r['route'], $r['param']) }}" style="display:inline">@csrf<input type="hidden" name="decision" value="verify"><button class="btn btn-sm btn-success">Verify</button></form>
+                            <form method="POST" action="{{ route($r['route'], $r['param']) }}" style="display:inline-flex;gap:.25rem;flex-wrap:wrap">@csrf<input type="hidden" name="decision" value="reject"><input type="hidden" name="reason_required" value="1"><input name="reason" required maxlength="200" placeholder="Reason for rejecting" class="input" style="min-width:10rem"><button class="btn btn-sm btn-danger">Reject</button></form>
                         @elseif ($r['is_mine'])
                             <span class="muted">Waiting for another approver</span>
                         @else
@@ -36,4 +35,25 @@
     @empty
         <section class="panel"><div class="panel-body muted">Nothing is waiting for approval.</div></section>
     @endforelse
+
+    <section class="panel">
+        <div class="panel-head"><h2>Approval history</h2><span class="muted">Latest {{ count($history) }} decisions</span></div>
+        <div class="table-wrap"><table class="table table-min-640">
+            <thead><tr><th>What</th><th>Decision</th><th>Entered by</th><th>Decided by</th><th>Reason</th><th class="num">Amount</th></tr></thead>
+            <tbody>
+            @forelse ($history as $h)
+                <tr>
+                    <td>@if ($h['link'])<a href="{{ $h['link'] }}">{{ $h['title'] }}</a>@else{{ $h['title'] }}@endif <span class="muted">{{ $h['reference'] }}</span></td>
+                    <td><span class="badge {{ $h['status'] === 'rejected' ? 'badge-danger' : 'badge-paid' }}">{{ ucfirst($h['status']) }}</span> <span class="muted nowrap">{{ $h['decided_at'] }}</span></td>
+                    <td>{{ $h['by_name'] ?? '—' }}</td>
+                    <td>{{ $h['decided_by_name'] ?? '—' }}</td>
+                    <td>{{ $h['note'] ?? '—' }}</td>
+                    <td class="num">{{ $h['amount_text'] }}</td>
+                </tr>
+            @empty
+                <tr><td colspan="6" class="muted">No decisions yet.</td></tr>
+            @endforelse
+            </tbody>
+        </table></div>
+    </section>
 </x-layout>

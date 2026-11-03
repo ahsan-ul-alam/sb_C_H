@@ -44,5 +44,23 @@
         @endforeach
     </nav>
 
+    @if ($tab === 'overview')
+    @php($operational = \App\Services\LotStatus::operational($lot))
+    @php($financial = \App\Services\LotStatus::financial($lot))
+    @php($steps = \App\Services\LotStatus::steps($lot))
+    <section class="panel">
+        <div class="panel-head"><h2>Where this lot stands</h2>
+            <span><span class="badge badge-{{ $operational['tone'] }}">Goods: {{ $operational['label'] }}</span> <span class="badge badge-{{ $financial['tone'] }}">Books: {{ $financial['label'] }}</span></span></div>
+        <div class="panel-body">
+            @foreach (\App\Services\LotStatus::flags($lot) as $flag)<p class="muted">⚠ {{ $flag }}</p>@endforeach
+            <ol class="steps">
+                @foreach ($steps as $s)
+                    <li>{{ $s['done'] ? '✓' : '○' }} <a href="{{ $s['link'] }}">{{ $s['label'] }}</a>@unless ($s['done']) <span class="muted">— {{ $s['hint'] }}</span>@endunless</li>
+                @endforeach
+            </ol>
+        </div>
+    </section>
+    @endif
+
     @include('sourcing.lots.tabs.'.$tab)
 </x-layout>

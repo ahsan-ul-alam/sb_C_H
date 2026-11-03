@@ -49,6 +49,36 @@ class PendingApprovals
         return $items;
     }
 
+    /**
+     * The latest decided items of every type with who decided, when and why.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public static function history(int $limit = 30): array
+    {
+        $rows = [];
+        $push = function (string $title, string $reference, string $status, int $amount, $creator, $decider, $at, ?string $note, ?string $link) use (&$rows) {
+            $rows[] = ['title' => $title, 'reference' => $reference, 'status' => $status, 'amount_text' => Money::format($amount), 'by_name' => $creator?->name, 'decided_by_name' => $decider?->name,
+                'decided_at' => $at?->format('Y-m-d H:i'), 'sort' => $at?->timestamp ?? 0, 'note' => $note, 'link' => $link];
+        };
+        foreach (Expense::with(['creator', 'verifier'])->whereIn('status', ['verified', 'rejected'])->whereNotNull('verified_by')->latest('verified_at')->limit($limit)->get() as $e) {
+            $push($e->category.': '.$e->description, 'Expense #'.$e->id, $e->status, (int) $e->amount, $e->creator, $e->verifier, $e->verified_at, $e->decision_note, route('finance.expenses'));
+        }
+        foreach (AdvanceSettlement::with(['lot', 'supplier', 'creator', 'verifier'])->whereIn('status', ['verified', 'rejected', 'reversed'])->latest('verified_at')->limit($limit)->get() as $s) {
+            $push('Lot '.$s->lot->number.' — '.$s->supplier->name, 'Settlement #'.$s->id, $s->status, (int) $s->amount, $s->creator, $s->verifier, $s->verified_at, $s->decision_note, route('sourcing.advances'));
+        }
+        foreach (CostRecognition::with(['lot', 'creator', 'verifier'])->whereIn('status', ['verified', 'rejected', 'reversed'])->latest('verified_at')->limit($limit)->get() as $c) {
+            $push('Lot '.$c->lot->number.' cost release', 'Release #'.$c->id, $c->status, (int) $c->amount, $c->creator, $c->verifier, $c->verified_at, $c->decision_note, route('sourcing.advances'));
+        }
+        foreach (LoanReceivable::with(['creator', 'verifier'])->whereIn('status', ['verified', 'rejected', 'reversed'])->latest('verified_at')->limit($limit)->get() as $l) {
+            $push('Loan to '.$l->borrower_name, 'Expense #'.$l->expense_id, $l->status, (int) $l->principal, $l->creator, $l->verifier, $l->verified_at, $l->decision_note, route('finance.loans-receivable'));
+        }
+
+        usort($rows, fn ($a, $b) => $b['sort'] <=> $a['sort']);
+
+        return array_slice($rows, 0, $limit);
+    }
+
     public static function count(): int
     {
         return Expense::where('status', 'pending')->count() + AdvanceSettlement::where('status', 'pending')->count()

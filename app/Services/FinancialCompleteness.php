@@ -98,6 +98,9 @@ class FinancialCompleteness
         if ($missing->isNotEmpty()) {
             $blockers[] = 'Record the arrival (quantity received and date) of: '.$missing->implode(', ').'.';
         }
+        if (($prepaid = CostRecognitionService::unconfirmedPrepayments($lot)) > 0) {
+            $blockers[] = 'Transport of '.Money::format($prepaid).' was paid in advance: confirm the service was done.';
+        }
         // A lot paid by supplier advance is financially complete only when every advance has been settled against accepted goods
         // (or refunded or credited) and the goods' acceptance is documented. Until then the advance is simply an asset of a live lot.
         if ($lot->payments()->whereHas('expense', fn ($q) => $q->where('classification', 'supplier_advance'))->exists()) {

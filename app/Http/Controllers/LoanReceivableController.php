@@ -43,7 +43,7 @@ class LoanReceivableController extends Controller
     {
         $approve = $request->input('decision') === 'verify';
 
-        return $this->attempt(fn () => LoanReceivableService::decide($loan, $approve, $request->user()), $approve ? 'Verified: the expense is now a loan receivable.' : 'Rejected.');
+        return $this->attempt(fn () => LoanReceivableService::decide($loan, $approve, $request->user(), $request->input('reason')), $approve ? 'Verified: the expense is now a loan receivable.' : 'Rejected.');
     }
 
     public function reverse(Request $request, LoanReceivable $loan): RedirectResponse

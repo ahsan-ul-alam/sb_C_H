@@ -16,6 +16,7 @@ use App\Models\SupplierProduct;
 use App\Services\Audit;
 use App\Services\EmergencyFund;
 use App\Services\LotFinancials;
+use App\Services\LotStatus;
 use App\Services\Sourcing;
 use App\Services\SourcingPayments;
 use App\Support\Costing;
@@ -99,13 +100,29 @@ class SourcingLotController extends Controller
     {
         $data = $request->validate(['procurement_status' => ['required', Rule::in(array_keys(SourcingLot::PROCUREMENT))]]);
 
+        return $this->attempt(fn () => LotStatus::moveProcurement($lot, $data['procurement_status']), 'Procurement status updated.');
+    }
+
+    /** A Board member confirms a transport service paid in advance has been done: the prepayment becomes product acquisition cost. */
+    public function confirmService(Request $request, SourcingLotCost $cost): RedirectResponse
+    {
+        $data = $request->validate(['service_on' => ['required', 'date', 'before_or_equal:today']]);
+
+        return $this->attempt(fn () => SourcingPayments::completeService($cost, $data['service_on'], $request->user()), 'Service confirmed: the prepayment is now product acquisition cost (no cash moved).');
+    }
+
+    /** Purchase order number and planned client project, for a lot that does not have them yet (or needs correcting before it closes). */
+    public function details(Request $request, SourcingLot $lot): RedirectResponse
+    {
+        $data = $request->validate(['purchase_order' => ['nullable', 'string', 'max:191'], 'project_id' => ['nullable', 'exists:projects,id']]);
+
         return $this->attempt(function () use ($lot, $data) {
             if ($lot->isClosed()) {
                 throw new \RuntimeException('This lot is '.strtolower($lot->statusLabel()).' and can no longer be changed.');
             }
-            $lot->update(['procurement_status' => $data['procurement_status']]);
-            Audit::log('sourcing.procurement', 'lot '.$lot->number, $data['procurement_status']);
-        }, 'Procurement status updated.');
+            $lot->update(['purchase_order' => ($data['purchase_order'] ?? null) ?: null, 'project_id' => ($data['project_id'] ?? null) ?: null]);
+            Audit::log('sourcing.lot.details', 'lot '.$lot->number, 'PO '.($lot->purchase_order ?? '-').' project '.($lot->project_id ?? '-'));
+        }, 'Purchase order and project saved.');
     }
 
     /** Supporting evidence (supplier invoice, payment slip, delivery note, inspection record) kept on the private disk. */
@@ -187,9 +204,14 @@ class SourcingLotController extends Controller
     {
         $data = $request->validate(['paid_on' => ['required', 'date'], 'financial_account_id' => ['nullable', 'exists:financial_accounts,id']]);
         $payable = $request->input('mode') === 'payable';
+        $prepaid = $request->input('mode') === 'prepaid';
 
-        return $this->attempt(fn () => SourcingPayments::payCost($cost, $data['paid_on'], $request->user(), $data['financial_account_id'] ?? null, $payable),
-            $payable ? 'Recorded as a payable (cost incurred, not yet paid); a Board member verifies it, and it is paid later under Expenses.' : 'Payment recorded; a Board member verifies it before money leaves the account.');
+        return $this->attempt(fn () => SourcingPayments::payCost($cost, $data['paid_on'], $request->user(), $data['financial_account_id'] ?? null, $payable, $prepaid),
+            match (true) {
+                $prepaid => 'Recorded as transport paid in advance (a prepayment); a Board member verifies it, then confirms the service when it is done.',
+                $payable => 'Recorded as a payable (cost incurred, not yet paid); a Board member verifies it, and it is paid later under Expenses.',
+                default => 'Payment recorded; a Board member verifies it before money leaves the account.',
+            });
     }
 
     public function savePricing(Request $request, SourcingLot $lot): RedirectResponse

@@ -20,6 +20,11 @@ class LoanReceivable extends Model
         return $this->belongsTo(User::class, 'created_by');
     }
 
+    public function verifier(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'verified_by');
+    }
+
     public function expense(): BelongsTo
     {
         return $this->belongsTo(Expense::class);

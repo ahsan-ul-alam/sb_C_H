@@ -50,6 +50,10 @@ class SourcingArrival
             }
             $line->update(['received_quantity' => $received, 'arrived_on' => $arrivedOn, 'usable_quantity' => $accepted]
                 + (trim((string) $reference) !== '' ? ['acceptance_reference' => trim((string) $reference)] : []));
+            // Once every line has an arrival on record the goods have arrived (the operational step follows the facts).
+            if (! $lot->lines()->whereNull('received_quantity')->exists() && $lot->procurement_status !== 'arrived') {
+                $lot->update(['procurement_status' => 'arrived']);
+            }
             if ($usableChanged && $lot->status === 'priced') {
                 $lot->update(['status' => 'costing', 'priced_by' => null]);
             }

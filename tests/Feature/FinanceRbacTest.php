@@ -11,6 +11,8 @@ use App\Models\Payout;
 use App\Models\PolicyVersion;
 use App\Models\User;
 use App\Services\ProfitAllocator;
+
+require_once __DIR__.'/../Support/helpers.php';
 use Database\Seeders\DatabaseSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 

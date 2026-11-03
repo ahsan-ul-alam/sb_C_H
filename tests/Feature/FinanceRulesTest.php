@@ -13,31 +13,15 @@ use App\Services\ProfitAllocator;
 use Database\Seeders\DatabaseSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
+require_once __DIR__.'/../Support/helpers.php';
+
 uses(RefreshDatabase::class);
-
-function financeUser(string $role): User
-{
-    $user = User::firstOrCreate(['email' => $role.'@x.test'], ['name' => $role, 'password' => 'password-123']);
-    if ($user->wasRecentlyCreated) {
-        $user->setRoles([$role]);
-    }
-
-    return $user;
-}
 
 beforeEach(function () {
     config(['admin.email' => 'admin@x.test', 'admin.password' => 'password-123']);
     $this->seed(DatabaseSeeder::class);
     $this->policy = PolicyVersion::first();
 });
-
-function signPolicy(PolicyVersion $policy, bool $profitConfirmed = true): void
-{
-    $policy->update(['effective_from' => '2020-01-01', 'approved_at' => now(), 'signed_reference' => 'RES-1', 'approved_by' => financeUser('board_member')->id]);
-    if ($profitConfirmed) {
-        $policy->update(['profit_confirmed_at' => now(), 'profit_signed_reference' => 'RES-2']);
-    }
-}
 
 it('has exactly three active founders with independent ratios', function () {
     expect(Partner::where('status', 'active')->count())->toBe(3)

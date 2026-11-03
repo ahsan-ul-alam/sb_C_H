@@ -181,9 +181,9 @@ class SourcingPayments
     /**
      * Pay a recorded ACTUAL cost (transport, VAT, ...). Creates its expense once; a rejected expense lets it be paid again.
      */
-    public static function payCost(SourcingLotCost $cost, string $paidOn, User $user, ?int $accountId = null, bool $asPayable = false): void
+    public static function payCost(SourcingLotCost $cost, string $paidOn, User $user, ?int $accountId = null, bool $asPayable = false, bool $prepaid = false): void
     {
-        DB::transaction(function () use ($cost, $paidOn, $user, $accountId, $asPayable) {
+        DB::transaction(function () use ($cost, $paidOn, $user, $accountId, $asPayable, $prepaid) {
             $lot = SourcingLot::whereKey($cost->sourcing_lot_id)->lockForUpdate()->firstOrFail();
             $cost = SourcingLotCost::with('expense')->findOrFail($cost->id);
             if ($lot->isClosed()) {
@@ -196,17 +196,59 @@ class SourcingPayments
                 throw new RuntimeException($cost->isPaid() ? 'This cost is already paid.' : 'This cost is already recorded as a payable; pay it under Expenses → Payments.');
             }
             $accrual = SourcingBasis::accrualOn($paidOn);
-            if ($asPayable && ! $accrual) {
-                throw new RuntimeException('Recording a cost as a payable needs the accrual sourcing basis; under the cash basis a cost is recorded when it is paid.');
+            if (($asPayable || $prepaid) && ! $accrual) {
+                throw new RuntimeException('Recording a cost as a payable or a prepayment needs the accrual sourcing basis; under the cash basis a cost is recorded when it is paid.');
+            }
+            if ($asPayable && $prepaid) {
+                throw new RuntimeException('A cost is either paid in advance or incurred and unpaid, not both.');
             }
             $expense = self::expenseFor('Sourcing: '.$cost->category, $lot->number.($cost->description ? ' — '.$cost->description : ''), $cost->amount, $paidOn, $user,
                 ['sourcing' => true, 'lot_ok' => self::pricingApproved($lot), 'unexpected' => $cost->is_unexpected],
                 // Accrual basis: a transport/loading/handling cost is part of the product's acquisition cost (inventory), not an expense. Paid now:
                 // Dr inventory / Cr cash account (even if the service is still to come: the cost stays in inventory, never in profit). Incurred but
                 // unpaid: Dr inventory / Cr payable, paid later through the normal expense payment, which cannot deduct cash twice.
-                $accrual ? ['classification' => 'acquisition', 'financial_account_id' => $accountId, 'payment_status' => $asPayable ? 'unpaid' : 'paid', 'vendor' => $cost->payee] : ($accountId ? ['financial_account_id' => $accountId] : []));
+                // Paid BEFORE the service: Dr transport prepayment / Cr cash, until the service is confirmed (completeService).
+                $accrual ? ['classification' => $prepaid ? 'transport_prepayment' : 'acquisition', 'financial_account_id' => $accountId, 'payment_status' => $asPayable ? 'unpaid' : 'paid', 'vendor' => $cost->payee] : ($accountId ? ['financial_account_id' => $accountId] : []));
             $cost->update(['expense_id' => $expense->id]);
             Audit::log('sourcing.cost_paid', 'lot '.$lot->number, $cost->category.' '.$cost->amount.($expense->auto_policy_id ? ' (auto-verified, policy #'.$expense->auto_policy_id.')' : ''));
+        });
+    }
+
+    /**
+     * The transport (or handling) service paid in advance has been performed: its cost moves from the prepayment into the product's acquisition
+     * cost, Dr inventory / Cr transport prepayment. No cash moves. Confirmed by someone other than the person who recorded the payment and
+     * holding the Board's approval right; done once; never in a closed month.
+     */
+    public static function completeService(SourcingLotCost $cost, string $on, User $user): void
+    {
+        DB::transaction(function () use ($cost, $on, $user) {
+            $lot = SourcingLot::whereKey($cost->sourcing_lot_id)->lockForUpdate()->firstOrFail();
+            $cost = SourcingLotCost::with('expense')->whereKey($cost->id)->lockForUpdate()->firstOrFail();
+            $expense = $cost->expense;
+            if (! $expense || $expense->classification !== 'transport_prepayment' || $expense->status !== 'verified') {
+                throw new RuntimeException('Only a verified advance payment for transport can be confirmed as a completed service.');
+            }
+            if ($cost->service_completed_on !== null) {
+                throw new RuntimeException('This service has already been confirmed.');
+            }
+            if (! $user->can('sourcing.advance.approve') || $expense->created_by === $user->id) {
+                throw new RuntimeException('The service must be confirmed by a Board member other than the person who recorded the payment.');
+            }
+            if ($on > today()->toDateString() || $on < $expense->spent_on->toDateString()) {
+                throw new RuntimeException('The service date must be between the payment date and today.');
+            }
+            if (AccountingService::isClosed($on)) {
+                throw new RuntimeException('That month is already closed; confirm the service in an open month.');
+            }
+            $amount = (int) $expense->amount - (int) Expense::where('reverses_id', $expense->id)->where('status', 'verified')->sum('amount');
+            if ($amount <= 0) {
+                throw new RuntimeException('This prepayment has been refunded; there is no cost to move.');
+            }
+            Ledger::post($on, 'Transport service done, prepayment moved into acquisition cost: lot '.$lot->number, 'transport_service', $cost->id, [
+                ['assets.inventory', null, $amount, 0], ['assets.transport_prepaid', null, 0, $amount],
+            ], $user->id);
+            $cost->update(['service_completed_on' => $on]);
+            Audit::log('sourcing.transport_service_done', 'lot '.$lot->number, $cost->category.' '.$amount);
         });
     }
 }

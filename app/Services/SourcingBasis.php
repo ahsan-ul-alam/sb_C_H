@@ -11,7 +11,7 @@ use Carbon\CarbonImmutable;
 class SourcingBasis
 {
     /** Expense classifications that are balance-sheet assets (never an expense) until cost is recognised. */
-    public const ASSET_CLASSIFICATIONS = ['supplier_advance', 'acquisition'];
+    public const ASSET_CLASSIFICATIONS = ['supplier_advance', 'acquisition', 'transport_prepayment'];
 
     public static function accrualFrom(): ?string
     {

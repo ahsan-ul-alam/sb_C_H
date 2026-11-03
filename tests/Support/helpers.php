@@ -2,7 +2,33 @@
 
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
+use App\Models\PolicyVersion;
+use App\Models\User;
 use Illuminate\Support\Facades\DB;
+
+if (! function_exists('financeUser')) {
+    /** A user holding one role, created once per test database. */
+    function financeUser(string $role): User
+    {
+        $user = User::firstOrCreate(['email' => $role.'@x.test'], ['name' => $role, 'password' => 'password-123']);
+        if ($user->wasRecentlyCreated) {
+            $user->setRoles([$role]);
+        }
+
+        return $user;
+    }
+}
+
+if (! function_exists('signPolicy')) {
+    /** The Board has signed the policy (and, optionally, its profit ratio) so live allocations are possible. */
+    function signPolicy(PolicyVersion $policy, bool $profitConfirmed = true): void
+    {
+        $policy->update(['effective_from' => '2020-01-01', 'approved_at' => now(), 'signed_reference' => 'RES-1', 'approved_by' => financeUser('board_member')->id]);
+        if ($profitConfirmed) {
+            $policy->update(['profit_confirmed_at' => now(), 'profit_signed_reference' => 'RES-2']);
+        }
+    }
+}
 
 if (! function_exists('dr')) {
     /** Debit-minus-credit of a ledger account straight from the journal rows (independent of the app's own balance helpers). */

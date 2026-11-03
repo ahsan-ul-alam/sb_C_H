@@ -2,6 +2,17 @@
 @php($quantities = \App\Services\ProjectSourcingReport::quantities($f))
 <p class="muted">Operational status (where the goods are) is separate from the financial position: moving a lot to "Arrived" records nothing in the books. Money moves only when payments, settlements and costs are recorded and verified.</p>
 
+@can('sourcing.manage') @unless ($lot->isClosed())
+<section class="panel">
+    <div class="panel-head"><h2>Purchase order and client project</h2></div>
+    <form method="POST" action="{{ route('sourcing.lots.details', $lot) }}" class="panel-body inline-form">@csrf
+        <input name="purchase_order" value="{{ old('purchase_order', $lot->purchase_order) }}" maxlength="60" placeholder="Purchase order number">
+        <select name="project_id"><option value="">No client project</option>@foreach (\App\Models\Project::whereNull('archived_at')->orderBy('name')->get(['id', 'name']) as $p)<option value="{{ $p->id }}" @selected($lot->project_id === $p->id)>{{ $p->name }}</option>@endforeach</select>
+        <button class="btn btn-primary">Save</button>
+    </form>
+</section>
+@endunless @endcan
+
 <section class="panel">
     <div class="panel-head"><h2>Procurement status</h2><span class="strong">{{ \App\Models\SourcingLot::PROCUREMENT[$lot->procurement_status] ?? $lot->procurement_status }}</span></div>
     @can('sourcing.manage') @unless ($lot->isClosed())

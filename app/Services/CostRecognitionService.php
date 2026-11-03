@@ -37,7 +37,22 @@ class CostRecognitionService
         $costs = (int) (clone $capitalised)->sum('amount');
         $corrections = (int) Expense::whereIn('reverses_id', (clone $capitalised)->pluck('id'))->where('status', 'verified')->sum('amount');
 
-        return $settled + $costs - $corrections;
+        // Transport paid in advance counts as product cost only once the service is confirmed (until then it is a prepayment).
+        $prepaid = 0;
+        foreach ($lot->costs()->whereNotNull('service_completed_on')->whereNotNull('expense_id')->with('expense')->get() as $c) {
+            if ($c->expense?->classification === 'transport_prepayment' && $c->expense->status === 'verified') {
+                $prepaid += (int) $c->expense->amount - (int) Expense::where('reverses_id', $c->expense->id)->where('status', 'verified')->sum('amount');
+            }
+        }
+
+        return $settled + $costs - $corrections + $prepaid;
+    }
+
+    /** Transport paid in advance whose service has not been confirmed yet (still a prepayment, not product cost). */
+    public static function unconfirmedPrepayments(SourcingLot $lot): int
+    {
+        return (int) $lot->costs()->whereNull('service_completed_on')->whereNotNull('expense_id')->with('expense')->get()
+            ->filter(fn ($c) => $c->expense?->classification === 'transport_prepayment' && $c->expense->status === 'verified')->sum(fn ($c) => (int) $c->expense->amount);
     }
 
     /** Capitalised cost of the lot not yet released into profit. */
@@ -68,6 +83,9 @@ class CostRecognitionService
         }
         if ($lot->lines()->whereNotNull('received_quantity')->whereRaw("COALESCE(acceptance_reference, '') = ''")->exists()) {
             $obstacles[] = 'Not every received line has the supplier documentation reference.';
+        }
+        if (self::unconfirmedPrepayments($lot) > 0) {
+            $obstacles[] = 'Transport paid in advance has not been confirmed as done.';
         }
         if (AdvanceSettlementService::unsettled($lot) > 0) {
             $obstacles[] = 'A supplier advance is still unsettled (settle it against accepted goods, or have it refunded or credited).';
@@ -113,9 +131,12 @@ class CostRecognitionService
         }
     }
 
-    public static function decide(CostRecognition $recognition, bool $approve, User $user): void
+    public static function decide(CostRecognition $recognition, bool $approve, User $user, ?string $note = null): void
     {
-        DB::transaction(function () use ($recognition, $approve, $user) {
+        if (! $approve && trim((string) $note) === '') {
+            throw new RuntimeException('Give a reason for rejecting.');
+        }
+        DB::transaction(function () use ($recognition, $approve, $user, $note) {
             $lot = SourcingLot::whereKey($recognition->sourcing_lot_id)->lockForUpdate()->firstOrFail();
             $recognition = CostRecognition::whereKey($recognition->id)->lockForUpdate()->firstOrFail();
             if ($recognition->status !== 'pending') {
@@ -138,7 +159,7 @@ class CostRecognitionService
                     ['expense', null, (int) $recognition->amount, 0], ['assets.inventory', null, 0, (int) $recognition->amount],
                 ], $user->id);
             }
-            $recognition->update(['status' => $approve ? 'verified' : 'rejected', 'verified_by' => $user->id, 'verified_at' => now(), 'active_lot_id' => $approve ? $lot->id : null]);
+            $recognition->update(['status' => $approve ? 'verified' : 'rejected', 'verified_by' => $user->id, 'verified_at' => now(), 'active_lot_id' => $approve ? $lot->id : null, 'decision_note' => trim((string) $note) ?: null]);
             Audit::log('sourcing.cost_recognition_'.($approve ? 'verified' : 'rejected'), 'lot '.$lot->number, (string) $recognition->amount);
         });
     }

@@ -54,9 +54,12 @@ class LoanReceivableService
         });
     }
 
-    public static function decide(LoanReceivable $loan, bool $approve, User $user): void
+    public static function decide(LoanReceivable $loan, bool $approve, User $user, ?string $note = null): void
     {
-        DB::transaction(function () use ($loan, $approve, $user) {
+        if (! $approve && trim((string) $note) === '') {
+            throw new RuntimeException('Give a reason for rejecting.');
+        }
+        DB::transaction(function () use ($loan, $approve, $user, $note) {
             $expense = Expense::whereKey($loan->expense_id)->lockForUpdate()->firstOrFail();
             $loan = LoanReceivable::whereKey($loan->id)->lockForUpdate()->firstOrFail();
             if ($loan->status !== 'pending') {
@@ -70,7 +73,7 @@ class LoanReceivableService
                     ['expense', null, 0, (int) $loan->principal],
                 ], $user->id);
             }
-            $loan->update(['status' => $approve ? 'verified' : 'rejected', 'verified_by' => $user->id, 'verified_at' => now()]);
+            $loan->update(['status' => $approve ? 'verified' : 'rejected', 'verified_by' => $user->id, 'verified_at' => now(), 'decision_note' => trim((string) $note) ?: null]);
             Audit::log('loanrec.'.($approve ? 'verified' : 'rejected'), 'loan receivable '.$loan->id, 'expense '.$expense->id);
         });
     }

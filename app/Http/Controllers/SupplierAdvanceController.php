@@ -54,7 +54,7 @@ class SupplierAdvanceController extends Controller
     {
         $approve = $request->input('decision') === 'verify';
 
-        return $this->attempt(fn () => AdvanceSettlementService::decide($settlement, $approve, $request->user()), $approve ? 'Verified: the advance is now product acquisition cost (no cash moved).' : 'Rejected.');
+        return $this->attempt(fn () => AdvanceSettlementService::decide($settlement, $approve, $request->user(), $request->input('reason')), $approve ? 'Verified: the advance is now product acquisition cost (no cash moved).' : 'Rejected.');
     }
 
     public function reverse(Request $request, AdvanceSettlement $settlement): RedirectResponse
@@ -75,7 +75,7 @@ class SupplierAdvanceController extends Controller
     {
         $approve = $request->input('decision') === 'verify';
 
-        return $this->attempt(fn () => CostRecognitionService::decide($recognition, $approve, $request->user()), $approve ? 'Verified: the lot\'s cost now reaches profit (no cash moved).' : 'Rejected.');
+        return $this->attempt(fn () => CostRecognitionService::decide($recognition, $approve, $request->user(), $request->input('reason')), $approve ? 'Verified: the lot\'s cost now reaches profit (no cash moved).' : 'Rejected.');
     }
 
     public function reverseRecognition(Request $request, CostRecognition $recognition): RedirectResponse
