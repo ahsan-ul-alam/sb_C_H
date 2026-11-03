@@ -55,6 +55,9 @@ class ProjectSourcingReport
             }
         }
         foreach ($projects as &$p) {
+            // "cost" includes estimates for costs not incurred yet; "actual_cost" is only what has really been incurred up to arrival.
+            $p['actual_cost'] = $p['cost'] - $p['estimates_open'];
+            $p['supplier_payable'] = $p['supplier_outstanding']; // owed, whether or not it has been paid yet: an incurred cost never waits for payment
             $p['estimated_margin'] = $p['agreed'] - $p['cost'];
             $p['client_outstanding'] = $p['agreed'] - $p['received'];
             $p['receivable'] = $p['billed'] - $p['received'];

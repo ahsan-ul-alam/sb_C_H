@@ -93,6 +93,7 @@ class ProfitAllocator
             throw new RuntimeException('The period must be verified by the Board before allocation.');
         }
         IntegrityGate::assertClear('allocate profit');
+        FinancialCompleteness::assertMonthComplete($period->month, 'allocate the profit of');
         if ($period->net_profit === 0) {
             throw new RuntimeException('Net profit is zero; there is nothing to distribute.');
         }

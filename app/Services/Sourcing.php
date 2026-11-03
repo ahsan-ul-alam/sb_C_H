@@ -419,6 +419,9 @@ class Sourcing
             if ($lot->fundRequests()->whereIn('status', ['pending', 'approved'])->exists()) {
                 throw new RuntimeException('Resolve the open Emergency Fund request first.');
             }
+            if ($blockers = FinancialCompleteness::lotBlockers($lot)) {
+                throw new RuntimeException('A lot cannot be financially finalised without its arrival on record. '.$blockers[0]);
+            }
             $lot->update(['status' => 'settled', 'settled_by' => $user->id, 'settled_at' => now()]);
             self::log($lot, 'settled', 'profit '.$f['profit']);
         });

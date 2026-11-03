@@ -15,6 +15,7 @@ use App\Services\Ledger;
 use App\Services\LotFinancials;
 use App\Services\ProfitAllocator;
 use App\Services\Sourcing;
+use App\Services\SourcingArrival;
 use App\Services\SourcingObligations;
 use App\Services\SourcingPayments;
 use App\Support\Costing;
@@ -238,6 +239,11 @@ it('settles only when payables are cleared and records an audited reopen', funct
     expect(fn () => Sourcing::settle($lot, $finance))->toThrow(RuntimeException::class);
 
     SourcingPayments::recordSupplierPayment($lot, ['supplier_id' => $lot->lines->first()->supplier_id, 'amount' => 5000, 'paid_on' => today()->toDateString()], $finance);
+    // Paid and cleared, but financial finalisation also needs the goods' arrival on record.
+    expect(fn () => Sourcing::settle($lot, $finance))->toThrow(RuntimeException::class, 'arrival');
+    foreach ($lot->lines as $line) {
+        SourcingArrival::record($line, (string) $line->quantity, null, today()->toDateString(), $finance);
+    }
     Sourcing::settle($lot, $finance);
     expect($lot->refresh()->status)->toBe('settled');
     expect(fn () => Sourcing::addCost($lot, ['category' => 'x', 'amount' => 1, 'kind' => 'actual', 'incurred_on' => '2026-01-01'], $finance))->toThrow(RuntimeException::class);

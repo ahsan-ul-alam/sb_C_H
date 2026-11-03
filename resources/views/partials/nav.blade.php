@@ -33,6 +33,7 @@
             ['Investments', 'finance.capital', 'finance.view', 'cash', ['finance.capital*']],
             ['Expenses', 'finance.expenses', 'finance.view', 'wallet', ['finance.expenses*', 'finance.cost-allocation', 'finance.expense-payments']],
             ['Loans', 'finance.loans', 'finance.view', 'cash', ['finance.loans*']],
+            ['Financial Completeness', 'finance.completeness', 'finance.view', 'cash', ['finance.completeness*']],
             ['Account Statements', 'finance.statements', 'finance.view', 'cash', ['finance.statements*']],
             ['Loans Receivable', 'finance.loans-receivable', 'finance.view', 'cash', ['finance.loans-receivable*']],
             ['Other Income', 'finance.other-income', 'finance.view', 'cash', ['finance.other-income*']],

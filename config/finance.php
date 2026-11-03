@@ -34,4 +34,13 @@ return [
     */
     'tax_rate_bps' => env('FINANCE_TAX_RATE_BPS'),
 
+    /*
+    | First month (YYYY-MM) from which a customer receipt that nobody has classified (service, product sourcing, other) blocks the
+    | close and verification of its month. A receipt classified as product sourcing without a sourcing record blocks its month
+    | regardless of this setting. The default is the month the ledger began (2026-10), so that no month can be closed on top of
+    | unexplained receipts by default; classify the receipts under Finance > Financial Completeness. Set the variable to an empty
+    | value to only REPORT unclassified receipts (the automated test suite does this).
+    */
+    'completeness_from' => env('FINANCE_COMPLETENESS_FROM', '2026-10'),
+
 ];

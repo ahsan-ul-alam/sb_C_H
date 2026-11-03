@@ -11,6 +11,7 @@ use App\Models\Payment;
 use App\Models\Payout;
 use App\Models\Supplier;
 use App\Models\SupplierPayment;
+use App\Services\SourcingArrival;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
 use Tests\Support\SellbeesCompany;
@@ -113,6 +114,10 @@ it('runs a two-month company through the controllers and reconciles every taka',
     // Ordinary February spending: 21,000 of operating costs.
     $co->expense('Utilities & marketing', 'February operating costs', '21000', '2026-02-20');
     expect($co->verifyAllExpenses())->toBe(6); // the Board verifies the six sourcing expenses
+    $co->post('finance', 'sourcing.lots.settle', [], $lot->refresh())->assertSessionHas('error'); // goods not yet on record as arrived
+    foreach ($lot->refresh()->lines as $line) {
+        SourcingArrival::record($line, (string) $line->quantity, null, today()->toDateString(), $co->users['finance']);
+    }
     $co->post('finance', 'sourcing.lots.settle', [], $lot->refresh())->assertSessionHasNoErrors();
     expect($lot->refresh()->status)->toBe('settled');
 

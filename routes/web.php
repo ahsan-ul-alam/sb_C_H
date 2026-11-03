@@ -13,6 +13,7 @@ use App\Http\Controllers\ExpensePaymentController;
 use App\Http\Controllers\FaviconController;
 use App\Http\Controllers\FinanceController;
 use App\Http\Controllers\FinancialAccountController;
+use App\Http\Controllers\FinancialCompletenessController;
 use App\Http\Controllers\FinancialOverviewController;
 use App\Http\Controllers\FinancialStatementsController;
 use App\Http\Controllers\HomeController;
@@ -200,6 +201,7 @@ Route::middleware('auth')->group(function () {
             Route::get('loans', [LoanController::class, 'index'])->name('loans');
             Route::get('loans-receivable', [LoanReceivableController::class, 'index'])->name('loans-receivable');
             Route::get('statements', [StatementController::class, 'index'])->name('statements');
+            Route::get('completeness', [FinancialCompletenessController::class, 'index'])->name('completeness');
             Route::get('other-income', [OtherIncomeController::class, 'index'])->name('other-income');
             Route::get('reconciliation', [ReconciliationController::class, 'index'])->name('reconciliation');
             Route::get('reconciliation.csv', [ReconciliationController::class, 'csv'])->name('reconciliation.csv');
@@ -242,6 +244,7 @@ Route::middleware('auth')->group(function () {
         Route::post('loans/{loan}/interest', [LoanController::class, 'interest'])->name('loans.interest')->middleware('can:loan.record');
         Route::post('loan-entries/{entry}/decide', [LoanController::class, 'decide'])->name('loans.entries.decide')->middleware('can:loan.verify');
         Route::post('loan-entries/{entry}/reverse', [LoanController::class, 'reverse'])->name('loans.entries.reverse')->middleware('can:loan.verify');
+        Route::post('completeness/payments/{payment}/classify', [FinancialCompletenessController::class, 'classify'])->name('completeness.classify')->middleware('can:reconcile.review');
         Route::post('statements', [StatementController::class, 'store'])->name('statements.store')->middleware('can:account.manage');
         Route::post('statements/{statement}/decide', [StatementController::class, 'decide'])->name('statements.decide')->middleware('can:reconcile.review');
         Route::post('loans-receivable', [LoanReceivableController::class, 'store'])->name('loans-receivable.store')->middleware('can:loan.record');

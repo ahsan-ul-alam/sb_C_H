@@ -8,15 +8,15 @@
     <section class="panel">
         <div class="panel-head"><h2>By project</h2></div>
         <div class="table-wrap"><table class="table table-min-640">
-            <thead><tr><th>Project</th><th class="num">Agreed</th><th class="num">Billed</th><th class="num">Received</th><th class="num">Client outstanding</th><th class="num">Acquisition cost</th><th class="num">Supplier paid</th><th class="num">Supplier outstanding</th><th class="num">Costs unpaid</th><th class="num">Estimated margin</th><th class="num">Recognised margin</th><th class="num">Cash surplus</th></tr></thead>
+            <thead><tr><th>Project</th><th class="num">Agreed</th><th class="num">Billed</th><th class="num">Client received</th><th class="num">Client due</th><th class="num">Actual acquisition cost</th><th class="num">Open estimates</th><th class="num">Supplier paid</th><th class="num">Supplier payable</th><th class="num">Costs unpaid</th><th class="num">Estimated margin</th><th class="num">Recognised margin</th><th class="num">Cash surplus</th></tr></thead>
             <tbody>
             @forelse ($projects as $id => $p)
                 <tr><td>{{ $names[$id]->name ?? ('#'.$id) }} <span class="muted">{{ $names[$id]->client->name ?? '' }}</span></td>
                     <td class="num">{{ Money::format($p['agreed']) }}</td><td class="num">{{ Money::format($p['billed']) }}</td><td class="num">{{ Money::format($p['received']) }}</td><td class="num">{{ Money::format($p['client_outstanding']) }}</td>
-                    <td class="num">{{ Money::format($p['cost']) }}</td><td class="num">{{ Money::format($p['supplier_paid']) }}</td><td class="num">{{ Money::format($p['supplier_outstanding']) }}</td><td class="num">{{ Money::format($p['costs_unpaid']) }}</td>
+                    <td class="num">{{ Money::format($p['actual_cost']) }}</td><td class="num">{{ Money::format($p['estimates_open']) }}</td><td class="num">{{ Money::format($p['supplier_paid']) }}</td><td class="num">{{ Money::format($p['supplier_payable']) }}</td><td class="num">{{ Money::format($p['costs_unpaid']) }}</td>
                     <td class="num strong">{{ Money::format($p['estimated_margin']) }}</td><td class="num">{{ Money::format($p['recognised_margin']) }}</td><td class="num">{{ Money::format($p['cash_surplus']) }}</td></tr>
             @empty
-                <tr><td colspan="12" class="muted">No lot is allocated to a project yet, so there is no product-sourcing margin to report.</td></tr>
+                <tr><td colspan="13" class="muted">No lot is allocated to a project yet, so there is no product-sourcing margin to report.</td></tr>
             @endforelse
             </tbody>
         </table></div>

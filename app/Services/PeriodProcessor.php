@@ -27,6 +27,7 @@ class PeriodProcessor
             throw new RuntimeException('This month is already closed.');
         }
         IntegrityGate::assertClear('close '.$month); // a month is never frozen on top of an unexplained difference
+        FinancialCompleteness::assertMonthComplete($month, 'close'); // nor on top of receipts that have no sourcing record
         PrepaidService::releaseDue($month, $user?->id); // the month's share of prepaid costs is part of its ledger, never optional
         $f = FinancialStatements::monthFigures($month);
         if ($f['pending'] > 0) {
@@ -63,6 +64,7 @@ class PeriodProcessor
             if (! $user && ! $authority) {
                 throw new RuntimeException('A system verification needs the standing policy that authorises it.');
             }
+            FinancialCompleteness::assertMonthComplete($period->month, 'verify the profit of');
             $period->update(['status' => 'verified', 'verified_by' => $user?->id, 'verified_at' => now()]);
             Audit::log('period.verified', $period->month, $authority ? 'SYSTEM under standing policy #'.$authority->id : null);
         });
