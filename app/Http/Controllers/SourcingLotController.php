@@ -223,6 +223,7 @@ class SourcingLotController extends Controller
         $data = $request->validate([
             'supplier_id' => ['required', 'exists:suppliers,id'], 'amount' => ['required', 'regex:'.Money::AMOUNT_REGEX], 'paid_on' => ['required', 'date'],
             'method' => ['nullable', 'string', 'max:30'], 'reference' => ['nullable', 'string', 'max:255'], 'notes' => ['nullable', 'string', 'max:255'], 'idempotency_key' => ['nullable', 'string', 'max:64'],
+            'purchase_order' => ['nullable', 'string', 'max:191'], 'evidence_reference' => ['nullable', 'string', 'max:191'], 'financial_account_id' => ['nullable', 'exists:financial_accounts,id'],
         ]);
         $data['amount'] = Money::toMinor($data['amount']);
 

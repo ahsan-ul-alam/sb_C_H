@@ -30,6 +30,18 @@ class Expense extends Model
             ->whereColumn('loan_receivables.expense_id', 'expenses.id')->where('loan_receivables.status', 'verified'));
     }
 
+    /**
+     * Leave out supplier advances and capitalised acquisition costs: they are assets, and reach profit only when their cost is
+     * recognised (CostRecognitionService), never when cash is paid.
+     *
+     * @param  Builder<Expense>  $query
+     * @return Builder<Expense>
+     */
+    public function scopeExcludingSourcingAssets(Builder $query): Builder
+    {
+        return $query->whereNotIn('classification', ['supplier_advance', 'acquisition']);
+    }
+
     public function project(): BelongsTo
     {
         return $this->belongsTo(Project::class);

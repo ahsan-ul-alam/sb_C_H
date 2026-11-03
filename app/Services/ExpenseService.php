@@ -186,7 +186,7 @@ class ExpenseService
     public static function allocate(Expense $expense, array $amountsByProject): void
     {
         $amountsByProject = array_filter($amountsByProject, fn ($a) => $a > 0);
-        if ($expense->status !== 'verified' || $expense->reverses_id || in_array($expense->classification, ['direct', 'asset', 'prepaid'], true)) {
+        if ($expense->status !== 'verified' || $expense->reverses_id || in_array($expense->classification, ['direct', 'asset', 'prepaid', 'supplier_advance', 'acquisition'], true)) {
             throw new RuntimeException('Only a verified shared (operating, other or tax) expense can be split across projects.');
         }
         if (array_sum($amountsByProject) > $expense->amount) {

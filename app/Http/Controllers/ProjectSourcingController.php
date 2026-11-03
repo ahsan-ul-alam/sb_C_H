@@ -26,8 +26,9 @@ class ProjectSourcingController extends Controller
     {
         $data = $request->validate([
             'received_quantity' => ['required', 'regex:/^\d{1,12}(\.\d{1,2})?$/'], 'accepted_quantity' => ['nullable', 'regex:/^\d{1,12}(\.\d{1,2})?$/'], 'arrived_on' => ['required', 'date', 'before_or_equal:today'],
+            'acceptance_reference' => ['nullable', 'string', 'max:191'],
         ]);
 
-        return $this->attempt(fn () => SourcingArrival::record($line, $data['received_quantity'], $data['accepted_quantity'] ?? null, $data['arrived_on'], $request->user()), 'Arrival recorded.');
+        return $this->attempt(fn () => SourcingArrival::record($line, $data['received_quantity'], $data['accepted_quantity'] ?? null, $data['arrived_on'], $request->user(), $data['acceptance_reference'] ?? null), 'Arrival recorded.');
     }
 }

@@ -27,7 +27,7 @@ use App\Support\Costing;
  */
 class ProjectSourcingReport
 {
-    private const FIELDS = ['agreed', 'billed', 'received', 'cost', 'supplier_paid', 'supplier_outstanding', 'costs_paid', 'costs_unpaid', 'estimates_open'];
+    private const FIELDS = ['agreed', 'billed', 'received', 'cost', 'supplier_paid', 'supplier_outstanding', 'costs_paid', 'costs_unpaid', 'estimates_open', 'recognised_cost'];
 
     /**
      * @return array{projects: array<int, array<string, mixed>>, lots: list<array<string, mixed>>}
@@ -41,20 +41,29 @@ class ProjectSourcingReport
             $buckets = self::buckets($lot, $figures);
             $lots[] = ['lot' => $lot, 'figures' => $figures, 'buckets' => $buckets, 'quantities' => self::quantities($figures)];
             $done = in_array($lot->status, ['completed', 'settled'], true);
+            // Cash basis (every existing record): a completed lot's margin is recognised in full (proposed policy). Accrual sourcing basis:
+            // only once the Board-approved cost release has been verified, and then against the cost actually released.
+            $accrual = config('finance.sourcing_basis') === 'accrual' && SourcingBasis::accrualFrom() !== null;
+            $recognised = $accrual ? $lot->costRecognitions()->where('status', 'verified')->exists() : $done;
+            // A figure is final only when the lot is finished, every line has arrived, no cost is still an estimate and no advance is held.
+            $final = $done && ! $lot->lines()->whereNull('received_quantity')->exists() && (int) $figures['estimates_open'] === 0 && AdvanceSettlementService::unsettled($lot) === 0;
             foreach ($buckets as $key => $b) {
                 if ($key === 'unallocated') {
                     continue;
                 }
-                $p = $projects[$key] ?? array_fill_keys(self::FIELDS, 0) + ['recognised_margin' => 0, 'lots' => []];
+                $p = $projects[$key] ?? array_fill_keys(self::FIELDS, 0) + ['recognised_margin' => 0, 'lots' => [], 'final' => true];
                 foreach (self::FIELDS as $f) {
                     $p[$f] += $b[$f];
                 }
-                $p['recognised_margin'] += $done ? $b['agreed'] - $b['cost'] : 0;
+                $p['recognised_margin'] += $recognised ? $b['agreed'] - ($accrual ? $b['recognised_cost'] : $b['cost']) : 0;
+                $p['final'] = $p['final'] && $final;
                 $p['lots'][] = $lot->number;
                 $projects[$key] = $p;
             }
         }
         foreach ($projects as &$p) {
+            $p['margin_status'] = $p['final'] ? 'final' : 'provisional'; // never present an incomplete acquisition as a settled profit
+            $p['actual_margin'] = $p['agreed'] - ($p['cost'] - $p['estimates_open']);
             // "cost" includes estimates for costs not incurred yet; "actual_cost" is only what has really been incurred up to arrival.
             $p['actual_cost'] = $p['cost'] - $p['estimates_open'];
             $p['supplier_payable'] = $p['supplier_outstanding']; // owed, whether or not it has been paid yet: an incurred cost never waits for payment
@@ -118,6 +127,7 @@ class ProjectSourcingReport
             'supplier_paid' => (int) $f['supplier_paid'], 'supplier_outstanding' => (int) $f['supplier_outstanding'],
             'costs_paid' => (int) $current->where('kind', 'actual')->filter(fn (SourcingLotCost $c) => $c->isPaid())->sum('amount'),
             'costs_unpaid' => (int) $f['costs_unpaid'], 'estimates_open' => (int) $f['estimates_open'],
+            'recognised_cost' => (int) $lot->costRecognitions()->where('status', 'verified')->sum('amount'),
         ];
         $weights = array_map(fn ($x) => max(0, (int) $x['cost']), $b);
         if (array_sum($weights) <= 0) {
@@ -149,6 +159,10 @@ class ProjectSourcingReport
                 'received' => $received === null ? null : (string) $received,
                 'accepted' => (string) $line->usable_quantity,
                 'not_usable' => bcsub((string) $line->quantity, (string) $line->usable_quantity, 2),
+                // Of what arrived: accepted + rejected = received. Of what was ordered: received + missing = purchased. Unknown until arrival is recorded.
+                'rejected' => $received === null ? null : bcsub((string) $received, (string) $line->usable_quantity, 2),
+                'missing' => $received === null ? null : bcsub((string) $line->quantity, (string) $received, 2),
+                'acceptance_reference' => $line->acceptance_reference,
                 'pending' => $received === null ? null : bcsub((string) $line->quantity, (string) $received, 2),
                 'allocated' => $row['allocated_qty'], 'unallocated' => $row['unallocated_qty'], 'arrived_on' => $line->arrived_on,
             ];

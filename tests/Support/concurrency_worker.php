@@ -5,11 +5,15 @@ use App\Models\LoanReceivable;
 use App\Models\LoanReceivableRepayment;
 use App\Models\Payment;
 use App\Models\Project;
+use App\Models\SourcingLot;
 use App\Models\User;
 use App\Services\AccountingService;
+use App\Services\AdvanceSettlementService;
+use App\Services\CostRecognitionService;
 use App\Services\ExpenseService;
 use App\Services\LoanReceivableService;
 use App\Services\PaymentRecorder;
+use App\Services\SourcingPayments;
 use Illuminate\Contracts\Console\Kernel;
 
 /*
@@ -40,6 +44,10 @@ try {
         'transfer' => AccountingService::transfer(['from' => $args['from'], 'to' => $args['to'], 'amount' => $args['amount'], 'date' => $args['date'], 'idempotency_key' => $args['key']], auth()->user()) !== null,
         'pay_expense' => ExpenseService::pay(Expense::findOrFail($args['expense']), ['amount' => $args['amount'], 'paid_on' => $args['date'], 'idempotency_key' => $args['key']], auth()->user()) !== null,
         'loan_repay' => LoanReceivableService::recordRepayment(LoanReceivable::findOrFail($args['loan']), ['amount' => $args['amount'], 'repaid_on' => $args['date'], 'idempotency_key' => $args['key']], auth()->user()) !== null,
+        'adv_pay' => SourcingPayments::recordSupplierPayment(SourcingLot::findOrFail($args['lot']), ['supplier_id' => $args['supplier'], 'amount' => $args['amount'], 'paid_on' => $args['date'], 'purchase_order' => 'PO-1',
+            'reference' => 'PAY-1', 'evidence_reference' => 'INV-1', 'idempotency_key' => $args['key']], auth()->user()) !== null,
+        'adv_propose' => AdvanceSettlementService::propose(SourcingLot::findOrFail($args['lot']), $args['supplier'], auth()->user())->isNotEmpty(),
+        'cost_propose' => CostRecognitionService::propose(SourcingLot::findOrFail($args['lot']), $args['date'], auth()->user()) !== null,
         'loan_repay_verify' => (function () use ($args) {
             LoanReceivableService::decideRepayment(LoanReceivableRepayment::findOrFail($args['repayment']), true, auth()->user());
 

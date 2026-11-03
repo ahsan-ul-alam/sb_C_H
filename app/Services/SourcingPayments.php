@@ -47,7 +47,7 @@ class SourcingPayments
     }
 
     /**
-     * @param  array{supplier_id: int, amount: int, paid_on: string, method?: ?string, reference?: ?string, notes?: ?string, idempotency_key?: ?string}  $data
+     * @param  array{supplier_id: int, amount: int, paid_on: string, method?: ?string, reference?: ?string, notes?: ?string, idempotency_key?: ?string, purchase_order?: ?string, evidence_reference?: ?string, financial_account_id?: ?int}  $data
      * @return SupplierPayment|null null when the same submission was already recorded
      */
     public static function recordSupplierPayment(SourcingLot $lot, array $data, User $user): ?SupplierPayment
@@ -72,11 +72,22 @@ class SourcingPayments
                 if ($data['amount'] > $payable - $paid) {
                     throw new RuntimeException('Payment exceeds what this lot owes the supplier ('.Money::format(max(0, $payable - $paid)).' outstanding).');
                 }
+                // Accrual basis (forward-only, Board-approved): the payment is a SUPPLIER ADVANCE, an asset, and must say what it paid for.
+                $advance = SourcingBasis::accrualOn($data['paid_on']);
+                if ($advance) {
+                    foreach (['purchase_order' => 'the purchase order', 'reference' => 'the payment reference', 'evidence_reference' => 'the supporting evidence (supplier invoice, proforma or payment slip)'] as $field => $label) {
+                        if (trim((string) ($data[$field] ?? '')) === '') {
+                            throw new RuntimeException('A supplier advance needs '.$label.'.');
+                        }
+                    }
+                }
                 $expense = self::expenseFor('Sourcing: supplier payment', $lot->number.' — supplier #'.$supplierId.($data['reference'] ?? null ? ' ref '.$data['reference'] : ''),
-                    $data['amount'], $data['paid_on'], $user, ['sourcing' => true, 'lot_ok' => self::pricingApproved($lot)]);
+                    $data['amount'], $data['paid_on'], $user, ['sourcing' => true, 'lot_ok' => self::pricingApproved($lot)],
+                    $advance ? ['classification' => 'supplier_advance', 'financial_account_id' => $data['financial_account_id'] ?? null, 'vendor' => $lot->lines->firstWhere('supplier_id', $supplierId)?->supplier?->name] : []);
                 $payment = SupplierPayment::create([
                     'supplier_id' => $supplierId, 'sourcing_lot_id' => $lot->id, 'amount' => $data['amount'], 'paid_on' => $data['paid_on'],
                     'method' => $data['method'] ?? null, 'reference' => $data['reference'] ?? null, 'notes' => $data['notes'] ?? null,
+                    'purchase_order' => $data['purchase_order'] ?? null, 'evidence_reference' => $data['evidence_reference'] ?? null,
                     'idempotency_key' => $key, 'expense_id' => $expense->id, 'created_by' => $user->id,
                 ]);
                 Audit::log('sourcing.supplier_payment', 'lot '.$lot->number, 'supplier '.$supplierId.' '.$data['amount'].($expense->auto_policy_id ? ' (auto-verified, policy #'.$expense->auto_policy_id.')' : ''));
@@ -118,13 +129,15 @@ class SourcingPayments
                 if (in_array($type, ['refund_received', 'credit_note'], true) && trim((string) $reference) === '') {
                     throw new RuntimeException('Enter the bank receipt or credit-note reference.');
                 }
-                $remaining = $payment->amount - (int) $payment->corrections()->whereIn('status', ['verified', 'pending'])->sum('amount');
+                // An advance already settled into accepted goods is no longer refundable: only what is still held can be returned.
+                $remaining = $payment->amount - (int) $payment->corrections()->whereIn('status', ['verified', 'pending'])->sum('amount') - AdvanceSettlementService::settledAmount($payment);
                 $amount ??= $remaining;
                 if ($amount <= 0 || $amount > $remaining) {
                     throw new RuntimeException('The correction must be between 0.01 and '.Money::format($remaining).' (what is not yet corrected).');
                 }
                 $reversal = self::expenseFor('Sourcing: supplier payment correction', 'Reverses expense #'.$expense->id.' ('.$type.') — '.$reason.($reference ? ' ref '.$reference : ''), $amount, today()->toDateString(), $user, [],
-                    ['reverses_id' => $expense->id, 'correction_type' => $type]);
+                    // Money coming back goes to the account it left from (never silently to the default account).
+                    ['reverses_id' => $expense->id, 'correction_type' => $type, 'financial_account_id' => $expense->financial_account_id]);
                 $payment->update(['reversal_expense_id' => $reversal->id, 'void_reason' => $reason]);
                 Audit::log('sourcing.supplier_payment.correction_requested', 'lot '.optional($payment->lot)->number, $type.' '.$amount.': '.$reason);
 
@@ -160,9 +173,9 @@ class SourcingPayments
     /**
      * Pay a recorded ACTUAL cost (transport, VAT, ...). Creates its expense once; a rejected expense lets it be paid again.
      */
-    public static function payCost(SourcingLotCost $cost, string $paidOn, User $user): void
+    public static function payCost(SourcingLotCost $cost, string $paidOn, User $user, ?int $accountId = null): void
     {
-        DB::transaction(function () use ($cost, $paidOn, $user) {
+        DB::transaction(function () use ($cost, $paidOn, $user, $accountId) {
             $lot = SourcingLot::whereKey($cost->sourcing_lot_id)->lockForUpdate()->firstOrFail();
             $cost = SourcingLotCost::with('expense')->findOrFail($cost->id);
             if ($lot->isClosed()) {
@@ -175,7 +188,9 @@ class SourcingPayments
                 throw new RuntimeException('This cost is already paid.');
             }
             $expense = self::expenseFor('Sourcing: '.$cost->category, $lot->number.($cost->description ? ' — '.$cost->description : ''), $cost->amount, $paidOn, $user,
-                ['sourcing' => true, 'lot_ok' => self::pricingApproved($lot), 'unexpected' => $cost->is_unexpected]);
+                ['sourcing' => true, 'lot_ok' => self::pricingApproved($lot), 'unexpected' => $cost->is_unexpected],
+                // Accrual basis: a paid transport/loading/handling cost is part of the product's acquisition cost (inventory), not an expense.
+                SourcingBasis::accrualOn($paidOn) ? ['classification' => 'acquisition', 'financial_account_id' => $accountId] : ($accountId ? ['financial_account_id' => $accountId] : []));
             $cost->update(['expense_id' => $expense->id]);
             Audit::log('sourcing.cost_paid', 'lot '.$lot->number, $cost->category.' '.$cost->amount.($expense->auto_policy_id ? ' (auto-verified, policy #'.$expense->auto_policy_id.')' : ''));
         });

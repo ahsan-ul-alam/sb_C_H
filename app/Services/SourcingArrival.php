@@ -18,9 +18,9 @@ class SourcingArrival
     /**
      * @param  string|null  $accepted  quantity accepted after inspection; omitted keeps the line's current usable quantity
      */
-    public static function record(SourcingLotLine $line, string $received, ?string $accepted, string $arrivedOn, User $user): void
+    public static function record(SourcingLotLine $line, string $received, ?string $accepted, string $arrivedOn, User $user, ?string $reference = null): void
     {
-        DB::transaction(function () use ($line, $received, $accepted, $arrivedOn) {
+        DB::transaction(function () use ($line, $received, $accepted, $arrivedOn, $reference) {
             $lot = SourcingLot::whereKey($line->sourcing_lot_id)->lockForUpdate()->firstOrFail();
             if ($lot->isClosed()) {
                 throw new RuntimeException('This lot is '.strtolower($lot->statusLabel()).' and can no longer be changed.');
@@ -42,14 +42,14 @@ class SourcingArrival
 
             $usableChanged = bccomp($accepted, (string) $line->usable_quantity, 2) !== 0;
             if ($usableChanged) {
-                if (! $lot->linesEditable()) {
-                    throw new RuntimeException('Accepted quantity is locked once pricing is approved. Record the shortage as an actual cost or an adjustment instead.');
-                }
+                // A shortage or damage found at arrival is a fact, not an edit, so it is allowed after pricing approval too (the approved
+                // price and cost snapshot stay frozen; the variance against them is shown). It can never drop below what clients were promised.
                 if (bccomp((string) $lot->allocations()->where('kind', 'sale')->where('sourcing_lot_line_id', $line->id)->sum('quantity'), $accepted, 2) > 0) {
                     throw new RuntimeException('Accepted quantity cannot drop below the quantity already allocated to clients.');
                 }
             }
-            $line->update(['received_quantity' => $received, 'arrived_on' => $arrivedOn, 'usable_quantity' => $accepted]);
+            $line->update(['received_quantity' => $received, 'arrived_on' => $arrivedOn, 'usable_quantity' => $accepted]
+                + (trim((string) $reference) !== '' ? ['acceptance_reference' => trim((string) $reference)] : []));
             if ($usableChanged && $lot->status === 'priced') {
                 $lot->update(['status' => 'costing', 'priced_by' => null]);
             }

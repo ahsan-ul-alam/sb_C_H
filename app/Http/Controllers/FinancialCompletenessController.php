@@ -17,7 +17,7 @@ class FinancialCompletenessController extends Controller
     {
         return view('finance.completeness', [
             'report' => FinancialCompleteness::report(), 'receipts' => FinancialCompleteness::receipts(),
-            'natures' => ReceiptClassification::NATURES, 'enforcedFrom' => FinancialCompleteness::enforcedFrom(),
+            'natures' => ReceiptClassification::NATURES, 'enforcedFrom' => FinancialCompleteness::enforcedFrom(), 'checklist' => FinancialCompleteness::evidenceChecklist(),
         ]);
     }
 

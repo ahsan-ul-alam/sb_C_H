@@ -40,6 +40,7 @@ use App\Http\Controllers\SettingsController;
 use App\Http\Controllers\SourcingLotController;
 use App\Http\Controllers\SourcingReportController;
 use App\Http\Controllers\StatementController;
+use App\Http\Controllers\SupplierAdvanceController;
 use App\Http\Controllers\SupplierController;
 use App\Http\Controllers\SupplierProductController;
 use App\Http\Controllers\UserController;
@@ -145,6 +146,13 @@ Route::middleware('auth')->group(function () {
             Route::post('costs/{cost}/pay', [SourcingLotController::class, 'payCost'])->name('costs.pay');
         });
 
+        Route::get('advances', [SupplierAdvanceController::class, 'index'])->name('advances')->middleware('can:sourcing.reports');
+        Route::post('lots/{lot}/advance-settlements', [SupplierAdvanceController::class, 'propose'])->name('advances.propose')->middleware('can:sourcing.manage');
+        Route::post('advance-settlements/{settlement}/decide', [SupplierAdvanceController::class, 'decide'])->name('advances.decide')->middleware('can:sourcing.advance.approve');
+        Route::post('advance-settlements/{settlement}/reverse', [SupplierAdvanceController::class, 'reverse'])->name('advances.reverse')->middleware('can:sourcing.advance.approve');
+        Route::post('lots/{lot}/cost-recognition', [SupplierAdvanceController::class, 'proposeRecognition'])->name('cost-recognitions.propose')->middleware('can:sourcing.manage');
+        Route::post('cost-recognitions/{recognition}/decide', [SupplierAdvanceController::class, 'decideRecognition'])->name('cost-recognitions.decide')->middleware('can:sourcing.advance.approve');
+        Route::post('cost-recognitions/{recognition}/reverse', [SupplierAdvanceController::class, 'reverseRecognition'])->name('cost-recognitions.reverse')->middleware('can:sourcing.advance.approve');
         Route::post('lots/{lot}/fund', [EmergencyFundController::class, 'store'])->name('lots.fund.store')->middleware('can:sourcing.fund.request');
         Route::post('fund/{fundRequest}/decide', [EmergencyFundController::class, 'decide'])->name('fund.decide')->middleware('can:sourcing.fund.approve');
         Route::post('fund/{fundRequest}/utilise', [EmergencyFundController::class, 'utilise'])->name('fund.utilise')->middleware('can:sourcing.fund.utilize');

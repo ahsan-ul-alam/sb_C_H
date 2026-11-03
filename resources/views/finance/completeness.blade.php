@@ -28,6 +28,20 @@
     </section>
     @endforeach
 
+    @if ($checklist)
+    <section class="panel">
+        <div class="panel-head"><h2>Evidence the owner must supply</h2></div>
+        <div class="panel-body muted">Nothing is linked, paid or costed from quantities or amounts. For each item below, the records must come from the supplier, the bank and the delivery.</div>
+        @foreach ($checklist as $c)
+        <div class="panel-body">
+            <strong>{{ $c['subject'] }}</strong>
+            <p class="muted">{{ $c['known'] }}</p>
+            <ul>@foreach ($c['needed'] as $n)<li>{{ $n }}</li>@endforeach</ul>
+        </div>
+        @endforeach
+    </section>
+    @endif
+
     <section class="panel">
         <div class="panel-head"><h2>Customer receipts and what they are for</h2></div>
         <div class="table-wrap"><table class="table table-min-640">

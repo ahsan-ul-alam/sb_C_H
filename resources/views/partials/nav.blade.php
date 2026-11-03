@@ -20,6 +20,7 @@
             ['Sourcing Lots', 'sourcing.lots.index', 'sourcing.view', 'folder', ['sourcing.lots.*']],
             ['Supplier Payments', 'sourcing.payments.index', 'sourcing.view', 'wallet', ['sourcing.payments.*']],
             ['Sourcing Reports', 'sourcing.reports', 'sourcing.reports', 'chart', ['sourcing.reports']],
+            ['Supplier Advances', 'sourcing.advances', 'sourcing.reports', 'wallet', ['sourcing.advances*', 'sourcing.cost-recognitions*']],
             ['Project Margins', 'sourcing.projects', 'sourcing.reports', 'chart', ['sourcing.projects']],
         ],
         'Finance' => [

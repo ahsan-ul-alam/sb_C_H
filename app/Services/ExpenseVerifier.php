@@ -45,10 +45,15 @@ class ExpenseVerifier
             : [[$expenseAccount, null, $amount, 0], ['cash', null, 0, $amount, $accountId]];
     }
 
-    /** Equipment and other lasting assets and prepaid costs are assets when paid; everything else is an expense. */
+    /**
+     * Equipment and other lasting assets, prepaid costs, supplier advances and capitalised product acquisition costs are assets when
+     * paid; everything else is an expense. (The last two are set only by the sourcing module under finance.sourcing_basis=accrual.)
+     */
     private static function debitAccount(Expense $e): string
     {
         return match (true) {
+            $e->classification === 'supplier_advance' => 'assets.supplier_advances',
+            $e->classification === 'acquisition' => 'assets.inventory',
             $e->classification === 'prepaid' => 'assets.prepaid',
             (bool) $e->is_asset => 'assets.equipment',
             default => 'expense',

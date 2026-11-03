@@ -189,7 +189,7 @@ it('reports several lots of one project together and shows the page', function (
     $a = $report['projects'][$first['a']->id];
     expect($a['lots'])->toHaveCount(2)->and($a['cost'])->toBe(collect($report['lots'])->sum(fn ($l) => $l['buckets'][$first['a']->id]['cost'] ?? 0))
         ->and(collect($report['lots'])->sum(fn ($l) => array_sum(array_column($l['buckets'], 'cost'))))->toBe(60_043 + 10_000);
-    $co->as('finance')->get(route('sourcing.projects'))->assertOk()->assertSee('Project A')->assertSee('Estimated margin');
+    $co->as('finance')->get(route('sourcing.projects'))->assertOk()->assertSee('Project A')->assertSee('Agreed margin')->assertSee('Actual margin');
 });
 
 it('never treats ordered goods as received, and keeps accepted within received', function () {
@@ -218,9 +218,9 @@ it('never treats ordered goods as received, and keeps accepted within received',
     Sourcing::savePricing($lot, 'fixed', 100, [], $this->finance);
     Sourcing::advance($lot, $this->finance);
     Sourcing::approvePricing($lot, $this->board);
-    expect(fn () => SourcingArrival::record($line, '8', '6', '2026-11-09', $this->finance))->toThrow(RuntimeException::class, 'locked once pricing is approved');
-    SourcingArrival::record($line, '9', '7', '2026-11-09', $this->finance);
+    SourcingArrival::record($line, '9', '7', '2026-11-09', $this->finance); // a later shortage/damage finding is still a fact, even after approval
     expect($line->refresh()->received_quantity)->toBe('9.00');
+    expect(fn () => SourcingArrival::record($line, '9', '12', '2026-11-09', $this->finance))->toThrow(RuntimeException::class, 'cannot exceed');
     // A cancelled lot cannot change.
     $other = Sourcing::createLot(['title' => 'Cancelled lot'], $this->finance);
     $otherLine = Sourcing::addLine($other, ['supplier_id' => $s->id, 'description' => 'Goods', 'quantity' => '2', 'unit_price' => 100], $this->finance);

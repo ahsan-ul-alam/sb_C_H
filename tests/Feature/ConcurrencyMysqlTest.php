@@ -1,6 +1,8 @@
 <?php
 
 use App\Models\AccountTransfer;
+use App\Models\AdvanceSettlement;
+use App\Models\CostRecognition;
 use App\Models\Expense;
 use App\Models\ExpensePayment;
 use App\Models\FinancialAccount;
@@ -8,9 +10,15 @@ use App\Models\JournalEntry;
 use App\Models\LoanReceivable;
 use App\Models\LoanReceivableRepayment;
 use App\Models\Payment;
+use App\Models\Supplier;
+use App\Models\SupplierPayment;
 use App\Services\AccountingService;
+use App\Services\AdvanceSettlementService;
 use App\Services\Ledger;
 use App\Services\LoanReceivableService;
+use App\Services\Sourcing;
+use App\Services\SourcingArrival;
+use App\Services\SourcingPayments;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
@@ -79,7 +87,8 @@ function ccRun(string $operation, int $count, callable $argsFor): array
     for ($i = 0; $i < $count; $i++) {
         $args = json_encode(['user' => test()->co->users['finance']->id, ...$argsFor($i), 'start' => $start]);
         $cmd = [PHP_BINARY, __DIR__.'/../Support/concurrency_worker.php', $operation, $args];
-        $procs[$i] = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes[$i], null, [...getenv(), 'FINANCE_REALTIME_FROM' => '2026-11-01']);
+        $procs[$i] = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes[$i], null, [...getenv(), 'FINANCE_REALTIME_FROM' => '2026-11-01',
+            'FINANCE_SOURCING_BASIS' => 'accrual', 'FINANCE_SOURCING_ACCRUAL_FROM' => '2026-11-01', 'FINANCE_SOURCING_RECOGNITION' => 'lot_completed']);
     }
     $results = [];
     foreach ($procs as $i => $proc) {
@@ -167,6 +176,53 @@ it('posts a loan repayment once when four verifications race', function () {
         ->and(collect($results)->where('ok', false)->every(fn ($r) => str_contains($r['error'], 'Already decided')))->toBeTrue()
         ->and(JournalEntry::where('source_type', 'loan_receivable_repayment')->count())->toBe(1)
         ->and(AccountingService::totalCash())->toBe($cash + 3_000_00)->and($loan->refresh()->outstanding())->toBe(5_000_00);
+    expect(ledgerAudit()['unbalanced'])->toBe(0)->and(ledgerAudit()['duplicates'])->toBe(0);
+});
+
+/** An approved lot (10 pieces at BDT 4,000) under the accrual sourcing basis, committed so the worker processes see it. */
+function ccAdvanceLot(): array
+{
+    config(['finance.sourcing_basis' => 'accrual', 'finance.sourcing_accrual_from' => '2026-11-01', 'finance.sourcing_recognition_trigger' => 'lot_completed']);
+    $finance = test()->co->users['finance'];
+    $supplier = Supplier::create(['name' => 'Race Supplier']);
+    $lot = Sourcing::createLot(['title' => 'Race lot'], $finance);
+    $line = Sourcing::addLine($lot, ['supplier_id' => $supplier->id, 'description' => 'Goods', 'quantity' => '10', 'unit_price' => 400_000], $finance);
+    Sourcing::advance($lot, $finance);
+    Sourcing::savePricing($lot, 'fixed', 75_000, [], $finance);
+    Sourcing::advance($lot, $finance);
+    Sourcing::approvePricing($lot, test()->co->users['board']);
+
+    return [$lot->refresh(), $line, $supplier];
+}
+
+it('records one supplier advance submitted four times at once exactly once', function () {
+    [$lot, , $supplier] = ccAdvanceLot();
+    $key = (string) Str::uuid();
+    $results = ccRun('adv_pay', 4, fn () => ['lot' => $lot->id, 'supplier' => $supplier->id, 'amount' => 4_000_000, 'date' => '2026-11-03', 'key' => $key]);
+
+    expect(collect($results)->where('ok', true)->where('recorded', true)->count())->toBe(1)
+        ->and(SupplierPayment::count())->toBe(1)->and(Expense::where('classification', 'supplier_advance')->count())->toBe(1);
+});
+
+it('proposes one set of advance settlements and one cost release however many people click at once', function () {
+    [$lot, $line, $supplier] = ccAdvanceLot();
+    $payment = SourcingPayments::recordSupplierPayment($lot, ['supplier_id' => $supplier->id, 'amount' => 4_000_000, 'paid_on' => '2026-11-03', 'purchase_order' => 'PO', 'reference' => 'R', 'evidence_reference' => 'E'], $this->co->users['finance']);
+    $this->co->post('board', 'finance.expenses.decide', ['decision' => 'verify'], $payment->expense)->assertSessionHasNoErrors();
+    SourcingArrival::record($line->refresh(), '10', '10', '2026-11-08', $this->co->users['finance'], 'DN-1');
+
+    $results = ccRun('adv_propose', 4, fn () => ['lot' => $lot->id, 'supplier' => $supplier->id]);
+    expect(collect($results)->where('ok', true)->where('recorded', true)->count())->toBe(1)
+        ->and(AdvanceSettlement::count())->toBe(1)->and((int) AdvanceSettlement::sum('amount'))->toBe(4_000_000);
+
+    AdvanceSettlementService::decide(AdvanceSettlement::firstOrFail(), true, $this->co->users['board']);
+    Sourcing::advance($lot, $this->co->users['finance']);
+    Sourcing::advance($lot, $this->co->users['finance']);
+    // (The workers run on the real clock, so the date must be one that is never in the future.)
+    $releases = ccRun('cost_propose', 4, fn () => ['lot' => $lot->id, 'date' => '2026-11-01']);
+
+    expect(collect($releases)->where('ok', true)->where('recorded', true)->count())->toBe(1)
+        ->and(collect($releases)->where('ok', false)->every(fn ($r) => str_contains($r['error'], 'already been released')))->toBeTrue()
+        ->and(CostRecognition::count())->toBe(1)->and((int) CostRecognition::sum('amount'))->toBe(4_000_000);
     expect(ledgerAudit()['unbalanced'])->toBe(0)->and(ledgerAudit()['duplicates'])->toBe(0);
 });
 

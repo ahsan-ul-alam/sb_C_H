@@ -23,7 +23,7 @@ class FinancialStatements
     public static function expenses(CarbonImmutable $start, CarbonImmutable $end, bool $sourcingOnly = false): int
     {
         $accounting = self::usesAccountingBasis();
-        $query = fn (bool $reversal) => Expense::where('status', 'verified')->notReclassifiedAsLoan()
+        $query = fn (bool $reversal) => Expense::where('status', 'verified')->notReclassifiedAsLoan()->excludingSourcingAssets()
             ->when($reversal, fn ($q) => $q->whereNotNull('reverses_id'), fn ($q) => $q->whereNull('reverses_id'))
             ->where('is_asset', false)
             // Legacy basis: a prepaid cost counts in full when paid. Accounting basis: it counts as it is released, month by month.
@@ -32,6 +32,8 @@ class FinancialStatements
             ->whereDate('spent_on', '>=', $start)->whereDate('spent_on', '<=', $end);
 
         $net = (int) $query(false)->sum('amount') - (int) $query(true)->sum('amount');
+        // Product cost released from inventory (accrual sourcing basis only) is direct sourcing cost of the month it is recognised.
+        $net += CostRecognitionService::releasedBetween($start, $end);
         if ($accounting && ! $sourcingOnly) {
             $released = PrepaidService::releasedBetween($start, $end);
             $net += $released['direct'] + $released['operating'];
@@ -152,10 +154,11 @@ class FinancialStatements
             'equity.opening' => 'Opening equity', 'assets.equipment' => 'Office equipment & fixed assets (at cost, not depreciated)', 'supplier.credit' => 'Supplier credit notes receivable',
             'assets.prepaid' => 'Prepaid expenses (not yet used)', 'loans.payable' => 'Loans payable (principal owed)', 'income.other' => 'Other income',
             'assets.loans_receivable' => 'Loans receivable (money lent, to be repaid)',
+            'assets.supplier_advances' => 'Supplier advances (paid, goods not yet accepted)', 'assets.inventory' => 'Product acquisition cost held (inventory)',
         ];
         foreach ($balances as $account => $debit) {
             $bucket = match (true) {
-                in_array($account, ['cash', 'receivables', 'assets.equipment', 'assets.prepaid', 'assets.loans_receivable', 'supplier.credit'], true) => 'assets',
+                in_array($account, ['cash', 'receivables', 'assets.equipment', 'assets.prepaid', 'assets.loans_receivable', 'assets.supplier_advances', 'assets.inventory', 'supplier.credit'], true) => 'assets',
                 in_array($account, ['customer.advances', 'liabilities', 'partner.payable', 'loans.payable'], true) => 'liabilities',
                 $account === 'partner.capital' || $account === 'equity.opening' => 'capital',
                 str_starts_with($account, 'fund.') => 'funds',

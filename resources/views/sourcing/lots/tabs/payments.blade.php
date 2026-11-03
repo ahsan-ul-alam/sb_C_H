@@ -22,7 +22,10 @@
                     <form method="POST" action="{{ route('sourcing.lots.payments.store', $lot) }}" class="inline-form">@csrf
                         <input type="hidden" name="supplier_id" value="{{ $supplierId }}"><input type="hidden" name="idempotency_key" value="{{ Str::uuid() }}">
                         <input name="amount" size="9" placeholder="amount" inputmode="decimal" required><input type="date" name="paid_on" value="{{ today()->toDateString() }}" required>
-                        <input name="method" size="8" placeholder="method"><input name="reference" size="10" placeholder="reference"><button class="btn btn-sm btn-primary">Pay</button></form>
+                        <input name="method" size="8" placeholder="method"><input name="reference" size="10" placeholder="reference">
+                        <input name="purchase_order" size="10" placeholder="purchase order"><input name="evidence_reference" size="12" placeholder="invoice / proforma / slip">
+                        <select name="financial_account_id"><option value="">Default account</option>@foreach (\App\Models\FinancialAccount::where('is_active', true)->orderBy('name')->get() as $a)<option value="{{ $a->id }}">{{ $a->name }}</option>@endforeach</select>
+                        <button class="btn btn-sm btn-primary">Pay</button></form>
                 @endif @endcan</td></tr>
         @endforeach
         </tbody>

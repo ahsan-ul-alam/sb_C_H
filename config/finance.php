@@ -43,4 +43,24 @@ return [
     */
     'completeness_from' => env('FINANCE_COMPLETENESS_FROM', '2026-10'),
 
+    /*
+    | How supplier payments for sourcing lots reach the books. FORWARD-ONLY and OFF by default; it needs an explicit Board decision.
+    |   cash    (default) — a supplier payment or paid lot cost is an expense the day it is paid, exactly as every existing record.
+    |   accrual — from FINANCE_SOURCING_ACCRUAL_FROM (a month) a supplier payment is a SUPPLIER ADVANCE (an asset: Dr supplier advances
+    |             / Cr cash), accepted goods settle it into product acquisition cost (Dr inventory / Cr supplier advances, no cash),
+    |             paid acquisition costs (transport, loading…) are capitalised to the same inventory, and cost reaches profit only
+    |             when it is RECOGNISED (Dr direct cost / Cr inventory), never because cash was paid or goods arrived.
+    | Both variables must be set for accrual to apply; payments dated before the month stay cash-basis and are never restated, so a
+    | cost can never be counted by both methods.
+    */
+    'sourcing_basis' => env('FINANCE_SOURCING_BASIS', 'cash'),
+    'sourcing_accrual_from' => env('FINANCE_SOURCING_ACCRUAL_FROM'),
+
+    /*
+    | The event that releases a lot's capitalised cost into profit. Not decided by the owner yet, so it is OFF: releasing cost is
+    | refused until the Board approves one. Supported: lot_completed (the lot is completed, every advance settled and every line
+    | received and accepted). Arrival alone is never a trigger and neither is the client having paid.
+    */
+    'sourcing_recognition_trigger' => env('FINANCE_SOURCING_RECOGNITION'),
+
 ];
