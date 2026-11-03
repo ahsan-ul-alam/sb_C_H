@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\CapitalEntry;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
+use App\Models\Partner;
 use App\Models\User;
 use App\Support\Money;
 use Illuminate\Support\Facades\DB;
@@ -19,9 +20,9 @@ use RuntimeException;
 class InvestmentService
 {
     /** Paid-in capital net of loss charges and verified withdrawals. */
-    public static function capitalBalance(int $partnerId): int
+    public static function capitalBalance(int $partnerId, bool $lock = false): int
     {
-        return Ledger::creditBalance('partner.capital', $partnerId);
+        return Ledger::creditBalance('partner.capital', $partnerId, $lock);
     }
 
     /** Gross paid-in capital: every credit to the partner's capital except the credits created by reversals. */
@@ -45,8 +46,11 @@ class InvestmentService
         $amount = (int) $entry->amount;
 
         if ($entry->kind === 'withdrawal') {
-            if ($amount > self::capitalBalance($entry->partner_id)) {
-                throw new RuntimeException('A withdrawal cannot exceed the partner\'s capital balance of '.Money::format(max(0, self::capitalBalance($entry->partner_id))).'.');
+            // Serialise withdrawals of the same partner and read their capital with a locking read.
+            Partner::whereKey($entry->partner_id)->lockForUpdate()->first();
+            $held = self::capitalBalance($entry->partner_id, lock: true);
+            if ($amount > $held) {
+                throw new RuntimeException('A withdrawal cannot exceed the partner\'s capital balance of '.Money::format(max(0, $held)).'.');
             }
             AccountingService::assertCanSpend($accountId, $amount);
             Ledger::post($entry->paid_on->toDateString(), 'Capital withdrawn by partner '.$entry->partner_id, 'capital', $entry->id, [

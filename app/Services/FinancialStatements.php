@@ -7,6 +7,7 @@ use App\Models\CapitalEntry;
 use App\Models\Expense;
 use App\Models\Invoice;
 use App\Models\JournalLine;
+use App\Models\OtherIncome;
 use App\Models\Partner;
 use App\Models\Payout;
 use App\Models\PolicyVersion;
@@ -21,13 +22,37 @@ class FinancialStatements
     /** Verified expenses of a date range, net of verified corrections (a correction reverses an earlier expense). */
     public static function expenses(CarbonImmutable $start, CarbonImmutable $end, bool $sourcingOnly = false): int
     {
+        $accounting = self::usesAccountingBasis();
         $query = fn (bool $reversal) => Expense::where('status', 'verified')
             ->when($reversal, fn ($q) => $q->whereNotNull('reverses_id'), fn ($q) => $q->whereNull('reverses_id'))
             ->where('is_asset', false)
+            // Legacy basis: a prepaid cost counts in full when paid. Accounting basis: it counts as it is released, month by month.
+            ->when($accounting, fn ($q) => $q->where('classification', '!=', 'prepaid'))
             ->when($sourcingOnly, fn ($q) => $q->where('category', 'like', 'Sourcing:%'))
             ->whereDate('spent_on', '>=', $start)->whereDate('spent_on', '<=', $end);
 
-        return (int) $query(false)->sum('amount') - (int) $query(true)->sum('amount');
+        $net = (int) $query(false)->sum('amount') - (int) $query(true)->sum('amount');
+        if ($accounting && ! $sourcingOnly) {
+            $released = PrepaidService::releasedBetween($start, $end);
+            $net += $released['direct'] + $released['operating'];
+        }
+
+        return $net;
+    }
+
+    /**
+     * The Board-controlled switch (finance.distributable_basis) between the profit every existing period was frozen on
+     * ("legacy") and the dashboard's accounting profit. See config/finance.php.
+     */
+    public static function usesAccountingBasis(): bool
+    {
+        return config('finance.distributable_basis') === 'accounting';
+    }
+
+    /** Verified other (non-trading) income received in a range. */
+    public static function otherIncome(CarbonImmutable $start, CarbonImmutable $end): int
+    {
+        return (int) OtherIncome::where('status', 'verified')->whereDate('received_on', '>=', $start)->whereDate('received_on', '<=', $end)->sum('amount');
     }
 
     /**
@@ -40,11 +65,17 @@ class FinancialStatements
         $start = CarbonImmutable::createFromFormat('Y-m-d', $month.'-01')->startOfMonth();
         $end = $start->endOfMonth();
         $revenue = RevenueRecognition::figures($month);
+        $accounting = self::usesAccountingBasis();
+        // Other income reaches the frozen (distributable) figure only on the accounting basis; the ledger lines the close books
+        // are built from the components below, never from this total.
+        $otherIncome = $accounting ? self::otherIncome($start, $end) : 0;
+        $pendingOther = $accounting ? OtherIncome::where('status', 'pending')->whereDate('received_on', '>=', $start)->whereDate('received_on', '<=', $end)->count() : 0;
 
         return [
             ...$revenue,
+            'income' => $revenue['income'] + $otherIncome,
             'expenses' => self::expenses($start, $end),
-            'pending' => Expense::where('status', 'pending')->whereDate('spent_on', '>=', $start)->whereDate('spent_on', '<=', $end)->count() + $revenue['pending'],
+            'pending' => Expense::where('status', 'pending')->whereDate('spent_on', '>=', $start)->whereDate('spent_on', '<=', $end)->count() + $revenue['pending'] + $pendingOther,
         ];
     }
 
@@ -119,11 +150,12 @@ class FinancialStatements
             'liabilities' => 'Supplier / other liabilities', 'partner.payable' => 'Partner profit entitlement payable', 'partner.capital' => 'Partner capital (net of loss charges)',
             'fund.salary' => 'Salary Fund', 'fund.office' => 'Office & Growth Fund', 'fund.emergency' => 'Emergency Reserve', 'fund.coverage' => 'Emergency coverage held for partner losses',
             'equity.opening' => 'Opening equity', 'assets.equipment' => 'Office equipment & fixed assets (at cost, not depreciated)', 'supplier.credit' => 'Supplier credit notes receivable',
+            'assets.prepaid' => 'Prepaid expenses (not yet used)', 'loans.payable' => 'Loans payable (principal owed)', 'income.other' => 'Other income',
         ];
         foreach ($balances as $account => $debit) {
             $bucket = match (true) {
-                in_array($account, ['cash', 'receivables', 'assets.equipment', 'supplier.credit'], true) => 'assets',
-                in_array($account, ['customer.advances', 'liabilities', 'partner.payable'], true) => 'liabilities',
+                in_array($account, ['cash', 'receivables', 'assets.equipment', 'assets.prepaid', 'supplier.credit'], true) => 'assets',
+                in_array($account, ['customer.advances', 'liabilities', 'partner.payable', 'loans.payable'], true) => 'liabilities',
                 $account === 'partner.capital' || $account === 'equity.opening' => 'capital',
                 str_starts_with($account, 'fund.') => 'funds',
                 default => 'result',

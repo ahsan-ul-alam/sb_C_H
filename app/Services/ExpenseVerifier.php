@@ -26,7 +26,7 @@ class ExpenseVerifier
         $amount = (int) $e->amount;
         $accountId = AccountingService::resolveAccountId($e->financial_account_id);
         if ($e->reverses_id) {
-            $expenseAccount = self::original($e)->is_asset ? 'assets.equipment' : 'expense';
+            $expenseAccount = self::debitAccount(self::original($e));
             // An expense that was never paid is cancelled against its payable; nothing moves in cash.
             $debit = match ($e->correction_type) {
                 'liability_cancel' => ['liabilities', null, $amount, 0],
@@ -37,12 +37,22 @@ class ExpenseVerifier
             return [$debit, [$expenseAccount, null, 0, $amount]];
         }
 
-        $expenseAccount = $e->is_asset ? 'assets.equipment' : 'expense';
+        $expenseAccount = self::debitAccount($e);
 
         // Recorded but not yet paid: the cost is real, but it is a payable until the money actually leaves an account.
         return $e->payment_status === 'unpaid'
             ? [[$expenseAccount, null, $amount, 0], ['liabilities', null, 0, $amount]]
             : [[$expenseAccount, null, $amount, 0], ['cash', null, 0, $amount, $accountId]];
+    }
+
+    /** Equipment and other lasting assets and prepaid costs are assets when paid; everything else is an expense. */
+    private static function debitAccount(Expense $e): string
+    {
+        return match (true) {
+            $e->classification === 'prepaid' => 'assets.prepaid',
+            (bool) $e->is_asset => 'assets.equipment',
+            default => 'expense',
+        };
     }
 
     private static function original(Expense $e): Expense

@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\AccountingPeriod;
 use App\Models\JournalEntry;
 use App\Models\Payment;
 use App\Models\RevenueAdjustment;
@@ -25,6 +26,28 @@ class LedgerPostingService
     /** First day of the first month that is journaled in real time, or null when real-time posting is off. */
     public static function cutover(): ?CarbonImmutable
     {
+        $configured = self::configuredCutover();
+        $earliest = self::earliestRealtimeMonth();
+        $floor = self::firstMonthAfterBookedPeriods();
+
+        // Sticky: once something was journaled in real time, those months stay real-time even if the setting is later
+        // removed or moved later (period close would otherwise book the same money a second time).
+        $base = $configured ?? $earliest;
+        if ($base !== null && $earliest !== null && $base->gt($earliest)) {
+            $base = $earliest;
+        }
+        // Never earlier than the month after the last period already booked at close: those months are final, and
+        // posting them again in real time would double count.
+        if ($base !== null && $floor !== null && $base->lt($floor)) {
+            $base = $floor;
+        }
+
+        return $base;
+    }
+
+    /** The setting as written, normalised to the first day of a month, or null when it is empty. */
+    public static function configuredCutover(): ?CarbonImmutable
+    {
         $raw = config('finance.realtime_from');
         if (! $raw) {
             return null;
@@ -32,6 +55,21 @@ class LedgerPostingService
         $date = CarbonImmutable::parse($raw)->startOfDay();
 
         return $date->day === 1 ? $date : $date->startOfMonth()->addMonth();
+    }
+
+    private static function earliestRealtimeMonth(): ?CarbonImmutable
+    {
+        $date = JournalEntry::where(fn ($q) => $q->where('source_type', 'payment')->orWhere('source_type', 'like', 'payment\_v%')->orWhere('source_type', 'revenue'))
+            ->min('entry_date');
+
+        return $date ? CarbonImmutable::parse($date)->startOfMonth() : null;
+    }
+
+    private static function firstMonthAfterBookedPeriods(): ?CarbonImmutable
+    {
+        $month = AccountingPeriod::whereIn('id', JournalEntry::where('source_type', 'period')->pluck('source_id'))->max('month');
+
+        return $month ? CarbonImmutable::createFromFormat('Y-m-d', $month.'-01')->startOfDay()->addMonth() : null;
     }
 
     public static function isRealtime(string $date): bool

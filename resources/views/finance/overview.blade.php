@@ -10,12 +10,13 @@
         ['Business performance', [
             ['Total recognised revenue', $kpis['recognised_revenue'], 'Earned in the period — not the same as cash received', null],
             ['Gross profit', $kpis['gross_profit'], 'Recognised revenue − direct project costs', null],
-            ['Net profit', $kpis['net_profit'], 'Gross − operating, other and tax expenses', null],
+            ['Accounting net profit', $kpis['net_profit'], 'Not the Board-approved distributable profit — see below', null],
         ]],
         ['Cash position', [
             ['Available cash & bank', $kpis['available_cash'], 'To date · money actually in your accounts', null],
             ['Total payments received', $kpis['payments_received'], 'Cash collected from customers in the period', null],
             ['Accounts payable', $kpis['accounts_payable'], 'To date · verified expenses not yet paid', null],
+            ['Loans outstanding', $kpis['loans_outstanding'], 'To date · principal owed; borrowed money is not income', null],
         ]],
         ['Investments & contracts', [
             ['Total capital investment', $kpis['capital_invested'], 'To date · owner money, never revenue or profit', null],
@@ -76,13 +77,28 @@
                 <tr><td class="muted">+ Other income</td><td class="num">{{ $m($pl['other_income']) }}</td></tr>
                 <tr><td class="muted">− Other expenses</td><td class="num">{{ $m($pl['other_expenses']) }}</td></tr>
                 <tr><td class="muted">− Taxes</td><td class="num">{{ $m($pl['taxes']) }}</td></tr>
-                <tr class="strong"><td>Net profit</td><td class="num {{ $pl['net_profit'] < 0 ? 'text-danger' : '' }}">{{ $m($pl['net_profit']) }}</td></tr>
+                @if ($pl['estimated_tax'] > 0)<tr class="muted"><td>Memo: estimated tax at the configured rate (not posted)</td><td class="num">{{ $m($pl['estimated_tax']) }}</td></tr>@endif
+                <tr class="strong"><td>Accounting net profit</td><td class="num {{ $pl['net_profit'] < 0 ? 'text-danger' : '' }}">{{ $m($pl['net_profit']) }}</td></tr>
             </tbody>
         </table></div>
         <div class="panel-body"><h3 style="margin-top:0">Monthly revenue vs expenses</h3>
             <x-series-chart title="Monthly revenue against expenses" :labels="$labels" :series="[['name' => 'Revenue', 'color' => 'var(--success)', 'values' => $vals('revenue')], ['name' => 'Expenses', 'color' => 'var(--danger)', 'values' => $vals('expenses')]]" /></div>
         <div class="panel-body"><h3 style="margin-top:0">Monthly net profit</h3>
             <x-series-chart title="Monthly net profit" :labels="$labels" :series="[['name' => 'Net profit', 'color' => 'var(--info)', 'values' => $vals('net')]]" /></div>
+    </section>
+
+    <section class="panel">
+        <div class="panel-head"><h2>Accounting profit vs distributable profit</h2><span class="sub">{{ $bridge['month'] }} · distributable basis: {{ $bridge['basis'] }}</span></div>
+        <div class="table-wrap"><table class="table">
+            <tbody>
+                <tr class="strong"><td>Accounting net profit (this dashboard)</td><td class="num">{{ $m($bridge['accounting_profit']) }}</td></tr>
+                <tr><td>Profit on the distributable basis, live</td><td class="num">{{ $m($bridge['distributable_basis_profit']) }}</td></tr>
+                <tr><td>Profit frozen at period close @if ($bridge['allocation_status'])<span class="muted">· allocation {{ $bridge['allocation_status'] }}</span>@endif</td><td class="num">{{ $bridge['frozen_period_profit'] === null ? 'Month not closed' : $m($bridge['frozen_period_profit']) }}</td></tr>
+                @foreach ($bridge['items'] as $label => $amount)<tr class="muted"><td>Why they differ: {{ $label }}</td><td class="num">{{ $m($amount) }}</td></tr>@endforeach
+                @if ($bridge['unverified_items'] > 0)<tr class="muted"><td>Unverified items still to be decided in this month</td><td class="num">{{ $bridge['unverified_items'] }}</td></tr>@endif
+            </tbody>
+        </table></div>
+        <div class="panel-body"><p class="hint" style="margin:0">Only the profit frozen at period close and the Board-approved allocation are distributed to partners. Accounting profit is for management reporting; changing what is distributable needs a Board decision.</p></div>
     </section>
 
     <section class="panel">

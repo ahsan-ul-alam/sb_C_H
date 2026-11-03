@@ -260,7 +260,7 @@ it('invoices commission automatically under policy and corrects an invoiced comm
     expect($invoice->total)->toBe(10000)->and(JournalLine::count())->toBe(0);
 
     OrderCommission::reduceInvoiced($auto, 400000, 'partial refund');
-    expect($invoice->refresh()->total)->toBe(4000)->and($auto->refresh()->commission)->toBe(4000)->and($project->segments()->sum('amount'))->toBe(4000)
+    expect($invoice->refresh()->total)->toBe(4000)->and($auto->refresh()->commission)->toBe(4000)->and((int) $project->segments()->sum('amount'))->toBe(4000)
         ->and(AuditLog::where('action', 'order.invoiced_commission_reduced')->exists())->toBeTrue();
 
     Payment::forceCreate(['project_id' => $project->id, 'invoice_id' => $invoice->id, 'amount' => 1000, 'paid_on' => today(), 'method' => 'cash', 'idempotency_key' => (string) Str::uuid()]);

@@ -46,6 +46,7 @@ class ExpenseController extends Controller
             'project_id' => ['nullable', 'exists:projects,id'],
             'vendor' => ['nullable', 'string', 'max:120'],
             'document_id' => ['nullable', 'exists:documents,id'],
+            'prepaid_months' => ['nullable', 'integer', 'between:1,60', 'required_if:classification,prepaid'],
         ]);
         $amount = Money::toMinor($data['amount']);
         if ($amount <= 0) {
@@ -133,6 +134,16 @@ class ExpenseController extends Controller
         ]);
 
         return $this->attempt(fn () => ExpenseService::reverse($expense, $data['type'] ?? null, $data['reason'], $request->user()), 'Reversal recorded; awaiting Board verification.');
+    }
+
+    /** Shared (non-direct) expenses and how each is currently split across projects. */
+    public function costAllocation(): View
+    {
+        return view('finance.cost-allocation', [
+            'expenses' => Expense::with('allocations.project')->where('status', 'verified')->whereNull('reverses_id')->whereNotIn('classification', ['direct', 'asset', 'prepaid'])
+                ->where('category', 'not like', 'Sourcing:%')->latest('spent_on')->latest('id')->paginate(30),
+            'projects' => Project::where('currency', config('finance.currency'))->whereNull('archived_at')->orderBy('name')->get(['id', 'name']),
+        ]);
     }
 
     /** Explicit split of a shared expense across projects (reporting only). */

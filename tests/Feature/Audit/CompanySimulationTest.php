@@ -65,7 +65,7 @@ it('runs a two-month company through the controllers and reconciles every taka',
     }
     $invA = $co->invoice($pa, collect($segs)->map(fn ($s) => ['segment_id' => $s->id, 'description' => $s->name, 'quantity' => '1', 'unit_price' => number_format($s->amount / 100, 2, '.', '')])->values()->all(), '2026-02-05', 'AUD-A-1');
     expect($invA->refresh()->total)->toBe(5_000_000)->and($invA->amount_paid)->toBe(5_000_000)->and($invA->status->value)->toBe('paid')->and($invA->balance())->toBe(0)
-        ->and(Payment::where('project_id', $pa->id)->sum('amount'))->toBe(5_000_000); // the invoice created no payment
+        ->and((int) Payment::where('project_id', $pa->id)->sum('amount'))->toBe(5_000_000); // the invoice created no payment
 
     // Client B: invoice first, then payment.
     $b = $co->client('Client B - Existing Business');

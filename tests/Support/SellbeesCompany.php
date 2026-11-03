@@ -36,9 +36,12 @@ class SellbeesCompany
 
     public static function boot(TestCase $t): self
     {
-        $guard = config('database.connections.'.config('database.default').'.database');
-        if (config('database.default') !== 'sqlite' || $guard !== ':memory:' || app()->environment() !== 'testing') {
-            throw new \RuntimeException('The audit simulation refuses to run outside the isolated in-memory testing database.');
+        $connection = config('database.connections.'.config('database.default'));
+        $inMemory = config('database.default') === 'sqlite' && ($connection['database'] ?? null) === ':memory:';
+        // A throwaway local MySQL is allowed only when it is clearly a test database: loopback host and a name ending in _test.
+        $localMysql = config('database.default') === 'mysql' && in_array($connection['host'] ?? null, ['127.0.0.1', 'localhost'], true) && str_ends_with((string) ($connection['database'] ?? ''), '_test');
+        if (! ($inMemory || $localMysql) || app()->environment() !== 'testing') {
+            throw new \RuntimeException('The audit simulation refuses to run outside an isolated testing database.');
         }
         config(['admin.email' => 'owner@audit.test', 'admin.password' => 'password-123']);
         $t->seed(DatabaseSeeder::class);

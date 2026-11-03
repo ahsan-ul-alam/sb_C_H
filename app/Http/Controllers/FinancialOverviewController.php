@@ -28,6 +28,7 @@ class FinancialOverviewController extends Controller
             'range' => $range,
             'kpis' => FinancialReportingService::kpis($range->from, $range->to),
             'pl' => FinancialReportingService::profitAndLoss($range->from, $range->to),
+            'bridge' => FinancialReportingService::distributableBridge($range->from->format('Y-m')),
             'series' => FinancialReportingService::monthlySeries(12),
             'categories' => FinancialReportingService::expenseCategories($range->from, $range->to),
             'profitability' => FinancialReportingService::projectProfitability(10),

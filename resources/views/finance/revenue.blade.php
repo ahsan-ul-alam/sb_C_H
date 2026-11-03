@@ -18,7 +18,7 @@
                             <select name="kind"><option value="advance">Mark as advance</option><option value="recognition">Recognise advance</option><option value="refund">Refund</option></select>
                             <select name="against"><option value="revenue">refund of revenue</option><option value="advance">refund of advance</option></select>
                             <input name="amount" size="8" placeholder="amount" inputmode="decimal"><input type="date" name="effective_on" title="Date (not for advances)">
-                            <input name="reason" placeholder="reason" size="12"><button class="btn btn-sm">Record</button>
+                            <input name="reason" placeholder="reason" size="12">@php($refundAccounts = \App\Models\FinancialAccount::where('is_active', true)->orderBy('name')->get())@if ($refundAccounts->isNotEmpty())<select name="financial_account_id" title="Account a refund is paid from"><option value="">Refund from: default account</option>@foreach ($refundAccounts as $ra)<option value="{{ $ra->id }}">Refund from: {{ $ra->name }}</option>@endforeach</select>@endif<button class="btn btn-sm">Record</button>
                         </form>
                     </td>
                     @endcan

@@ -6,6 +6,7 @@ use App\Models\Expense;
 use App\Models\ExpenseAllocation;
 use App\Models\ExpensePayment;
 use App\Models\JournalEntry;
+use App\Models\PrepaidRelease;
 use App\Models\User;
 use App\Support\Money;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -28,6 +29,7 @@ class ExpenseService
         'operating' => 'Operating / office expense',
         'direct' => 'Direct project cost',
         'asset' => 'Capital purchase (equipment, lasting asset) — not an expense',
+        'prepaid' => 'Prepaid expense (insurance, annual subscription, advance rent) — expensed month by month',
         'other' => 'Other expense',
         'tax' => 'Tax',
     ];
@@ -132,6 +134,9 @@ class ExpenseService
             if ($original->payment_status === 'reversed' || Expense::where('reverses_id', $original->id)->whereIn('status', ['pending', 'verified'])->exists()) {
                 throw new RuntimeException('This expense already has a reversal.');
             }
+            if ($original->classification === 'prepaid' && PrepaidRelease::where('expense_id', $original->id)->exists()) {
+                throw new RuntimeException('Part of this prepaid expense has already been expensed; it cannot be reversed. Record an adjustment instead.');
+            }
             if ($original->payment_status === 'partial') {
                 throw new RuntimeException('Void the payments of this expense before reversing it.');
             }
@@ -177,7 +182,7 @@ class ExpenseService
     public static function allocate(Expense $expense, array $amountsByProject): void
     {
         $amountsByProject = array_filter($amountsByProject, fn ($a) => $a > 0);
-        if ($expense->status !== 'verified' || $expense->reverses_id || in_array($expense->classification, ['direct', 'asset'], true)) {
+        if ($expense->status !== 'verified' || $expense->reverses_id || in_array($expense->classification, ['direct', 'asset', 'prepaid'], true)) {
             throw new RuntimeException('Only a verified shared (operating, other or tax) expense can be split across projects.');
         }
         if (array_sum($amountsByProject) > $expense->amount) {

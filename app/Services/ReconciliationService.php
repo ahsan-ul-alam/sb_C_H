@@ -4,12 +4,18 @@ namespace App\Services;
 
 use App\Models\AccountingPeriod;
 use App\Models\CapitalEntry;
+use App\Models\CashAllocationBatch;
 use App\Models\Expense;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
+use App\Models\Loan;
 use App\Models\Partner;
 use App\Models\Payment;
+use App\Models\Project;
+use App\Models\ReconciliationReview;
 use App\Models\RevenueAdjustment;
+use App\Models\User;
+use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -23,6 +29,7 @@ class ReconciliationService
     public const BACKUP_TABLES = [
         'journal_entries', 'journal_lines', 'payments', 'payment_allocations', 'expenses', 'expense_payments', 'capital_entries',
         'revenue_adjustments', 'accounting_periods', 'financial_accounts', 'account_transfers', 'opening_batches', 'opening_lines',
+        'cash_allocation_batches', 'cash_allocation_lines', 'loans', 'loan_entries', 'other_incomes', 'prepaid_releases', 'expense_allocations', 'reconciliation_reviews',
     ];
 
     /**
@@ -32,7 +39,7 @@ class ReconciliationService
     {
         $rows = [];
         $add = function (string $area, string $check, int $recorded, int $recalculated, string $reason, string $proposal, string $unit = 'money') use (&$rows): void {
-            $rows[] = ['area' => $area, 'check' => $check, 'unit' => $unit, 'recorded' => $recorded, 'recalculated' => $recalculated,
+            $rows[] = ['key' => md5($area.'|'.$check), 'area' => $area, 'check' => $check, 'unit' => $unit, 'recorded' => $recorded, 'recalculated' => $recalculated,
                 'difference' => $recorded - $recalculated, 'ok' => $recorded === $recalculated, 'reason' => $reason, 'proposal' => $proposal];
         };
 
@@ -103,7 +110,73 @@ class ReconciliationService
         $advanceOutstanding = $verified('advance') - $verified('recognition') - $verified('refund', 'advance');
         $add('Customer payments', 'Customer advances: ledger vs verified adjustments', Ledger::creditBalance('customer.advances'), $advanceOutstanding, 'Verified adjustments in months that are neither closed nor in real-time posting are booked at close; until then the ledger is behind.', 'Close the month, or move the cutover earlier.');
 
+        // 9. Real-time cutover safety.
+        $configured = LedgerPostingService::configuredCutover();
+        $effective = LedgerPostingService::cutover();
+        $yyyymm = fn (?CarbonImmutable $d): int => $d ? (int) $d->format('Ym') : 0;
+        $add('Cutover', 'Configured real-time cutover month vs the month actually in force', $yyyymm($effective), $configured ? $yyyymm($configured) : $yyyymm($effective), 'The setting was moved to a month that is unsafe: later than months already journaled in real time, or earlier than a month already booked at period close. The system ignores the unsafe part.', 'Correct FINANCE_REALTIME_FROM to the month shown as in force.', 'count');
+        $bookedMonths = JournalEntry::where('source_type', 'period')->pluck('entry_date')->map(fn ($d) => substr((string) $d, 0, 7))->unique();
+        $realtimeMonths = JournalEntry::where(fn ($q) => $q->where('source_type', 'payment')->orWhere('source_type', 'like', 'payment\_v%'))->pluck('entry_date')->map(fn ($d) => substr((string) $d, 0, 7))->unique();
+        $add('Cutover', 'Months whose customer money was journaled both in real time and at period close', $bookedMonths->intersect($realtimeMonths)->count(), 0, 'The same payments are in the ledger twice for those months.', 'Reverse the period-close entry for the month (it is dated the last day of the month) after review.', 'count');
+
+        // 10. Project pages against the company figure.
+        $projectIds = Project::where('currency', config('finance.currency'))->pluck('id');
+        $company = RevenueRecognition::between(CarbonImmutable::parse('1970-01-01'), CarbonImmutable::parse('2100-01-01'))['income'];
+        $add('Profit consistency', 'Revenue recognised: sum of project pages vs company figure (all time)', (int) ProjectFinancialService::summaries($projectIds)->sum('recognised_revenue'), (int) $company, 'Project pages and the company P&L must use the same revenue recognition.', 'Investigate payments or adjustments that are not attached to a ledger-currency project.');
+
+        // 11. Prepaid, loans.
+        $add('Prepaid', 'Prepaid expenses: ledger asset vs paid-but-not-yet-expensed', Ledger::debitBalance('assets.prepaid'), PrepaidService::unreleased(), 'Releases and purchases must move the asset together.', 'Run finance:release-prepaid for the missing month(s).');
+        $loanOutstanding = (int) Loan::all()->sum(fn ($l) => $l->outstanding());
+        $add('Loans', 'Loans payable: ledger vs verified receipts minus repayments', Ledger::creditBalance('loans.payable'), $loanOutstanding, 'Every verified loan entry must be journaled once.', 'Review the loan entries without a journal entry.');
+
+        // 12. The profit the dashboard reports against the journal, and against what was frozen for distribution.
+        $months = AccountingPeriod::orderBy('month')->pluck('month');
+        for ($m = $effective; $m && $m->lte(CarbonImmutable::today()->startOfMonth()); $m = $m->addMonth()) {
+            $months->push($m->format('Y-m'));
+        }
+        foreach ($months->unique()->sort() as $month) {
+            $from = CarbonImmutable::createFromFormat('Y-m-d', $month.'-01')->startOfDay();
+            $to = $from->endOfMonth()->startOfDay();
+            $ledger = FinancialReportingService::ledgerProfitAndLoss($from, $to)['net'];
+            $report = FinancialReportingService::profitAndLoss($from, $to)['net_profit'];
+            if ($ledger !== $report) {
+                $add('Profit consistency', 'Month '.$month.': ledger profit vs dashboard accounting profit', $ledger, $report, 'Something in the month is not yet journaled (a payment recorded while real-time posting was off, or an unclosed pre-cutover month) or was changed outside the workflow.', 'Run finance:backfill-realtime / close the month, then re-check.');
+            }
+            $period = AccountingPeriod::firstWhere('month', $month);
+            if ($period && $period->net_profit !== $report) {
+                $add('Profit consistency', 'Month '.$month.': frozen (distributable) profit vs accounting profit', (int) $period->net_profit, $report, 'Different accounting basis, not an error: the frozen figure follows finance.distributable_basis ('.config('finance.distributable_basis').'), the dashboard follows the accounting basis (other income, prepaid spread over months).', 'None needed. Changing the distributable basis needs a Board decision and applies to future periods only.');
+            }
+        }
+
+        // 13. A prepared opening allocation that has gone stale.
+        $pending = CashAllocationBatch::where('status', 'pending')->first();
+        if ($pending) {
+            $add('Cash & bank', 'Pending opening allocation vs current unassigned cash', (int) $pending->unassigned_at_prepare, AccountingService::balance(null), 'The unassigned cash moved after the plan was prepared; approval will be refused.', 'Cancel the plan and prepare a new one.');
+        }
+
+        // Attach any review a person has recorded against a finding.
+        $reviews = ReconciliationReview::with('reviewer')->get()->keyBy('check_key');
+        foreach ($rows as &$row) {
+            $review = $reviews[$row['key']] ?? null;
+            $row['review'] = $review;
+            $row['changed_since_review'] = $review !== null && (int) $review->difference_at_review !== $row['difference'];
+        }
+        unset($row);
+
         return $rows;
+    }
+
+    /** Record that a person looked at a finding. A review never changes a figure; it is reopened if the difference later changes. */
+    public static function review(string $key, string $status, string $note, User $user): void
+    {
+        $row = collect(self::report())->firstWhere('key', $key);
+        if (! $row || $row['ok']) {
+            throw new \RuntimeException('That finding does not need a review.');
+        }
+        ReconciliationReview::updateOrCreate(['check_key' => $key], [
+            'status' => $status, 'note' => $note, 'difference_at_review' => $row['difference'], 'reviewed_by' => $user->id,
+        ]);
+        Audit::log('reconciliation.reviewed', $row['check'], $status.': '.$note);
     }
 
     /** Snapshot every finance table as JSON before any correction is applied. Returns the file path. */

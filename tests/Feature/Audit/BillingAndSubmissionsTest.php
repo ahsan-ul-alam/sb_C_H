@@ -88,7 +88,7 @@ it('refuses payments dated inside a closed period and reports income that equals
     $co->post('finance', 'finance.periods.close', ['month' => '2026-02'])->assertSessionHas('error'); // closed once
     $co->post('finance', 'finance.periods.close', ['month' => '2026-03'])->assertSessionHas('error'); // current month cannot close
     expect(AccountingPeriod::count())->toBe(1)->and(AccountingPeriod::first()->income)->toBe(300_000)
-        ->and(JournalLine::where('account', 'income')->sum('credit'))->toBe(300_000)->and(JournalLine::where('account', 'cash')->sum('debit'))->toBe(300_000);
+        ->and((int) JournalLine::where('account', 'income')->sum('credit'))->toBe(300_000)->and((int) JournalLine::where('account', 'cash')->sum('debit'))->toBe(300_000);
 });
 
 it('keeps unauthorised users out of ClientHub, finance posting and period actions without partial changes', function () {
@@ -135,5 +135,5 @@ it('protects received money when a segment or invoice is edited or deleted after
 
     $co->payInvoice($invoice, '3000', '2026-02-07')->assertSessionHasNoErrors();
     $co->as('finance')->delete(route('invoices.destroy', $invoice))->assertSessionHas('error'); // an invoice with payments is kept
-    expect(Invoice::count())->toBe(1)->and(Payment::sum('amount'))->toBe(500_000);
+    expect(Invoice::count())->toBe(1)->and((int) Payment::sum('amount'))->toBe(500_000);
 });

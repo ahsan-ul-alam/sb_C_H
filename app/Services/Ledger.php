@@ -70,10 +70,11 @@ class Ledger
     /**
      * Credit-normal balance (credits minus debits) of an account, optionally for one partner.
      */
-    public static function creditBalance(string $account, ?int $partnerId = null): int
+    public static function creditBalance(string $account, ?int $partnerId = null, bool $lock = false): int
     {
         $row = JournalLine::query()->where('account', $account)
             ->when($partnerId, fn ($q) => $q->where('partner_id', $partnerId))
+            ->when($lock, fn ($q) => $q->lockForUpdate())
             ->selectRaw('COALESCE(SUM(credit),0) c, COALESCE(SUM(debit),0) d')->first();
 
         return (int) $row->c - (int) $row->d;

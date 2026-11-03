@@ -4,6 +4,8 @@ namespace App\Http\Controllers;
 
 use App\Services\ReconciliationService;
 use App\Support\Money;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
 use Illuminate\View\View;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -13,6 +15,13 @@ class ReconciliationController extends Controller
     public function index(): View
     {
         return view('finance.reconciliation', ['rows' => ReconciliationService::report()]);
+    }
+
+    public function review(Request $request): RedirectResponse
+    {
+        $data = $request->validate(['key' => ['required', 'string', 'size:32'], 'status' => ['required', 'in:acknowledged,resolved'], 'note' => ['required', 'string', 'max:250']]);
+
+        return $this->attempt(fn () => ReconciliationService::review($data['key'], $data['status'], $data['note'], $request->user()), 'Review recorded. The figures were not changed.');
     }
 
     public function csv(): StreamedResponse

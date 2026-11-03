@@ -22,6 +22,7 @@
                     <select name="classification">@foreach (ExpenseService::CLASSIFICATIONS as $k => $label)<option value="{{ $k }}" @selected(old('classification', 'operating') === $k)>{{ $label }}</option>@endforeach</select></div>
                 <div class="field"><label>Project <span class="opt">(required for a direct project cost)</span></label>
                     <select name="project_id"><option value="">—</option>@foreach ($projects as $p)<option value="{{ $p->id }}" @selected((int) old('project_id') === $p->id)>{{ $p->name }}</option>@endforeach</select></div>
+                <div class="field"><label>Prepaid: spread over how many months?</label><input name="prepaid_months" type="number" min="1" max="60" value="{{ old('prepaid_months') }}" placeholder="only for prepaid expenses"></div>
                 <div class="field"><label>Vendor / recipient</label><input name="vendor" value="{{ old('vendor') }}"></div>
                 <div class="field"><label>Payment status</label>
                     <select name="payment_status"><option value="paid" @selected(old('payment_status', 'paid') === 'paid')>Paid now</option><option value="unpaid" @selected(old('payment_status') === 'unpaid')>Not yet paid (record a payable)</option></select></div>
@@ -46,6 +47,7 @@
                     <td>{{ $e->description }}
                         @if ($e->is_asset) <span class="badge badge-partial">Capital asset</span>@endif
                         @if ($e->classification === 'direct') <span class="badge badge-partial">Direct cost</span>@endif
+                        @if ($e->classification === 'prepaid') <span class="badge badge-partial">Prepaid · {{ $e->prepaid_months }} mo</span>@endif
                         @if ($e->reverses_id) <span class="badge badge-partial">Correction ({{ $e->correction_type }})</span>@endif
                         @if ($e->vendor || $e->project)<span class="secondary">{{ collect([$e->vendor, $e->project?->name])->filter()->implode(' · ') }}</span>@endif</td>
                     <td class="num">{{ Money::format($e->amount) }}</td>

@@ -31,11 +31,15 @@ class AccountingService
         return $accountId ?: self::defaultAccountId();
     }
 
-    /** Balance of one account, or of the unassigned legacy cash when null. */
-    public static function balance(?int $accountId): int
+    /**
+     * Balance of one account, or of the unassigned legacy cash when null. With $lock the read is a locking read, which always
+     * sees the latest committed data (a plain read inside a MySQL transaction can see an older snapshot).
+     */
+    public static function balance(?int $accountId, bool $lock = false): int
     {
         $row = JournalLine::query()->where('account', 'cash')
             ->when($accountId, fn ($q) => $q->where('financial_account_id', $accountId), fn ($q) => $q->whereNull('financial_account_id'))
+            ->when($lock, fn ($q) => $q->lockForUpdate())
             ->selectRaw('COALESCE(SUM(debit),0) d, COALESCE(SUM(credit),0) c')->first();
 
         return (int) $row->d - (int) $row->c;
@@ -76,13 +80,15 @@ class AccountingService
      * The no-overdraft rule for money leaving an account. Accounts flagged allow_negative are exempt, and money leaving
      * "unassigned" legacy cash is not checked (it predates accounts).
      */
-    public static function assertCanSpend(?int $accountId, int $amount, ?int $exceptEntryId = null): void
+    public static function assertCanSpend(?int $accountId, int $amount): void
     {
-        $account = $accountId ? FinancialAccount::find($accountId) : null;
+        // Serialise concurrent spenders: the account row is locked (inside the caller's transaction) before its balance is
+        // read, so two simultaneous withdrawals cannot both pass the check and overdraw it.
+        $account = $accountId ? FinancialAccount::whereKey($accountId)->lockForUpdate()->first() : null;
         if (! $account || $account->allow_negative) {
             return;
         }
-        $available = self::balance($account->id);
+        $available = self::balance($account->id, lock: true);
         if ($amount > $available) {
             throw new RuntimeException('Insufficient balance in "'.$account->name.'": '.Money::format(max(0, $available)).' available, '.Money::format($amount).' needed.');
         }
@@ -118,7 +124,10 @@ class AccountingService
                     }
                 }
                 self::assertCanSpend($from, $amount);
-                if ($from === null && self::balance(null) < $amount) {
+                if ($from === null) {
+                    FinancialAccount::lockForUpdate()->get(['id']); // legacy cash has no row of its own: lock them all
+                }
+                if ($from === null && self::balance(null, lock: true) < $amount) {
                     throw new RuntimeException('The unassigned legacy cash holds only '.Money::format(max(0, self::balance(null))).'.');
                 }
 

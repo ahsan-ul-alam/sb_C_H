@@ -15,7 +15,7 @@
             <thead><tr><th>Account</th><th>Type</th><th class="num">Inflows</th><th class="num">Outflows</th><th class="num">Balance</th></tr></thead>
             <tbody>
             @forelse ($balances as $b)
-                <tr><td>{{ $b['name'] }}@if ($b['account']?->is_default) <span class="badge badge-paid">Default</span>@endif @if ($b['account'] && ! $b['account']->is_active) <span class="badge badge-unpaid">Inactive</span>@endif</td>
+                <tr><td><a href="{{ $b['account'] ? route('finance.accounts.show', $b['account']) : route('finance.accounts.unassigned') }}">{{ $b['name'] }}</a>@if ($b['account']?->is_default) <span class="badge badge-paid">Default</span>@endif @if ($b['account'] && ! $b['account']->is_active) <span class="badge badge-unpaid">Inactive</span>@endif</td>
                     <td class="muted">{{ $b['type'] }}</td><td class="num">{{ Money::format($b['inflow']) }}</td><td class="num">{{ Money::format($b['outflow']) }}</td>
                     <td class="num strong {{ $b['balance'] < 0 ? 'text-danger' : '' }}">{{ Money::format($b['balance'], $cur) }}</td></tr>
             @empty
@@ -24,6 +24,14 @@
             </tbody>
         </table></div>
     </section>
+
+    <div style="display:flex; gap:.5rem; flex-wrap:wrap; margin-bottom:1rem">
+        <a class="btn" href="{{ route('finance.cash-allocation') }}">Opening cash allocation</a>
+        <a class="btn" href="{{ route('finance.expense-payments') }}">Expense payment history</a>
+        <a class="btn" href="{{ route('finance.loans') }}">Loans</a>
+        <a class="btn" href="{{ route('finance.other-income') }}">Other income</a>
+        <a class="btn" href="{{ route('finance.cost-allocation') }}">Shared cost allocation</a>
+    </div>
 
     @can('account.manage')
     <div class="grid grid-2">

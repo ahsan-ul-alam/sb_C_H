@@ -184,7 +184,7 @@ test('every admin screen renders', function () {
         $this->get($url)->assertOk();
     }
 
-    expect($payment->allocations()->sum('amount'))->toBe(10_000);
+    expect((int) $payment->allocations()->sum('amount'))->toBe(10_000);
 });
 
 test('dashboard separates period metrics, current balances and currencies', function () {

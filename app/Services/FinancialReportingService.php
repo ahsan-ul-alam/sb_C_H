@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\AccountingPeriod;
 use App\Models\CapitalEntry;
 use App\Models\Expense;
 use App\Models\JournalLine;
@@ -37,8 +38,12 @@ class FinancialReportingService
         $direct = $expenses['direct'];
         $gross = $revenue['income'] - $direct;
         $operating = $gross - $expenses['operating'];
-        $otherIncome = 0; // no module records non-trading income yet; kept explicit so the formula is visible
+        $otherIncome = FinancialStatements::otherIncome($from, $to);
         $net = $operating + $otherIncome - $expenses['other'] - $expenses['tax'];
+
+        // Memo only, never posted: the tax the configured rate would put on profit before the taxes actually recorded.
+        $rate = (int) config('finance.tax_rate_bps');
+        $beforeTax = $net + $expenses['tax'];
 
         return [
             'collected' => $revenue['collected'], 'recognised_revenue' => $revenue['income'],
@@ -46,6 +51,58 @@ class FinancialReportingService
             'operating_expenses' => $expenses['operating'], 'operating_profit' => $operating,
             'other_income' => $otherIncome, 'other_expenses' => $expenses['other'], 'taxes' => $expenses['tax'],
             'net_profit' => $net, 'total_expenses' => $direct + $expenses['operating'] + $expenses['other'] + $expenses['tax'],
+            'estimated_tax' => $rate > 0 ? intdiv(max(0, $beforeTax) * $rate, 10000) : 0,
+        ];
+    }
+
+    /**
+     * Profit and loss read straight from the journal (income accounts minus the expense account, by entry date). It is an
+     * independent cross-check of profitAndLoss(): the two agree for every month whose events are all journaled.
+     *
+     * @return array{revenue: int, other_income: int, expenses: int, net: int}
+     */
+    public static function ledgerProfitAndLoss(CarbonImmutable $from, CarbonImmutable $to): array
+    {
+        $rows = JournalLine::query()->join('journal_entries', 'journal_entries.id', '=', 'journal_lines.journal_entry_id')
+            ->whereIn('journal_lines.account', ['income', 'income.other', 'expense'])
+            ->whereDate('journal_entries.entry_date', '>=', $from)->whereDate('journal_entries.entry_date', '<=', $to)
+            ->selectRaw('journal_lines.account account, SUM(journal_lines.credit) c, SUM(journal_lines.debit) d')->groupBy('journal_lines.account')->get()->keyBy('account');
+        $net = fn (string $a) => (int) ($rows[$a]->c ?? 0) - (int) ($rows[$a]->d ?? 0);
+
+        return ['revenue' => $net('income'), 'other_income' => $net('income.other'), 'expenses' => -$net('expense'), 'net' => $net('income') + $net('income.other') + $net('expense')];
+    }
+
+    /**
+     * Why the dashboard's accounting profit for a month can differ from the profit the monthly close freezes and the partners'
+     * allocation distributes. Distributable profit is only ever the figure on an AccountingPeriod / Allocation; this is a read-only
+     * explanation, not a second source of truth.
+     *
+     * @return array<string, mixed>
+     */
+    public static function distributableBridge(string $month): array
+    {
+        $start = CarbonImmutable::createFromFormat('Y-m-d', $month.'-01')->startOfDay();
+        $end = $start->endOfMonth()->startOfDay();
+        $pl = self::profitAndLoss($start, $end);
+        $period = AccountingPeriod::with('allocation')->firstWhere('month', $month);
+        $basis = config('finance.distributable_basis');
+        $legacy = FinancialStatements::monthFigures($month);
+
+        $prepaidPaid = (int) Expense::where('status', 'verified')->where('classification', 'prepaid')->whereNull('reverses_id')
+            ->whereDate('spent_on', '>=', $start)->whereDate('spent_on', '<=', $end)->sum('amount');
+        $released = PrepaidService::releasedBetween($start, $end);
+
+        return [
+            'month' => $month, 'basis' => $basis,
+            'accounting_profit' => $pl['net_profit'],
+            'distributable_basis_profit' => $legacy['income'] - $legacy['expenses'], // live, on the configured basis
+            'frozen_period_profit' => $period?->net_profit,
+            'allocation_status' => $period?->allocation?->status,
+            'items' => [
+                'Other income (accounting only unless the Board adopts the accounting basis)' => $basis === 'accounting' ? 0 : $pl['other_income'],
+                'Prepaid costs: accounting spreads them; the legacy basis expenses them when paid' => $basis === 'accounting' ? 0 : $prepaidPaid - ($released['direct'] + $released['operating']),
+            ],
+            'unverified_items' => $legacy['pending'],
         ];
     }
 
@@ -57,13 +114,16 @@ class FinancialReportingService
      */
     public static function expenseTotals(CarbonImmutable $from, CarbonImmutable $to): array
     {
-        $rows = Expense::query()->where('status', 'verified')->where('is_asset', false)
+        // Prepaid purchases are an asset, not an expense, until released (month by month) below.
+        $rows = Expense::query()->where('status', 'verified')->where('is_asset', false)->where('classification', '!=', 'prepaid')
             ->whereDate('spent_on', '>=', $from)->whereDate('spent_on', '<=', $to)
             ->selectRaw("CASE WHEN classification = 'direct' OR category LIKE 'Sourcing:%' THEN 'direct' ELSE classification END AS cost_role, SUM(CASE WHEN reverses_id IS NULL THEN CAST(amount AS SIGNED) ELSE -CAST(amount AS SIGNED) END) AS total")
             ->groupBy('cost_role')->pluck('total', 'cost_role');
 
+        $released = PrepaidService::releasedBetween($from, $to);
+
         return [
-            'direct' => (int) ($rows['direct'] ?? 0), 'operating' => (int) ($rows['operating'] ?? 0),
+            'direct' => (int) ($rows['direct'] ?? 0) + $released['direct'], 'operating' => (int) ($rows['operating'] ?? 0) + $released['operating'],
             'other' => (int) ($rows['other'] ?? 0), 'tax' => (int) ($rows['tax'] ?? 0),
         ];
     }
@@ -94,6 +154,7 @@ class FinancialReportingService
             'net_profit' => $pl['net_profit'],
             'available_cash' => AccountingService::totalCash(),
             'accounts_payable' => self::accountsPayable(),
+            'loans_outstanding' => Ledger::creditBalance('loans.payable'),
         ];
     }
 

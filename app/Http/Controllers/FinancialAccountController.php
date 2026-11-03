@@ -4,9 +4,11 @@ namespace App\Http\Controllers;
 
 use App\Models\AccountTransfer;
 use App\Models\FinancialAccount;
+use App\Models\JournalLine;
 use App\Services\AccountingService;
 use App\Services\Audit;
 use App\Support\Money;
+use Carbon\CarbonImmutable;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
@@ -28,6 +30,43 @@ class FinancialAccountController extends Controller
             'accounts' => FinancialAccount::orderBy('name')->get(),
             'transfers' => AccountTransfer::with(['from', 'to'])->latest('transferred_on')->latest('id')->limit(50)->get(),
             'idempotencyKey' => (string) Str::uuid(),
+        ]);
+    }
+
+    /** Transaction history of one account, with a running balance. */
+    public function show(Request $request, FinancialAccount $account): View
+    {
+        return $this->ledger($request, $account);
+    }
+
+    /** Transaction history of the legacy cash that has no account yet. */
+    public function unassigned(Request $request): View
+    {
+        return $this->ledger($request, null);
+    }
+
+    private function ledger(Request $request, ?FinancialAccount $account): View
+    {
+        $to = $request->filled('to') ? CarbonImmutable::parse($request->query('to'))->startOfDay() : CarbonImmutable::today();
+        $from = $request->filled('from') ? CarbonImmutable::parse($request->query('from'))->startOfDay() : $to->subDays(89);
+        $base = fn () => JournalLine::query()->join('journal_entries', 'journal_entries.id', '=', 'journal_lines.journal_entry_id')->where('journal_lines.account', 'cash')
+            ->when($account, fn ($q) => $q->where('journal_lines.financial_account_id', $account->id), fn ($q) => $q->whereNull('journal_lines.financial_account_id'));
+
+        $opening = (int) $base()->whereDate('journal_entries.entry_date', '<', $from)->selectRaw('COALESCE(SUM(journal_lines.debit),0) - COALESCE(SUM(journal_lines.credit),0) AS b')->value('b');
+        $lines = $base()->whereDate('journal_entries.entry_date', '>=', $from)->whereDate('journal_entries.entry_date', '<=', $to)
+            ->orderBy('journal_entries.entry_date')->orderBy('journal_lines.id')->limit(2000)
+            ->get(['journal_entries.id as entry_id', 'journal_entries.entry_date', 'journal_entries.memo', 'journal_entries.source_type', 'journal_lines.debit', 'journal_lines.credit']);
+
+        $running = $opening;
+        $rows = $lines->map(function ($l) use (&$running) {
+            $running += (int) $l->debit - (int) $l->credit;
+
+            return ['entry' => 'JE-'.str_pad((string) $l->entry_id, 6, '0', STR_PAD_LEFT), 'date' => $l->entry_date, 'memo' => $l->memo, 'type' => $l->source_type, 'in' => (int) $l->debit, 'out' => (int) $l->credit, 'balance' => $running];
+        });
+
+        return view('finance.account-ledger', [
+            'account' => $account, 'from' => $from, 'to' => $to, 'opening' => $opening, 'rows' => $rows->reverse()->values(),
+            'closing' => $running, 'current' => AccountingService::balance($account?->id), 'in' => (int) $lines->sum('debit'), 'out' => (int) $lines->sum('credit'),
         ]);
     }
 
