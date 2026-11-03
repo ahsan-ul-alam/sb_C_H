@@ -6,6 +6,7 @@ use App\Models\AccountingPeriod;
 use App\Models\Payment;
 use App\Models\RevenueAdjustment;
 use App\Services\Audit;
+use App\Services\LedgerPostingService;
 use App\Support\Money;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -40,6 +41,7 @@ class RevenueController extends Controller
             'amount' => ['nullable', 'regex:'.Money::AMOUNT_REGEX],
             'effective_on' => ['nullable', 'date'],
             'reason' => ['nullable', 'string', 'max:200'],
+            'financial_account_id' => ['nullable', 'exists:financial_accounts,id'],
         ]);
 
         return $this->attempt(function () use ($request, $payment, $data) {
@@ -90,7 +92,8 @@ class RevenueController extends Controller
                 }
 
                 $adjustment = RevenueAdjustment::create(['payment_id' => $payment->id, 'kind' => $kind, 'against' => $against,
-                    'amount' => $amount, 'effective_on' => $date, 'reason' => $data['reason'] ?? null, 'created_by' => $request->user()->id]);
+                    'amount' => $amount, 'effective_on' => $date, 'reason' => $data['reason'] ?? null, 'created_by' => $request->user()->id,
+                    'financial_account_id' => $kind === 'refund' ? ($data['financial_account_id'] ?? null) : null]);
                 Audit::log('revenue.'.$kind.'_recorded', 'payment '.$payment->id, (string) $amount);
             });
         }, 'Recorded; awaiting verification by a Board member.');
@@ -113,9 +116,12 @@ class RevenueController extends Controller
                     throw new RuntimeException('That month has been closed meanwhile; reject this and record it again in an open month.');
                 }
                 $adjustment->update(['status' => $approve ? 'verified' : 'rejected', 'verified_by' => $request->user()->id, 'verified_at' => now()]);
+                if ($approve) {
+                    LedgerPostingService::postAdjustment($adjustment, $request->user()->id);
+                }
                 Audit::log('revenue.'.($approve ? 'verified' : 'rejected'), 'adjustment '.$adjustment->id);
             });
-        }, $approve ? 'Adjustment verified; it will be booked when its month closes.' : 'Adjustment rejected.');
+        }, $approve ? 'Adjustment verified; it is booked now if its month is in real-time posting, otherwise when its month closes.' : 'Adjustment rejected.');
     }
 
     /**

@@ -161,17 +161,25 @@ class FinancialStatements
             ->whereIn('account', ['partner.capital', 'partner.payable'])->groupBy('account', 'partner_id')->get()
             ->groupBy('partner_id')->map(fn ($g) => $g->keyBy('account'));
 
-        $rows = $partners->map(function (Partner $p) use ($lines, $policy) {
+        // Withdrawals and reversals also move partner.capital; keep them out of "contributed" and "loss charged".
+        $entries = CapitalEntry::selectRaw('partner_id, kind, status, SUM(amount) a')->whereIn('status', ['verified', 'reversed', 'pending'])
+            ->groupBy('partner_id', 'kind', 'status')->get()->groupBy('partner_id');
+        $entrySum = fn (int $partnerId, string $status, ?string $kind = null) => (int) ($entries[$partnerId] ?? collect())
+            ->where('status', $status)->when($kind, fn ($c) => $c->where('kind', $kind))->sum('a');
+
+        $rows = $partners->map(function (Partner $p) use ($lines, $policy, $entrySum) {
             $l = $lines[$p->id] ?? collect();
-            $contributed = (int) ($l['partner.capital']->c ?? 0);
-            $lossCharged = (int) ($l['partner.capital']->d ?? 0);
+            $reversed = $entrySum($p->id, 'reversed');
+            $withdrawn = $entrySum($p->id, 'verified', 'withdrawal');
+            $contributed = (int) ($l['partner.capital']->c ?? 0) - $reversed;
+            $lossCharged = (int) ($l['partner.capital']->d ?? 0) - $reversed - $withdrawn;
             $accrued = (int) ($l['partner.payable']->c ?? 0);
             $paidOut = (int) ($l['partner.payable']->d ?? 0);
 
             return [
                 'partner' => $p, 'target_bps' => $policy?->investment_bps[$p->code] ?? null, 'contributed' => $contributed,
-                'pending' => (int) CapitalEntry::where('partner_id', $p->id)->where('status', 'pending')->sum('amount'),
-                'loss_charged' => $lossCharged, 'capital_balance' => $contributed - $lossCharged,
+                'pending' => $entrySum($p->id, 'pending'), 'withdrawn' => $withdrawn,
+                'loss_charged' => $lossCharged, 'capital_balance' => $contributed - $lossCharged - $withdrawn,
                 'accrued' => $accrued, 'paid_out' => $paidOut, 'outstanding' => $accrued - $paidOut,
                 'payout_open' => (int) Payout::where('partner_id', $p->id)->whereIn('status', ['requested', 'approved'])->sum('amount'),
             ];

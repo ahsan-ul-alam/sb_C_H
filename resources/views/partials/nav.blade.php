@@ -22,6 +22,8 @@
             ['Sourcing Reports', 'sourcing.reports', 'sourcing.reports', 'chart', ['sourcing.reports']],
         ],
         'Finance' => [
+            ['Financial Overview', 'finance.overview', 'finance.view', 'dashboard', ['finance.overview']],
+            ['Cash & Bank Accounts', 'finance.accounts', 'finance.view', 'wallet', ['finance.accounts*']],
             ['Investment Overview', 'finance.investment', 'finance.view', 'chart', ['finance.investment']],
             ['Financial Position', 'finance.position', 'finance.view', 'layers', ['finance.position']],
             ['Profit & Loss', 'finance.pnl', 'finance.view', 'chart', ['finance.pnl']],
@@ -43,6 +45,7 @@
         'Reports' => [
             ['Financial Reports', 'finance.reports', 'finance.view', 'chart', ['finance.reports*']],
             ['Journal', 'finance.journal', 'finance.view', 'folder', ['finance.journal*']],
+            ['Reconciliation', 'finance.reconciliation', 'finance.view', 'check-circle', ['finance.reconciliation*']],
             ['Audit Log', 'finance.audit', 'finance.view', 'eye', ['finance.audit*']],
         ],
         'Administration' => [

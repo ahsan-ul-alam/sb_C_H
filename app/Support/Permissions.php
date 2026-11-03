@@ -27,6 +27,7 @@ class Permissions
     public const GOVERNANCE = [
         'policy.approve', 'allocation.approve', 'payout.approve', 'resolution.decide', 'period.verify',
         'exit.approve', 'capital.verify', 'expense.verify', 'opening.approve', 'sourcing.fund.approve', 'sourcing.negative_margin',
+        'transfer.void',
     ];
 
     /**
@@ -37,10 +38,11 @@ class Permissions
         $view = ['finance.view'];
         $roles = [
             'board_member' => [...$view, 'policy.create', 'policy.approve', 'allocation.approve', 'payout.approve',
-                'resolution.create', 'resolution.decide', 'period.verify', 'exit.approve', 'partner.manage', 'capital.verify', 'expense.verify', 'opening.approve', 'document.upload',
+                'resolution.create', 'resolution.decide', 'period.verify', 'exit.approve', 'partner.manage', 'capital.verify', 'expense.verify', 'opening.approve', 'document.upload', 'transfer.void',
                 'sourcing.view', 'sourcing.reports', 'sourcing.price.approve', 'sourcing.negative_margin', 'sourcing.fund.approve', 'sourcing.supplier.secrets', 'commission.view'],
             'finance' => ['clienthub', ...$view, 'capital.record', 'expense.record', 'period.close', 'allocation.prepare',
                 'allocation.post', 'payout.pay', 'resolution.pay', 'exit.prepare', 'exit.pay', 'policy.create', 'revenue.record', 'opening.prepare', 'document.upload',
+                'account.manage', 'transfer.record', 'expense.pay',
                 'sourcing.view', 'sourcing.reports', 'sourcing.manage', 'sourcing.override', 'sourcing.price.approve', 'sourcing.payment.record',
                 'sourcing.fund.request', 'sourcing.fund.utilize', 'sourcing.settle', 'sourcing.supplier.secrets',
                 'commission.view', 'commission.manage', 'commission.rates'],

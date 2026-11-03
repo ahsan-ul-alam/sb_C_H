@@ -65,6 +65,9 @@ class PaymentRecorder
                     'reference' => $data['reference'] ?? null,
                     'notes' => $data['notes'] ?? null,
                 ]);
+                if (array_key_exists('financial_account_id', $data)) {
+                    $payment->financial_account_id = $data['financial_account_id'] ?: null;
+                }
                 $payment->project()->associate($project);
                 $payment->invoice()->associate($invoice);
 
@@ -81,6 +84,7 @@ class PaymentRecorder
 
                 $invoice?->refreshPaymentStatus();
                 Invoice::refreshBillingSegments(array_keys(array_filter($allocations)), $invoice?->id);
+                LedgerPostingService::syncPayment($payment, auth()->id());
 
                 return $payment;
             });
@@ -94,6 +98,7 @@ class PaymentRecorder
         DB::transaction(function () use ($payment): void {
             $invoice = $payment->invoice;
             $segmentIds = $payment->allocations()->pluck('segment_id')->all();
+            LedgerPostingService::voidPayment($payment, auth()->id());
             $payment->delete();
             $invoice?->refreshPaymentStatus();
             Invoice::refreshBillingSegments($segmentIds, $invoice?->id);

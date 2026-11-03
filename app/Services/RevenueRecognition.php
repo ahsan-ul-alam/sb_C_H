@@ -22,8 +22,17 @@ class RevenueRecognition
     public static function figures(string $month): array
     {
         $start = CarbonImmutable::createFromFormat('Y-m-d', $month.'-01')->startOfMonth();
-        $end = $start->endOfMonth();
 
+        return self::between($start, $start->endOfMonth());
+    }
+
+    /**
+     * The same figures for any date range (a month is just one such range).
+     *
+     * @return array{collected: int, advances: int, recognised: int, refund_revenue: int, refund_advance: int, income: int, pending: int}
+     */
+    public static function between(CarbonImmutable $start, CarbonImmutable $end): array
+    {
         $collected = (int) Payment::query()
             ->whereHas('project', fn ($q) => $q->where('currency', config('finance.currency')))
             ->whereDate('paid_on', '>=', $start)->whereDate('paid_on', '<=', $end)->sum('amount');

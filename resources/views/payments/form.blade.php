@@ -52,6 +52,18 @@
                             @endforeach
                         </select>
                     </div>
+                    @php($financialAccounts = \App\Models\FinancialAccount::where('is_active', true)->orderBy('name')->get())
+                    @if ($financialAccounts->isNotEmpty())
+                        <div class="field">
+                            <label for="financial_account_id">Received into</label>
+                            <select id="financial_account_id" name="financial_account_id">
+                                <option value="">Default account</option>
+                                @foreach ($financialAccounts as $account)
+                                    <option value="{{ $account->id }}" @selected((int) old('financial_account_id', $payment->financial_account_id) === $account->id)>{{ $account->name }}</option>
+                                @endforeach
+                            </select>
+                        </div>
+                    @endif
                     <div class="field">
                         <label for="reference">Reference <span class="opt">(optional)</span></label>
                         <input type="text" id="reference" name="reference" value="{{ old('reference', $payment->reference) }}" placeholder="Transaction ID, cheque no.">

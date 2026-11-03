@@ -28,4 +28,16 @@ class JournalEntry extends Model
     {
         return $this->hasMany(JournalLine::class);
     }
+
+    /** Stable human-readable transaction reference, derived from the immutable id. */
+    public function reference(): string
+    {
+        return 'JE-'.str_pad((string) $this->id, 6, '0', STR_PAD_LEFT);
+    }
+
+    /** Posting status is derived, never stored: an entry is reversed once another entry points at it. */
+    public function isReversed(): bool
+    {
+        return static::where('reversal_of', $this->id)->exists();
+    }
 }

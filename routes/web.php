@@ -10,6 +10,8 @@ use App\Http\Controllers\ExitController;
 use App\Http\Controllers\ExpenseController;
 use App\Http\Controllers\FaviconController;
 use App\Http\Controllers\FinanceController;
+use App\Http\Controllers\FinancialAccountController;
+use App\Http\Controllers\FinancialOverviewController;
 use App\Http\Controllers\FinancialStatementsController;
 use App\Http\Controllers\HomeController;
 use App\Http\Controllers\InvoiceController;
@@ -22,6 +24,7 @@ use App\Http\Controllers\PayoutController;
 use App\Http\Controllers\PeriodController;
 use App\Http\Controllers\PolicyController;
 use App\Http\Controllers\ProjectController;
+use App\Http\Controllers\ReconciliationController;
 use App\Http\Controllers\ReportController;
 use App\Http\Controllers\ResolutionController;
 use App\Http\Controllers\RevenueController;
@@ -178,6 +181,10 @@ Route::middleware('auth')->group(function () {
             Route::get('position', [FinancialStatementsController::class, 'position'])->name('position');
             Route::get('profit-loss', [FinancialStatementsController::class, 'profitLoss'])->name('pnl');
             Route::get('automation', [AutomationController::class, 'index'])->name('automation');
+            Route::get('overview', [FinancialOverviewController::class, 'index'])->name('overview');
+            Route::get('accounts', [FinancialAccountController::class, 'index'])->name('accounts');
+            Route::get('reconciliation', [ReconciliationController::class, 'index'])->name('reconciliation');
+            Route::get('reconciliation.csv', [ReconciliationController::class, 'csv'])->name('reconciliation.csv');
             Route::get('documents/{document}', [DocumentController::class, 'download'])->name('documents.download');
         });
 
@@ -202,6 +209,15 @@ Route::middleware('auth')->group(function () {
         Route::post('capital/{capital}/decide', [CapitalController::class, 'decide'])->name('capital.decide')->middleware('can:capital.verify');
         Route::post('expenses', [ExpenseController::class, 'store'])->name('expenses.store')->middleware('can:expense.record');
         Route::post('expenses/{expense}/decide', [ExpenseController::class, 'decide'])->name('expenses.decide')->middleware('can:expense.verify');
+        Route::post('expenses/{expense}/pay', [ExpenseController::class, 'pay'])->name('expenses.pay')->middleware('can:expense.pay');
+        Route::post('expense-payments/{expensePayment}/void', [ExpenseController::class, 'voidPayment'])->name('expenses.payments.void')->middleware('can:expense.pay');
+        Route::post('expenses/{expense}/reverse', [ExpenseController::class, 'reverse'])->name('expenses.reverse')->middleware('can:expense.record');
+        Route::post('expenses/{expense}/allocate', [ExpenseController::class, 'allocate'])->name('expenses.allocate')->middleware('can:expense.record');
+        Route::post('capital/{capital}/reverse', [CapitalController::class, 'reverse'])->name('capital.reverse')->middleware('can:capital.verify');
+        Route::post('accounts', [FinancialAccountController::class, 'store'])->name('accounts.store')->middleware('can:account.manage');
+        Route::put('accounts/{account}', [FinancialAccountController::class, 'update'])->name('accounts.update')->middleware('can:account.manage');
+        Route::post('transfers', [FinancialAccountController::class, 'transfer'])->name('transfers.store')->middleware('can:transfer.record');
+        Route::post('transfers/{transfer}/void', [FinancialAccountController::class, 'voidTransfer'])->name('transfers.void')->middleware('can:transfer.void');
 
         Route::post('periods', [PeriodController::class, 'close'])->name('periods.close')->middleware('can:period.close');
         Route::post('periods/{period}/verify', [PeriodController::class, 'verify'])->name('periods.verify')->middleware('can:period.verify');

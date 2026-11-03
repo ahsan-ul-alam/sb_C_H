@@ -15,7 +15,7 @@ use Illuminate\Validation\ValidationException;
  * One row per real-world transaction. It always belongs to a project, may belong to an
  * invoice, and may be allocated to one or more segments. Totals sum this table once.
  */
-#[Fillable(['amount', 'paid_on', 'method', 'reference', 'notes'])]
+#[Fillable(['amount', 'paid_on', 'method', 'reference', 'notes', 'financial_account_id'])]
 class Payment extends Model
 {
     /**

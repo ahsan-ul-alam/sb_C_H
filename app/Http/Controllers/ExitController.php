@@ -4,10 +4,10 @@ namespace App\Http\Controllers;
 
 use App\Models\Document;
 use App\Models\ExitSettlement;
-use App\Models\JournalLine;
 use App\Models\Partner;
 use App\Models\Resolution;
 use App\Services\Audit;
+use App\Services\InvestmentService;
 use App\Services\Ledger;
 use App\Services\ProfitAllocator;
 use App\Support\Money;
@@ -70,10 +70,13 @@ class ExitController extends Controller
             $incentive = (int) bcdiv(bcmul((string) $base, (string) $bps, 0), '10000', 0);
 
             // Gross paid-in capital from the ledger (verified entries and opening balances); losses are deducted separately below.
-            $recorded = (int) JournalLine::where('account', 'partner.capital')->where('partner_id', $partner->id)->sum('credit');
+            $recorded = InvestmentService::contributedTotal($partner->id);
             $losses = (int) DB::table('allocation_lines as l')->join('allocations as a', 'a.id', '=', 'l.allocation_id')
                 ->where('a.status', 'posted')->where('a.kind', 'loss')->where('l.partner_id', $partner->id)->sum('l.amount');
-            $withdrawals = Money::toMinor($data['previous_withdrawals'] ?? 0);
+            // Left blank, the verified capital withdrawals recorded in the ledger are used, so they are never forgotten.
+            $withdrawals = filled($data['previous_withdrawals'] ?? null)
+                ? Money::toMinor($data['previous_withdrawals'])
+                : InvestmentService::withdrawnTotal($partner->id);
             $expenses = Money::toMinor($data['expenses_liabilities'] ?? 0);
             $adjusted = $recorded - $losses - $expenses - $withdrawals;
 

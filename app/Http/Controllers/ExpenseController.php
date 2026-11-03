@@ -3,8 +3,13 @@
 namespace App\Http\Controllers;
 
 use App\Models\AccountingPeriod;
+use App\Models\Document;
 use App\Models\Expense;
+use App\Models\ExpensePayment;
+use App\Models\FinancialAccount;
+use App\Models\Project;
 use App\Services\Audit;
+use App\Services\ExpenseService;
 use App\Services\ExpenseVerifier;
 use App\Services\SourcingPayments;
 use App\Support\Money;
@@ -18,7 +23,13 @@ class ExpenseController extends Controller
 {
     public function index(): View
     {
-        return view('finance.expenses', ['expenses' => Expense::latest('spent_on')->latest('id')->paginate(50)]);
+        return view('finance.expenses', [
+            'expenses' => Expense::with(['project', 'account', 'payments.account'])->latest('spent_on')->latest('id')->paginate(50),
+            'accounts' => FinancialAccount::where('is_active', true)->orderBy('name')->get(),
+            'projects' => Project::whereNull('archived_at')->orderBy('name')->get(['id', 'name']),
+            'documents' => Document::latest('id')->limit(100)->get(),
+            'payable' => (int) Expense::where('status', 'verified')->whereNull('reverses_id')->whereIn('payment_status', ['unpaid', 'partial'])->sum(DB::raw('amount - paid_amount')),
+        ]);
     }
 
     public function store(Request $request): RedirectResponse
@@ -28,10 +39,22 @@ class ExpenseController extends Controller
             'description' => ['required', 'string', 'max:200'],
             'amount' => ['required', 'regex:'.Money::AMOUNT_REGEX],
             'spent_on' => ['required', 'date'],
+            'classification' => ['nullable', 'in:'.implode(',', array_keys(ExpenseService::CLASSIFICATIONS))],
+            'payment_status' => ['nullable', 'in:paid,unpaid'],
+            'paid_on' => ['nullable', 'date'],
+            'financial_account_id' => ['nullable', 'exists:financial_accounts,id'],
+            'project_id' => ['nullable', 'exists:projects,id'],
+            'vendor' => ['nullable', 'string', 'max:120'],
+            'document_id' => ['nullable', 'exists:documents,id'],
         ]);
         $amount = Money::toMinor($data['amount']);
         if ($amount <= 0) {
             return back()->with('error', 'Amount must be positive.')->withInput();
+        }
+        $isAsset = $request->boolean('is_asset') || ($data['classification'] ?? null) === 'asset';
+        $data['classification'] = $isAsset ? 'asset' : ($data['classification'] ?? 'operating');
+        if ($data['classification'] === 'direct' && empty($data['project_id'])) {
+            return back()->with('error', 'A direct project cost must name its project.')->withInput();
         }
         if (AccountingPeriod::where('month', substr($data['spent_on'], 0, 7))->exists()) {
             return back()->with('error', 'That month is already closed; record a correction in an open month.')->withInput();
@@ -40,7 +63,12 @@ class ExpenseController extends Controller
             ->where('status', '!=', 'rejected')->whereNull('reverses_id')->exists()) {
             return back()->with('error', 'An identical expense (same category, description, amount and date) already exists. If this is a genuine second payment, change the description.')->withInput();
         }
-        $expense = ExpenseVerifier::record([...$data, 'amount' => $amount, 'is_asset' => $request->boolean('is_asset')], $request->user());
+        $unpaid = ($data['payment_status'] ?? 'paid') === 'unpaid';
+        $data['payment_status'] = $unpaid ? 'unpaid' : 'paid';
+        if ($unpaid) {
+            unset($data['paid_on']);
+        }
+        $expense = ExpenseVerifier::record([...array_filter($data, fn ($v) => $v !== null && $v !== ''), 'amount' => $amount, 'is_asset' => $isAsset], $request->user());
         Audit::log('expense.recorded', 'expense '.$expense->id, (string) $amount);
 
         return back()->with('status', $expense->status === 'verified'
@@ -66,8 +94,53 @@ class ExpenseController extends Controller
                     ExpenseVerifier::post($expense, $request->user()->id);
                 }
                 SourcingPayments::onCorrectionDecided($expense, $approve);
+                ExpenseService::onDecided($expense, $approve);
                 Audit::log('expense.'.($approve ? 'verified' : 'rejected'), 'expense '.$expense->id);
             });
         }, $approve ? 'Expense verified and posted.' : 'Expense rejected.');
+    }
+
+    /** Pay all or part of an unpaid expense. */
+    public function pay(Request $request, Expense $expense): RedirectResponse
+    {
+        $data = $request->validate([
+            'amount' => ['required', 'regex:'.Money::AMOUNT_REGEX],
+            'paid_on' => ['required', 'date'],
+            'financial_account_id' => ['nullable', 'exists:financial_accounts,id'],
+            'reference' => ['nullable', 'string', 'max:200'],
+            'idempotency_key' => ['nullable', 'uuid'],
+        ]);
+
+        return $this->attempt(function () use ($request, $expense, $data) {
+            $payment = ExpenseService::pay($expense, [...$data, 'amount' => Money::toMinor($data['amount'])], $request->user());
+            if (! $payment) {
+                throw new RuntimeException('This payment was already recorded.');
+            }
+        }, 'Payment recorded.');
+    }
+
+    public function voidPayment(Request $request, ExpensePayment $expensePayment): RedirectResponse
+    {
+        return $this->attempt(fn () => ExpenseService::voidPayment($expensePayment, $request->user()), 'Payment voided; the payable is restored.');
+    }
+
+    /** Request a reversal; the Board verifies it like any correction. */
+    public function reverse(Request $request, Expense $expense): RedirectResponse
+    {
+        $data = $request->validate([
+            'type' => ['nullable', 'in:recording_error,refund_received,credit_note'],
+            'reason' => ['required', 'string', 'max:150'],
+        ]);
+
+        return $this->attempt(fn () => ExpenseService::reverse($expense, $data['type'] ?? null, $data['reason'], $request->user()), 'Reversal recorded; awaiting Board verification.');
+    }
+
+    /** Explicit split of a shared expense across projects (reporting only). */
+    public function allocate(Request $request, Expense $expense): RedirectResponse
+    {
+        $data = $request->validate(['allocations' => ['required', 'array'], 'allocations.*' => ['nullable', 'regex:'.Money::AMOUNT_REGEX]]);
+        $amounts = collect($data['allocations'])->filter(fn ($v) => trim((string) $v) !== '')->map(fn ($v) => Money::toMinor($v))->mapWithKeys(fn ($v, $k) => [(int) $k => $v])->all();
+
+        return $this->attempt(fn () => ExpenseService::allocate($expense, $amounts), 'Shared cost split saved.');
     }
 }

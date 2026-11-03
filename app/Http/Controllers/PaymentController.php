@@ -187,6 +187,7 @@ class PaymentController extends Controller
             'reference' => ['nullable', 'string', 'max:255'],
             'notes' => ['nullable', 'string', 'max:5000'],
             'idempotency_key' => ['nullable', 'uuid'],
+            'financial_account_id' => ['nullable', 'exists:financial_accounts,id'],
             'allocations' => ['nullable', 'array'],
             'allocations.*' => ['nullable', 'regex:'.Money::AMOUNT_REGEX],
         ], [
@@ -197,6 +198,9 @@ class PaymentController extends Controller
 
         $data['amount'] = Money::toMinor($data['amount']);
         $data['idempotency_key'] ??= null;
+        if (! $request->has('financial_account_id')) {
+            unset($data['financial_account_id']); // an edit that does not show the field keeps the account as it was
+        }
         unset($data['allocations']);
 
         return $data;

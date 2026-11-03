@@ -9,11 +9,14 @@ use RuntimeException;
 /**
  * Minimal balanced double-entry journal. Entries are immutable; the unique (source_type, source_id)
  * makes every posting idempotent. Call inside a DB transaction.
+ *
+ * A "cash" line may carry the financial account (office cash, a bank, …) it moved money in or out of. A cash line posted
+ * without one goes to the default financial account when one exists; otherwise it stays "unassigned" (legacy cash).
  */
 class Ledger
 {
     /**
-     * @param  list<array{0: string, 1: int|null, 2: int, 3: int}>  $lines  [account, partner_id, debit, credit]
+     * @param  list<array{0: string, 1: int|null, 2: int, 3: int, 4?: int|null}>  $lines  [account, partner_id, debit, credit, financial_account_id?]
      */
     public static function post(string $date, string $memo, string $sourceType, int $sourceId, array $lines, ?int $userId, ?int $reversalOf = null): JournalEntry
     {
@@ -30,14 +33,38 @@ class Ledger
             'entry_date' => $date, 'memo' => $memo, 'source_type' => $sourceType, 'source_id' => $sourceId,
             'reversal_of' => $reversalOf, 'posted_by' => $userId,
         ]);
-        foreach ($lines as [$account, $partnerId, $dr, $cr]) {
+        foreach ($lines as $line) {
+            [$account, $partnerId, $dr, $cr] = $line;
             if ($dr === 0 && $cr === 0) {
                 continue;
             }
-            JournalLine::create(['journal_entry_id' => $entry->id, 'account' => $account, 'partner_id' => $partnerId, 'debit' => $dr, 'credit' => $cr]);
+            $financialAccountId = $account === 'cash'
+                ? (array_key_exists(4, $line) ? $line[4] : AccountingService::defaultAccountId())
+                : null;
+            JournalLine::create([
+                'journal_entry_id' => $entry->id, 'account' => $account, 'partner_id' => $partnerId,
+                'debit' => $dr, 'credit' => $cr, 'financial_account_id' => $financialAccountId,
+            ]);
         }
 
         return $entry;
+    }
+
+    /**
+     * Reverse a posted entry with an equal and opposite entry that points back at it (the original is never touched).
+     * Each line keeps its account, partner and financial account. An entry can be reversed once.
+     */
+    public static function reverse(JournalEntry $original, string $date, string $memo, string $sourceType, int $sourceId, ?int $userId): JournalEntry
+    {
+        if ($original->isReversed()) {
+            throw new RuntimeException('This entry has already been reversed.');
+        }
+
+        $lines = $original->lines()->get()->map(fn (JournalLine $l) => [
+            $l->account, $l->partner_id, (int) $l->credit, (int) $l->debit, $l->financial_account_id,
+        ])->all();
+
+        return self::post($date, $memo, $sourceType, $sourceId, $lines, $userId, $original->id);
     }
 
     /**

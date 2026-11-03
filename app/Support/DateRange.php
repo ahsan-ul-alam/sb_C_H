@@ -11,6 +11,8 @@ use Illuminate\Http\Request;
 class DateRange
 {
     public const PRESETS = [
+        'today' => 'Today',
+        'this_week' => 'This week',
         'this_month' => 'This month',
         'last_month' => 'Last month',
         'last_30_days' => 'Last 30 days',
@@ -39,6 +41,8 @@ class DateRange
         }
 
         return match ($preset) {
+            'today' => new self($preset, $today, $today),
+            'this_week' => new self($preset, $today->startOfWeek(), $today->endOfWeek()->startOfDay()),
             'last_month' => new self($preset, $today->subMonthNoOverflow()->startOfMonth(), $today->subMonthNoOverflow()->endOfMonth()->startOfDay()),
             'last_30_days' => new self($preset, $today->subDays(29), $today),
             'this_quarter' => new self($preset, $today->startOfQuarter(), $today->endOfQuarter()->startOfDay()),

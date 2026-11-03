@@ -37,7 +37,8 @@ class PeriodProcessor
                 'closed_by' => $user?->id, 'auto_policy_id' => $authority?->id,
             ]);
             // Book the month's cash, earned income, refunds and customer-advance liability (expenses were journaled on verification).
-            $lines = RevenueRecognition::journalLines($f);
+            // From the real-time cutover month on, every one of those was already journaled when it happened.
+            $lines = LedgerPostingService::isRealtimeMonth($month) ? [] : RevenueRecognition::journalLines($f);
             if ($lines) {
                 Ledger::post(CarbonImmutable::createFromFormat('Y-m-d', $month.'-01')->endOfMonth()->toDateString(), 'Income '.$month, 'period', $period->id, $lines, $user?->id);
             }

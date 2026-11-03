@@ -24,13 +24,25 @@ class ExpenseVerifier
     public static function lines(Expense $e): array
     {
         $amount = (int) $e->amount;
+        $accountId = AccountingService::resolveAccountId($e->financial_account_id);
         if ($e->reverses_id) {
-            $debit = $e->correction_type === 'credit_note' ? 'supplier.credit' : 'cash';
+            $expenseAccount = self::original($e)->is_asset ? 'assets.equipment' : 'expense';
+            // An expense that was never paid is cancelled against its payable; nothing moves in cash.
+            $debit = match ($e->correction_type) {
+                'liability_cancel' => ['liabilities', null, $amount, 0],
+                'credit_note' => ['supplier.credit', null, $amount, 0],
+                default => ['cash', null, $amount, 0, $accountId],
+            };
 
-            return [[$debit, null, $amount, 0], [self::original($e)->is_asset ? 'assets.equipment' : 'expense', null, 0, $amount]];
+            return [$debit, [$expenseAccount, null, 0, $amount]];
         }
 
-        return [[$e->is_asset ? 'assets.equipment' : 'expense', null, $amount, 0], ['cash', null, 0, $amount]];
+        $expenseAccount = $e->is_asset ? 'assets.equipment' : 'expense';
+
+        // Recorded but not yet paid: the cost is real, but it is a payable until the money actually leaves an account.
+        return $e->payment_status === 'unpaid'
+            ? [[$expenseAccount, null, $amount, 0], ['liabilities', null, 0, $amount]]
+            : [[$expenseAccount, null, $amount, 0], ['cash', null, 0, $amount, $accountId]];
     }
 
     private static function original(Expense $e): Expense
@@ -40,6 +52,9 @@ class ExpenseVerifier
 
     public static function post(Expense $e, ?int $userId): void
     {
+        if (! $e->reverses_id && $e->payment_status !== 'unpaid') {
+            AccountingService::assertCanSpend(AccountingService::resolveAccountId($e->financial_account_id), (int) $e->amount);
+        }
         Ledger::post($e->spent_on->toDateString(), $e->category.': '.$e->description, 'expense', $e->id, self::lines($e), $userId);
     }
 
@@ -76,6 +91,30 @@ class ExpenseVerifier
     }
 
     /**
+     * Keep the capital-purchase flag and classification in step, and give a paid expense its paid amount and date.
+     * An expense is "paid" unless the caller says it is not (everything recorded before payment tracking existed was).
+     *
+     * @param  array<string, mixed>  $attrs
+     * @return array<string, mixed>
+     */
+    private static function normalise(array $attrs): array
+    {
+        if (! empty($attrs['is_asset'])) {
+            $attrs['classification'] = 'asset';
+        }
+        if (($attrs['classification'] ?? null) === 'asset') {
+            $attrs['is_asset'] = true;
+        }
+        $attrs['payment_status'] ??= 'paid';
+        if ($attrs['payment_status'] === 'paid') {
+            $attrs['paid_amount'] ??= $attrs['amount'];
+            $attrs['paid_on'] ??= $attrs['spent_on'];
+        }
+
+        return $attrs;
+    }
+
+    /**
      * Create an expense. Verified and posted at once when a standing policy covers it, otherwise pending for the Board.
      *
      * @param  array<string, mixed>  $attrs  category, description, amount, spent_on, [is_asset, reverses_id, correction_type]
@@ -83,6 +122,8 @@ class ExpenseVerifier
      */
     public static function record(array $attrs, User $creator, array $context = []): Expense
     {
+        $attrs = self::normalise($attrs);
+
         return DB::transaction(function () use ($attrs, $creator, $context) {
             $policy = self::autoPolicy($attrs, $context);
             $expense = Expense::create([...$attrs, 'created_by' => $creator->id, ...($policy ? ['status' => 'verified', 'verified_at' => now(), 'auto_policy_id' => $policy->id] : [])]);

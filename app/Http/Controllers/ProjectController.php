@@ -6,6 +6,7 @@ use App\Enums\ProjectStatus;
 use App\Models\BusinessSetting;
 use App\Models\Client;
 use App\Models\Project;
+use App\Services\ProjectFinancialService;
 use App\Support\ListFilters;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -95,6 +96,7 @@ class ProjectController extends Controller
             'payments' => $payments,
             'invoices' => $invoices,
             'totals' => $project->totals(),
+            'financials' => ProjectFinancialService::for($project),
         ]);
     }
 

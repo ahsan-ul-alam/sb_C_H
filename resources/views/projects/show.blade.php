@@ -29,6 +29,29 @@
     </div>
     <p class="hint" style="margin:-.75rem 0 1.25rem">Amounts in {{ $cur }}. The project balance covers every agreed charge; the invoice balance only covers what has been invoiced.</p>
 
+    @can('finance.view')
+    <section class="panel" id="financials">
+        <div class="panel-head"><h2>Project financials</h2><span class="sub">Profitability uses recognised revenue and verified direct costs; cash flow uses money actually received and paid. They are different on purpose.</span></div>
+        <div class="table-wrap"><table class="table">
+            <tbody>
+                <tr><td>Contract value (agreed charges)</td><td class="num">{{ Money::format($financials['contract_value'], $cur) }}</td>
+                    <td>Payments received</td><td class="num">{{ Money::format($financials['payments_received'], $cur) }}</td></tr>
+                <tr><td>Outstanding customer payments</td><td class="num">{{ Money::format(max(0, $financials['outstanding']), $cur) }}</td>
+                    <td>Customer advances held (unearned)</td><td class="num">{{ Money::format($financials['advances_held'], $cur) }}</td></tr>
+                <tr><td>Recognised revenue</td><td class="num">{{ Money::format($financials['recognised_revenue'], $cur) }}</td>
+                    <td>Refunds paid</td><td class="num">{{ Money::format($financials['refunds'], $cur) }}</td></tr>
+                <tr><td>Direct project costs</td><td class="num">{{ Money::format($financials['direct_costs'], $cur) }}</td>
+                    <td>Unpaid project costs</td><td class="num">{{ Money::format($financials['unpaid_costs'], $cur) }}</td></tr>
+                <tr class="strong"><td>Gross profit @if ($financials['gross_margin_bps'] !== null)<span class="muted">({{ number_format($financials['gross_margin_bps'] / 100, 1) }}% margin)</span>@endif</td><td class="num {{ $financials['gross_profit'] < 0 ? 'text-danger' : '' }}">{{ Money::format($financials['gross_profit'], $cur) }}</td>
+                    <td>Project cash flow</td><td class="num {{ $financials['cash_flow'] < 0 ? 'text-danger' : '' }}">{{ Money::format($financials['cash_flow'], $cur) }}</td></tr>
+                @if ($financials['allocated_shared_costs'] > 0)
+                    <tr class="muted"><td>Shared office costs explicitly allocated (not in gross profit)</td><td class="num">{{ Money::format($financials['allocated_shared_costs'], $cur) }}</td><td></td><td></td></tr>
+                @endif
+            </tbody>
+        </table></div>
+    </section>
+    @endcan
+
     <div class="grid grid-main-side">
         <div class="stack">
             <section class="panel" id="segments">

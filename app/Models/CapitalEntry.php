@@ -18,4 +18,9 @@ class CapitalEntry extends Model
     {
         return $this->belongsTo(Partner::class);
     }
+
+    public function account(): BelongsTo
+    {
+        return $this->belongsTo(FinancialAccount::class, 'financial_account_id');
+    }
 }
