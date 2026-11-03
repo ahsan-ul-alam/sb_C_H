@@ -20,6 +20,7 @@
             ['Sourcing Lots', 'sourcing.lots.index', 'sourcing.view', 'folder', ['sourcing.lots.*']],
             ['Supplier Payments', 'sourcing.payments.index', 'sourcing.view', 'wallet', ['sourcing.payments.*']],
             ['Sourcing Reports', 'sourcing.reports', 'sourcing.reports', 'chart', ['sourcing.reports']],
+            ['Project Margins', 'sourcing.projects', 'sourcing.reports', 'chart', ['sourcing.projects']],
         ],
         'Finance' => [
             ['Financial Overview', 'finance.overview', 'finance.view', 'dashboard', ['finance.overview']],
@@ -32,6 +33,7 @@
             ['Investments', 'finance.capital', 'finance.view', 'cash', ['finance.capital*']],
             ['Expenses', 'finance.expenses', 'finance.view', 'wallet', ['finance.expenses*', 'finance.cost-allocation', 'finance.expense-payments']],
             ['Loans', 'finance.loans', 'finance.view', 'cash', ['finance.loans*']],
+            ['Account Statements', 'finance.statements', 'finance.view', 'cash', ['finance.statements*']],
             ['Loans Receivable', 'finance.loans-receivable', 'finance.view', 'cash', ['finance.loans-receivable*']],
             ['Other Income', 'finance.other-income', 'finance.view', 'cash', ['finance.other-income*']],
             ['Periods & Profit', 'finance.periods', 'finance.view', 'invoice', ['finance.periods*', 'finance.allocations*']],

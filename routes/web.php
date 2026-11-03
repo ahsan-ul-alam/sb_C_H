@@ -29,6 +29,7 @@ use App\Http\Controllers\PayoutController;
 use App\Http\Controllers\PeriodController;
 use App\Http\Controllers\PolicyController;
 use App\Http\Controllers\ProjectController;
+use App\Http\Controllers\ProjectSourcingController;
 use App\Http\Controllers\ReconciliationController;
 use App\Http\Controllers\ReportController;
 use App\Http\Controllers\ResolutionController;
@@ -37,6 +38,7 @@ use App\Http\Controllers\SegmentController;
 use App\Http\Controllers\SettingsController;
 use App\Http\Controllers\SourcingLotController;
 use App\Http\Controllers\SourcingReportController;
+use App\Http\Controllers\StatementController;
 use App\Http\Controllers\SupplierController;
 use App\Http\Controllers\SupplierProductController;
 use App\Http\Controllers\UserController;
@@ -98,6 +100,8 @@ Route::middleware('auth')->group(function () {
         Route::get('/', [SourcingReportController::class, 'overview'])->name('overview');
         Route::get('reports', [SourcingReportController::class, 'reports'])->name('reports')->middleware('can:sourcing.reports');
         Route::get('payments', [SourcingReportController::class, 'payments'])->name('payments.index');
+        Route::get('project-margins', [ProjectSourcingController::class, 'index'])->name('projects')->middleware('can:sourcing.reports');
+        Route::post('lines/{line}/arrival', [ProjectSourcingController::class, 'arrival'])->name('lines.arrival')->middleware('can:sourcing.manage');
 
         Route::get('suppliers', [SupplierController::class, 'index'])->name('suppliers.index');
         Route::get('suppliers/create', [SupplierController::class, 'create'])->name('suppliers.create')->middleware('can:sourcing.manage');
@@ -195,6 +199,7 @@ Route::middleware('auth')->group(function () {
             Route::get('cash-allocation', [CashAllocationController::class, 'index'])->name('cash-allocation');
             Route::get('loans', [LoanController::class, 'index'])->name('loans');
             Route::get('loans-receivable', [LoanReceivableController::class, 'index'])->name('loans-receivable');
+            Route::get('statements', [StatementController::class, 'index'])->name('statements');
             Route::get('other-income', [OtherIncomeController::class, 'index'])->name('other-income');
             Route::get('reconciliation', [ReconciliationController::class, 'index'])->name('reconciliation');
             Route::get('reconciliation.csv', [ReconciliationController::class, 'csv'])->name('reconciliation.csv');
@@ -237,6 +242,8 @@ Route::middleware('auth')->group(function () {
         Route::post('loans/{loan}/interest', [LoanController::class, 'interest'])->name('loans.interest')->middleware('can:loan.record');
         Route::post('loan-entries/{entry}/decide', [LoanController::class, 'decide'])->name('loans.entries.decide')->middleware('can:loan.verify');
         Route::post('loan-entries/{entry}/reverse', [LoanController::class, 'reverse'])->name('loans.entries.reverse')->middleware('can:loan.verify');
+        Route::post('statements', [StatementController::class, 'store'])->name('statements.store')->middleware('can:account.manage');
+        Route::post('statements/{statement}/decide', [StatementController::class, 'decide'])->name('statements.decide')->middleware('can:reconcile.review');
         Route::post('loans-receivable', [LoanReceivableController::class, 'store'])->name('loans-receivable.store')->middleware('can:loan.record');
         Route::post('loans-receivable/{loan}/decide', [LoanReceivableController::class, 'decide'])->name('loans-receivable.decide')->middleware('can:loan.verify');
         Route::post('loans-receivable/{loan}/reverse', [LoanReceivableController::class, 'reverse'])->name('loans-receivable.reverse')->middleware('can:loan.verify');

@@ -26,6 +26,7 @@ class PeriodProcessor
         if (AccountingPeriod::where('month', $month)->exists()) {
             throw new RuntimeException('This month is already closed.');
         }
+        IntegrityGate::assertClear('close '.$month); // a month is never frozen on top of an unexplained difference
         PrepaidService::releaseDue($month, $user?->id); // the month's share of prepaid costs is part of its ledger, never optional
         $f = FinancialStatements::monthFigures($month);
         if ($f['pending'] > 0) {

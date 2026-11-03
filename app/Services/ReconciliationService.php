@@ -129,6 +129,19 @@ class ReconciliationService
         $add('Prepaid', 'Prepaid expenses: ledger asset vs paid-but-not-yet-expensed', Ledger::debitBalance('assets.prepaid'), PrepaidService::unreleased(), 'Releases and purchases must move the asset together.', 'Run finance:release-prepaid for the missing month(s).');
         $loanOutstanding = (int) Loan::all()->sum(fn ($l) => $l->outstanding());
         $add('Loans', 'Loans payable: ledger vs verified receipts minus repayments', Ledger::creditBalance('loans.payable'), $loanOutstanding, 'Every verified loan entry must be journaled once.', 'Review the loan entries without a journal entry.');
+        // 11b. Supplier costs: each sourcing expense belongs to exactly one lot payment or lot cost, never to two and never to none.
+        $linked = DB::table('supplier_payments')->whereNotNull('expense_id')->pluck('expense_id')
+            ->merge(DB::table('sourcing_lot_costs')->whereNotNull('expense_id')->pluck('expense_id'));
+        $sourcingExpenses = Expense::query()->where('status', 'verified')->where('category', 'like', 'Sourcing:%');
+        $unlinked = (clone $sourcingExpenses)->whereNull('reverses_id')->whereNotIn('id', $linked->all() ?: [0]);
+        $add('Sourcing', 'Supplier-cost expenses not linked to a sourcing payment or lot cost', (int) $unlinked->sum('amount'), 0, $unlinked->count().' expense(s) in a Sourcing category sit outside the sourcing module, so lot margin and the supplier balance cannot see them (or they were entered twice).', 'Link each to its lot payment/cost, or reverse it if the same cost is already recorded in the sourcing module.');
+        $doubleLinked = $linked->countBy()->filter(fn ($n) => $n > 1)->count();
+        $add('Sourcing', 'Expenses used by more than one sourcing record', $doubleLinked, 0, 'The same expense is attached to two supplier payments or lot costs, so one cost is counted twice.', 'Void the duplicate sourcing record.', 'count');
+
+        // 11c. Verified statements: every paisa between the books and the independent figure must be explained.
+        $unexplained = StatementReconciliationService::unexplained();
+        $add('Cash & bank', 'Accounts whose verified statement is not fully explained', count($unexplained), 0, collect($unexplained)->map(fn ($u) => $u['account'].' ('.$u['date'].'): '.StatementReconciliationService::describe($u['unexplained']))->implode('; ') ?: 'None.', 'Record the missing reconciling item (a payment not cleared, a receipt in transit, an unbooked charge) or find the unrecorded transaction. Never adjust the balance to force a match.', 'count');
+
         $receivable = (int) LoanReceivable::where('status', 'verified')->get()->sum(fn ($l) => $l->outstanding());
         $add('Loans', 'Loans receivable: ledger vs verified principal minus repayments', Ledger::debitBalance('assets.loans_receivable'), $receivable, 'Every verified reclassification and repayment must be journaled once.', 'Review the loan receivable records without a journal entry.');
 

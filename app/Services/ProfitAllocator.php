@@ -92,6 +92,7 @@ class ProfitAllocator
         if ($period->status !== 'verified') {
             throw new RuntimeException('The period must be verified by the Board before allocation.');
         }
+        IntegrityGate::assertClear('allocate profit');
         if ($period->net_profit === 0) {
             throw new RuntimeException('Net profit is zero; there is nothing to distribute.');
         }
@@ -139,6 +140,7 @@ class ProfitAllocator
             if ($allocation->status !== 'proposed') {
                 throw new RuntimeException('Allocation is not awaiting approval.');
             }
+            IntegrityGate::assertClear('approve this allocation');
             if ($user && $allocation->prepared_by === $user->id) {
                 throw new RuntimeException('You cannot approve an allocation you prepared.');
             }
@@ -160,6 +162,7 @@ class ProfitAllocator
             if ($allocation->status !== 'approved') {
                 throw new RuntimeException('The Board must approve the allocation before posting.');
             }
+            IntegrityGate::assertClear('post this allocation');
             if ($blocker = $allocation->policy->liveBlocker()) {
                 throw new RuntimeException($blocker);
             }

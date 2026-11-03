@@ -14,7 +14,7 @@ class SourcingLotLine extends Model
     {
         return [
             'quantity' => 'decimal:2', 'usable_quantity' => 'decimal:2', 'unit_price' => 'integer', 'reference_price' => 'integer',
-            'sell_price' => 'integer', 'approved_price' => 'integer',
+            'sell_price' => 'integer', 'approved_price' => 'integer', 'received_quantity' => 'decimal:2', 'arrived_on' => 'date',
         ];
     }
 

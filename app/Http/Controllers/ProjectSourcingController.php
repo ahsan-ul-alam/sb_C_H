@@ -1,0 +1,33 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\Project;
+use App\Models\SourcingLotLine;
+use App\Services\ProjectSourcingReport;
+use App\Services\SourcingArrival;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\View\View;
+
+class ProjectSourcingController extends Controller
+{
+    public function index(): View
+    {
+        $report = ProjectSourcingReport::build();
+
+        return view('sourcing.project-margins', [
+            'projects' => $report['projects'], 'lots' => $report['lots'],
+            'names' => Project::with('client')->whereIn('id', array_keys($report['projects']))->get()->keyBy('id'),
+        ]);
+    }
+
+    public function arrival(Request $request, SourcingLotLine $line): RedirectResponse
+    {
+        $data = $request->validate([
+            'received_quantity' => ['required', 'regex:/^\d{1,12}(\.\d{1,2})?$/'], 'accepted_quantity' => ['nullable', 'regex:/^\d{1,12}(\.\d{1,2})?$/'], 'arrived_on' => ['required', 'date', 'before_or_equal:today'],
+        ]);
+
+        return $this->attempt(fn () => SourcingArrival::record($line, $data['received_quantity'], $data['accepted_quantity'] ?? null, $data['arrived_on'], $request->user()), 'Arrival recorded.');
+    }
+}
