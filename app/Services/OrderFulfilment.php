@@ -1,0 +1,293 @@
+<?php
+
+namespace App\Services;
+
+use App\Models\ClientOrder;
+use App\Models\ClientOrderItem;
+use App\Models\OrderCollection;
+use App\Models\Project;
+use App\Models\StockMovement;
+use App\Models\SupplierProduct;
+use App\Models\User;
+use App\Support\BusinessDate;
+use App\Support\Money;
+use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Facades\DB;
+use RuntimeException;
+
+/**
+ * Customer orders for a client's own stock. This EXTENDS the existing order-commission module (it creates the same ClientOrder and
+ * uses the same commission rate snapshot and invoice); it adds order lines, stock reservation, delivery status and the customer money
+ * collected on the client's behalf.
+ *
+ *   pending → confirmed (stock reserved, oldest lot first) → dispatched → delivered | failed;   cancelled from pending/confirmed.
+ *
+ * Only a DELIVERED order earns commission (on what was really delivered and not returned). A failed or cancelled order earns nothing,
+ * and its stock goes back to available. Delivery and collection are separate events: money counts only when a collection is recorded.
+ */
+class OrderFulfilment
+{
+    /**
+     * @param  array{reference: string, ordered_on: string, customer_name?: ?string, customer_phone?: ?string, customer_address?: ?string, items: list<array{product_id: int, quantity: string, unit_price: int}>}  $data
+     */
+    public static function create(Project $project, array $data, User $user): ClientOrder
+    {
+        if ($data['items'] === []) {
+            throw new RuntimeException('Add at least one product.');
+        }
+
+        return DB::transaction(function () use ($project, $data, $user) {
+            $total = 0;
+            $items = [];
+            foreach ($data['items'] as $row) {
+                $product = SupplierProduct::findOrFail($row['product_id']);
+                if (bccomp($row['quantity'], '0', 2) <= 0 || $row['unit_price'] <= 0) {
+                    throw new RuntimeException('Every product needs a quantity and a selling price above zero.');
+                }
+                $item = ['supplier_product_id' => $product->id, 'description' => $product->label(), 'quantity' => $row['quantity'], 'unit_price' => $row['unit_price']];
+                $total += (new ClientOrderItem($item))->amount();
+                $items[] = $item;
+            }
+            $order = OrderCommission::record($project, ['reference' => $data['reference'], 'ordered_on' => $data['ordered_on'], 'net_value' => $total], $user);
+            $order->update(['fulfilment' => 'stock', 'delivery_status' => 'pending', 'customer_name' => $data['customer_name'] ?? null,
+                'customer_phone' => $data['customer_phone'] ?? null, 'customer_address' => $data['customer_address'] ?? null]);
+            $order->items()->createMany($items);
+            Audit::log('order.created', 'order '.$order->id, $order->reference.' '.$total);
+
+            return $order->refresh();
+        });
+    }
+
+    private static function locked(ClientOrder $order, \Closure $work): mixed
+    {
+        return DB::transaction(fn () => $work(ClientOrder::whereKey($order->id)->lockForUpdate()->with(['items', 'project.client'])->firstOrFail()));
+    }
+
+    private static function expect(ClientOrder $o, string ...$states): void
+    {
+        if (! $o->isStock() || ! in_array($o->delivery_status, $states, true)) {
+            throw new RuntimeException('This order is '.($o->delivery_status ?? 'not a stock order').'; that step is not available now.');
+        }
+    }
+
+    /** Reserve the stock: each requested product is taken from the client's oldest lots first, and the exact source lot is kept on the order line. */
+    public static function confirm(ClientOrder $order, User $user): void
+    {
+        self::locked($order, function (ClientOrder $o) use ($user) {
+            self::expect($o, 'pending');
+            $clientId = $o->project->client_id;
+            foreach ($o->items as $request) {
+                $plan = Inventory::allocate($clientId, (int) $request->supplier_product_id, (string) $request->quantity);
+                $first = true;
+                foreach ($plan as [$line, $qty]) {
+                    $item = $first ? tap($request)->update(['quantity' => $qty, 'sourcing_lot_line_id' => $line->id])
+                        : $o->items()->create(['supplier_product_id' => $request->supplier_product_id, 'description' => $request->description, 'quantity' => $qty, 'unit_price' => $request->unit_price, 'sourcing_lot_line_id' => $line->id]);
+                    $first = false;
+                    Inventory::move($line, 'reserve', ['available' => bcmul($qty, '-1', 2), 'reserved' => $qty], 'res:'.$item->id, $item, $user);
+                }
+            }
+            $o->update(['delivery_status' => 'confirmed']);
+            Audit::log('order.confirmed', 'order '.$o->id, 'stock reserved');
+        });
+    }
+
+    public static function dispatch(ClientOrder $order, User $user): void
+    {
+        self::locked($order, function (ClientOrder $o) use ($user) {
+            self::expect($o, 'confirmed');
+            foreach ($o->items as $item) {
+                Inventory::move($item->line, 'dispatch', ['reserved' => bcmul((string) $item->quantity, '-1', 2), 'dispatched' => (string) $item->quantity], 'dsp:'.$item->id, $item, $user);
+            }
+            $o->update(['delivery_status' => 'dispatched']);
+            Audit::log('order.dispatched', 'order '.$o->id);
+        });
+    }
+
+    /**
+     * Delivery confirmed. $delivered maps item id → quantity actually delivered (default: all); the rest returns to available stock.
+     * Commission is calculated now, on what was delivered, with the rate snapshotted at this moment.
+     *
+     * @param  array<int, string>  $delivered
+     */
+    public static function deliver(ClientOrder $order, array $delivered, User $user): void
+    {
+        self::locked($order, function (ClientOrder $o) use ($delivered, $user) {
+            self::expect($o, 'dispatched');
+            $total = 0;
+            foreach ($o->items as $item) {
+                $qty = (string) ($delivered[$item->id] ?? $item->quantity);
+                if (bccomp($qty, '0', 2) < 0 || bccomp($qty, (string) $item->quantity, 2) > 0) {
+                    throw new RuntimeException('Delivered quantity of '.$item->description.' must be between 0 and '.$item->quantity.'.');
+                }
+                $rest = bcsub((string) $item->quantity, $qty, 2);
+                if (bccomp($qty, '0', 2) > 0) {
+                    Inventory::move($item->line, 'deliver', ['dispatched' => bcmul($qty, '-1', 2), 'delivered' => $qty], 'dlv:'.$item->id, $item, $user);
+                }
+                if (bccomp($rest, '0', 2) > 0) {
+                    Inventory::move($item->line, 'fail', ['dispatched' => bcmul($rest, '-1', 2), 'available' => $rest], 'fail:'.$item->id, $item, $user, 'Not delivered');
+                }
+                $item->update(['delivered_quantity' => $qty]);
+                $total += (int) $item->refresh()->deliveredAmount();
+            }
+            if ($total <= 0) {
+                $o->update(['delivery_status' => 'failed']);
+                OrderCommission::cancel($o);
+                Audit::log('order.failed', 'order '.$o->id, 'nothing delivered');
+
+                return;
+            }
+            $o->update(['delivery_status' => 'delivered', 'net_value' => $total]);
+            self::earnCommission($o->refresh());
+            Audit::log('order.delivered', 'order '.$o->id, 'value '.$total);
+        });
+    }
+
+    /** Commission on the delivered value, rate snapshotted now; billed through the client's invoice (unless the standing policy already did). */
+    private static function earnCommission(ClientOrder $o): void
+    {
+        OrderCommission::markSuccessful($o);
+        $o->refresh();
+        if ($o->commission > 0 && ! $o->billed_invoice_id) {
+            OrderCommission::bill($o, null, null);
+        }
+    }
+
+    /** The courier could not deliver: the stock returns to available and no commission is earned. */
+    public static function fail(ClientOrder $order, User $user): void
+    {
+        self::locked($order, function (ClientOrder $o) use ($user) {
+            self::expect($o, 'dispatched');
+            foreach ($o->items as $item) {
+                Inventory::move($item->line, 'fail', ['dispatched' => bcmul((string) $item->quantity, '-1', 2), 'available' => (string) $item->quantity], 'fail:'.$item->id, $item, $user, 'Delivery failed');
+            }
+            $o->update(['delivery_status' => 'failed']);
+            OrderCommission::cancel($o);
+            Audit::log('order.failed', 'order '.$o->id);
+        });
+    }
+
+    public static function cancel(ClientOrder $order, User $user): void
+    {
+        self::locked($order, function (ClientOrder $o) use ($user) {
+            self::expect($o, 'pending', 'confirmed');
+            if ($o->delivery_status === 'confirmed') {
+                foreach ($o->items as $item) {
+                    Inventory::move($item->line, 'release', ['reserved' => bcmul((string) $item->quantity, '-1', 2), 'available' => (string) $item->quantity], 'rel:'.$item->id, $item, $user, 'Order cancelled');
+                }
+            }
+            $o->update(['delivery_status' => 'cancelled']);
+            OrderCommission::cancel($o);
+            Audit::log('order.cancelled', 'order '.$o->id);
+        });
+    }
+
+    /**
+     * A customer sent delivered goods back. The units wait for inspection; they are NOT sellable until inspected. Commission follows what
+     * stays delivered. Refunding the customer is a separate Finance matter, so a return is refused while it would leave more collected
+     * than the order is now worth, or when the commission has already been paid or netted (no silent rewriting of settled money).
+     *
+     * @param  array<int, string>  $returned  item id → quantity
+     */
+    public static function customerReturn(ClientOrder $order, array $returned, User $user): void
+    {
+        self::locked($order, function (ClientOrder $o) use ($returned, $user) {
+            self::expect($o, 'delivered');
+            foreach ($o->items as $item) {
+                $qty = (string) ($returned[$item->id] ?? '0');
+                if (bccomp($qty, '0', 2) <= 0) {
+                    continue;
+                }
+                if (bccomp(bcadd((string) $item->returned_quantity, $qty, 2), (string) $item->delivered_quantity, 2) > 0) {
+                    throw new RuntimeException('Cannot return more of '.$item->description.' than was delivered.');
+                }
+                $item->update(['returned_quantity' => bcadd((string) $item->returned_quantity, $qty, 2)]);
+                Inventory::move($item->line, 'return', ['delivered' => bcmul($qty, '-1', 2), 'returned' => $qty], 'ret:'.$item->id.':'.$item->returned_quantity, $item, $user, 'Customer return');
+            }
+            $o->refresh()->load('items');
+            $value = $o->deliveredValue();
+            if ((int) $o->collections()->sum('amount') > $value) {
+                throw new RuntimeException('More money was collected than the order is now worth: the customer must be refunded by Finance first.');
+            }
+            if ($o->billed_invoice_id && $o->commission > 0) {
+                OrderCommission::reduceInvoiced($o, $value > 0 ? $value : null, 'Customer return'); // refuses once the commission was paid or netted
+            } elseif ($o->commission > 0) {
+                $o->update(['commission' => OrderCommission::commission($value, (int) $o->rate_bps)]);
+            }
+            $o->update(['net_value' => $value]);
+            Audit::log('order.returned', 'order '.$o->id, 'delivered value now '.$value);
+        });
+    }
+
+    /** After inspection the returned units are either usable again (available) or written off as damaged. */
+    public static function inspectReturn(ClientOrderItem $item, string $usable, string $damaged, User $user): void
+    {
+        DB::transaction(function () use ($item, $usable, $damaged, $user) {
+            $item = ClientOrderItem::whereKey($item->id)->lockForUpdate()->firstOrFail();
+            $total = bcadd($usable, $damaged, 2);
+            if (bccomp($total, '0', 2) <= 0 || bccomp($usable, '0', 2) < 0 || bccomp($damaged, '0', 2) < 0) {
+                throw new RuntimeException('Enter how many returned units are usable and how many are damaged.');
+            }
+            Inventory::move($item->line, 'inspect', ['returned' => bcmul($total, '-1', 2), 'available' => $usable, 'damaged' => $damaged],
+                'insp:'.$item->id.':'.(StockMovement::where('client_order_item_id', $item->id)->where('type', 'inspect')->count() + 1), $item, $user, 'Return inspected');
+            Audit::log('inventory.return_inspected', 'order item '.$item->id, "usable $usable damaged $damaged");
+        });
+    }
+
+    /**
+     * Customer money collected for a delivered order, held for the client. Dr cash / Cr client funds — it is the CLIENT'S money, not
+     * company revenue; only the commission and storage fees later netted from it become company income.
+     *
+     * @return OrderCollection|null null when this exact submission was already recorded
+     */
+    public static function collect(ClientOrder $order, int $amount, string $date, ?string $reference, string $key, ?int $accountId, User $user): ?OrderCollection
+    {
+        if (OrderCollection::where('idempotency_key', $key)->exists()) {
+            return null;
+        }
+        try {
+            return DB::transaction(function () use ($order, $amount, $date, $reference, $key, $accountId, $user) {
+                $o = ClientOrder::whereKey($order->id)->lockForUpdate()->with(['items.line.lot', 'project'])->firstOrFail();
+                self::expect($o, 'delivered');
+                if ($o->items->contains(fn ($i) => $i->line?->lot?->ownership !== 'client')) {
+                    throw new RuntimeException('Only stock stated as client-owned can be settled to a client. State who owns the stock first.');
+                }
+                if ($amount <= 0) {
+                    throw new RuntimeException('Amount must be greater than zero.');
+                }
+                if (AccountingService::isClosed($date)) {
+                    throw new RuntimeException('That month is already closed; record it in an open month.');
+                }
+                $left = $o->deliveredValue() - (int) $o->collections()->sum('amount');
+                if ($amount > $left) {
+                    throw new RuntimeException('Only '.Money::format(max(0, $left)).' of this order is still to be collected.');
+                }
+                $collection = OrderCollection::create(['client_order_id' => $o->id, 'amount' => $amount, 'collected_on' => $date, 'reference' => $reference,
+                    'financial_account_id' => $accountId, 'idempotency_key' => $key, 'created_by' => $user->id]);
+                Ledger::post($date, 'Customer collection held for client — order '.$o->reference, 'order_collection', $collection->id, [
+                    ['cash', null, $amount, 0, AccountingService::resolveAccountId($accountId)],
+                    ['client.funds', null, 0, $amount],
+                ], $user->id);
+                Audit::log('order.collected', 'order '.$o->id, (string) $amount);
+
+                return $collection;
+            });
+        } catch (UniqueConstraintViolationException) {
+            return null;
+        }
+    }
+
+    /** @return array{delivered: int, collected: int, outstanding: int, state: string} */
+    public static function collectionState(ClientOrder $o): array
+    {
+        $delivered = $o->delivery_status === 'delivered' ? $o->deliveredValue() : 0;
+        $collected = (int) $o->collections()->sum('amount');
+
+        return ['delivered' => $delivered, 'collected' => $collected, 'outstanding' => max(0, $delivered - $collected),
+            'state' => $delivered === 0 ? '—' : ($collected >= $delivered ? 'Collected' : ($collected > 0 ? 'Part collected' : 'Awaiting collection'))];
+    }
+
+    public static function today(): string
+    {
+        return BusinessDate::today();
+    }
+}

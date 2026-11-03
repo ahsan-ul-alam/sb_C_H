@@ -26,6 +26,10 @@ class StandingPolicies
 
     public const COMMISSION = 'commission';
 
+    public const QUICK_LOT = 'quick_lot';
+
+    public const STORAGE = 'storage';
+
     /** key => [exact resolution title, what it authorises, what the amount means] */
     public const DEFINITIONS = [
         self::EXPENSES => ['Standing authority: automatic verification of routine expenses', 'Routine expenses in the listed categories are verified and posted automatically when within the per-expense limit, not duplicated and not capital purchases.', 'Per-expense limit; list the allowed categories (comma separated) in the notes'],
@@ -33,6 +37,8 @@ class StandingPolicies
         self::PERIOD => ['Standing authority: automatic monthly close and profit allocation', 'Finished months with nothing unverified are closed and verified, and eligible profit or loss is allocated and posted under the signed policy (20/5/25/50, partners 40/30/30).', 'Not used'],
         self::EMERGENCY => ['Standing authority: automatic Emergency Fund coverage for sourcing losses', 'Coverage for an approved sourcing lot\'s genuine uncovered loss is approved and utilised automatically up to the limit, within the available reserve.', 'Per-request limit'],
         self::RELEASE => ['Standing authority: release unneeded Emergency Fund coverage', 'Held coverage that no partner loss allocation can claim (the period closed profitable) is returned to the Emergency Reserve automatically.', 'Not used'],
+        self::QUICK_LOT => ['Standing authority: automatic approval of ordinary sourcing lots', 'A lot made on the simple form is priced and approved automatically when its price is not below cost and its total landed cost is within the limit. Larger or exceptional lots wait for the normal pricing approval.', 'Maximum total landed cost of one lot'],
+        self::STORAGE => ['Standing authority: monthly warehouse storage charges', 'Clients are charged monthly for the stored lots that qualify: occupied square feet × the configured rate, while more than the configured number of units is on hand at month-end. Nothing is charged until this is approved and a rate is set.', 'Not used'],
         self::COMMISSION => ['Standing authority: automatic commission invoicing', 'Commission on an order marked successful is invoiced through the client\'s billing automatically.', 'Not used'],
     ];
 

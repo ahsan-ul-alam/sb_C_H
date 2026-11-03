@@ -10,6 +10,7 @@ use App\Models\SourcingAllocation;
 use App\Models\SourcingLot;
 use App\Models\SourcingLotCost;
 use App\Models\SourcingLotLine;
+use App\Models\Supplier;
 use App\Models\SupplierProduct;
 use App\Models\User;
 use App\Support\Costing;
@@ -386,6 +387,91 @@ class Sourcing
             self::log($lot, 'billed', $allocation->description.' '.$amount.' on '.$invoice->number);
 
             return $invoice;
+        });
+    }
+
+    /**
+     * The simple lot: one supplier, its products and quantities, one delivery cost and a desired profit per unit.
+     * Everything is calculated by QuickLot (the same code as the live preview) and saved as ordinary lot lines and a
+     * shared Delivery cost, so costing, payables, the ledger path and reports all work unchanged.
+     *
+     * Pricing is deterministic and never below break-even. It is approved automatically ONLY under the Board's standing policy for
+     * ordinary lots (within its limit); otherwise the lot is saved as priced and follows the normal pricing approval.
+     *
+     * @param  list<array{product_id: int|string, quantity: string, profit?: int}>  $items
+     * @param  array{title?: ?string, purchase_order?: ?string, project_id?: ?int, notes?: ?string}  $meta
+     */
+    public static function createQuick(Supplier $supplier, array $items, int $delivery, array $meta, User $user): SourcingLot
+    {
+        return DB::transaction(function () use ($supplier, $items, $delivery, $meta, $user) {
+            $calc = QuickLot::calculate($supplier, $items, $delivery);
+            $lot = self::createLot([
+                'title' => ($meta['title'] ?? null) ?: 'Lot — '.$supplier->name.' — '.now()->format('j M Y'), 'allocation_basis' => 'value',
+                'purchase_order' => $meta['purchase_order'] ?? null, 'project_id' => $meta['project_id'] ?? null, 'notes' => $meta['notes'] ?? null,
+            ], $user);
+            foreach ($calc['rows'] as $row) {
+                self::addLine($lot, ['supplier_id' => $supplier->id, 'supplier_product_id' => $row['product']->id, 'quantity' => $row['quantity']], $user);
+            }
+            if ($delivery > 0) {
+                self::addCost($lot, ['category' => 'Delivery', 'description' => 'Delivery / transportation', 'amount' => $delivery, 'kind' => 'actual', 'incurred_on' => now()->toDateString()], $user);
+            }
+            // Governance: pricing approval is a Board matter. A quick lot is approved by itself ONLY under the Board's standing policy for
+            // ordinary lots (limited to the total landed cost the Board set). Otherwise — no policy, or an exceptional lot above the limit —
+            // it is saved as priced and waits for the normal approval (submitter cannot approve; the Board is notified).
+            $policy = StandingPolicies::active(StandingPolicies::QUICK_LOT);
+            $ordinary = $policy && $policy->amount > 0 && $calc['landed'] <= $policy->amount;
+            foreach ($lot->lines()->get() as $i => $line) {
+                $line->update(['sell_price' => $calc['rows'][$i]['price']] + ($ordinary ? ['approved_price' => $calc['rows'][$i]['price']] : []));
+            }
+            $profits = array_unique(array_column($calc['rows'], 'profit'));
+            $lot->update(['pricing_method' => 'fixed', 'pricing_value' => count($profits) === 1 ? $profits[0] : 0, 'priced_by' => $user->id]
+                + ($ordinary ? ['status' => 'approved', 'approved_at' => now(), 'approved_cost' => $calc['landed'], 'approved_revenue' => $calc['selling']] : ['status' => 'priced']));
+            self::log($lot, 'quick.saved', 'cost '.$calc['landed'].' sales '.$calc['selling'].($ordinary
+                ? ' — approved automatically under standing policy #'.$policy->id.' (not below break-even, within the Board\'s limit)'
+                : ' — saved as priced; awaiting pricing approval'.($policy ? ' (above the standing limit)' : ' (no standing policy)')));
+
+            return $lot->refresh();
+        });
+    }
+
+    /**
+     * Put every unallocated unit of the lot onto ONE new invoice of the client's project, at the lot's prices.
+     * Uses the normal allocation and billing code, so quantities cannot be over-sold and nothing is billed twice.
+     */
+    public static function billWholeLot(SourcingLot $lot, int $projectId, User $user): Invoice
+    {
+        return DB::transaction(function () use ($lot, $projectId, $user) {
+            $invoiceId = null;
+            $invoice = null;
+            foreach ($lot->lines()->get() as $line) {
+                $left = bcsub((string) $line->usable_quantity, (string) $lot->allocations()->where('kind', 'sale')->where('sourcing_lot_line_id', $line->id)->sum('quantity'), 2);
+                if (bccomp($left, '0', 2) <= 0) {
+                    continue;
+                }
+                $allocation = self::allocate($lot, ['project_id' => $projectId, 'line_id' => $line->id, 'kind' => 'sale', 'quantity' => $left], $user);
+                $invoice = self::bill($allocation, null, $invoiceId, $user);
+                $invoiceId = $invoice->id;
+            }
+
+            // The client paid for the sourcing through ClientHub, so this is their own stock — recorded now, never guessed for older lots.
+            if ($invoice && $lot->ownership === null && ($lot->project_id === null || $lot->project->client_id === Project::findOrFail($projectId)->client_id)) {
+                $lot->update(['ownership' => 'client', 'project_id' => $lot->project_id ?? $projectId]);
+            }
+
+            return $invoice ?? throw new RuntimeException('Everything in this lot is already billed.');
+        });
+    }
+
+    /** Finish a fully paid lot: completes it and settles it financially in one step (the normal settlement rules still apply). */
+    public static function close(SourcingLot $lot, User $user): void
+    {
+        DB::transaction(function () use ($lot, $user) {
+            for ($i = 0; $i < 2; $i++) {
+                if (in_array($lot->refresh()->status, ['approved', 'in_progress'], true)) {
+                    self::advance($lot, $user);
+                }
+            }
+            self::settle($lot->refresh(), $user);
         });
     }
 

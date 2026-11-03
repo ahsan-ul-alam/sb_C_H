@@ -29,6 +29,7 @@ class SupplierProductController extends Controller
     public function store(Request $request): RedirectResponse
     {
         $data = $this->validated($request);
+        $data['unit'] = ($data['unit'] ?? null) ?: 'pcs'; // the simple supplier page only asks for name, SKU and price
         DB::transaction(function () use ($data, $request) {
             $product = SupplierProduct::create($data);
             $product->prices()->create(['price' => $data['reference_price'], 'effective_on' => today(), 'changed_by' => $request->user()->id]);
@@ -59,7 +60,7 @@ class SupplierProductController extends Controller
             Audit::log('sourcing.product.updated', 'product '.$product->id, $changed ? 'price '.$data['reference_price'] : null);
         });
 
-        return redirect()->route('sourcing.products.index')->with('status', 'Product saved.');
+        return ($request->boolean('inline') ? back() : redirect()->route('sourcing.products.index'))->with('status', 'Product saved. Future lots use the new price; saved lots keep theirs.');
     }
 
     /**
@@ -69,7 +70,7 @@ class SupplierProductController extends Controller
     {
         $data = $request->validate([
             'supplier_id' => ['required', 'exists:suppliers,id'], 'name' => ['required', 'string', 'max:255'], 'sku' => ['nullable', 'string', 'max:60'],
-            'category' => ['nullable', 'string', 'max:80'], 'variant' => ['nullable', 'string', 'max:120'], 'unit' => ['required', 'string', 'max:20'],
+            'category' => ['nullable', 'string', 'max:80'], 'variant' => ['nullable', 'string', 'max:120'], 'unit' => ['nullable', 'string', 'max:20'],
             'reference_price' => ['required', 'regex:'.Money::AMOUNT_REGEX], 'min_order_qty' => ['nullable', 'regex:/^\d{1,10}(\.\d{1,2})?$/'],
             'notes' => ['nullable', 'string', 'max:2000'],
         ]);

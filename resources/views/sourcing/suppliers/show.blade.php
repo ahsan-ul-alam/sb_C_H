@@ -27,15 +27,35 @@
     </section>
 
     <section class="panel">
-        <div class="panel-head"><h2>Catalog products</h2> <a class="btn btn-sm" href="{{ route('sourcing.products.index', ['supplier' => $supplier->id]) }}">Manage</a></div>
+        <div class="panel-head"><h2>Products &amp; base prices</h2><span class="sub">A price change applies to future lots only; saved lots keep the price they were made with.</span></div>
         <div class="table-wrap"><table class="table table-min-640">
-            <thead><tr><th>Product</th><th>SKU</th><th>Category</th><th>Unit</th><th class="num">Reference price</th><th>Status</th></tr></thead>
+            <thead><tr><th>Product</th><th>SKU (optional)</th><th class="num">Base purchase price</th><th>Active</th><th></th></tr></thead>
             <tbody>
-            @forelse ($products as $p)
-                <tr><td>{{ $p->label() }}</td><td>{{ $p->sku ?? '—' }}</td><td>{{ $p->category ?? '—' }}</td><td>{{ $p->unit }}</td><td class="num">{{ Money::format($p->reference_price) }}</td><td><x-status :value="$p->is_active ? 'active' : 'archived'" /></td></tr>
-            @empty
-                <tr><td colspan="6" class="muted">No products yet.</td></tr>
-            @endforelse
+            @foreach ($products as $p)
+                <tr>
+                    @can('sourcing.manage')
+                        <td><input form="p-{{ $p->id }}" name="name" value="{{ $p->name }}" required></td>
+                        <td><input form="p-{{ $p->id }}" name="sku" value="{{ $p->sku }}" size="10"></td>
+                        <td class="num"><input form="p-{{ $p->id }}" name="reference_price" inputmode="decimal" size="9" value="{{ Money::toDecimal($p->reference_price) }}" required></td>
+                        <td><input form="p-{{ $p->id }}" type="checkbox" name="is_active" value="1" @checked($p->is_active)></td>
+                        <td class="num"><form id="p-{{ $p->id }}" method="POST" action="{{ route('sourcing.products.update', $p) }}">@csrf @method('PUT')
+                            <input type="hidden" name="inline" value="1"><input type="hidden" name="supplier_id" value="{{ $supplier->id }}"><input type="hidden" name="unit" value="{{ $p->unit }}"><button class="btn btn-sm">Save</button></form></td>
+                    @else
+                        <td>{{ $p->label() }}</td><td>{{ $p->sku ?? '—' }}</td><td class="num">{{ Money::format($p->reference_price) }}</td><td><x-status :value="$p->is_active ? 'active' : 'archived'" /></td><td></td>
+                    @endcan
+                </tr>
+            @endforeach
+            @can('sourcing.manage')
+                <tr>
+                    <td><input form="p-new" name="name" placeholder="New product name" required></td>
+                    <td><input form="p-new" name="sku" size="10"></td>
+                    <td class="num"><input form="p-new" name="reference_price" inputmode="decimal" size="9" placeholder="0.00" required></td>
+                    <td></td>
+                    <td class="num"><form id="p-new" method="POST" action="{{ route('sourcing.products.store') }}">@csrf<input type="hidden" name="supplier_id" value="{{ $supplier->id }}"><button class="btn btn-sm btn-primary">Add product</button></form></td>
+                </tr>
+            @else
+                @if ($products->isEmpty())<tr><td colspan="5" class="muted">No products yet.</td></tr>@endif
+            @endcan
             </tbody>
         </table></div>
     </section>

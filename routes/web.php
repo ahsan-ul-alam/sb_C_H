@@ -30,6 +30,7 @@ use App\Http\Controllers\PaymentController;
 use App\Http\Controllers\PayoutController;
 use App\Http\Controllers\PeriodController;
 use App\Http\Controllers\PolicyController;
+use App\Http\Controllers\ProductOperationsController;
 use App\Http\Controllers\ProjectController;
 use App\Http\Controllers\ProjectSourcingController;
 use App\Http\Controllers\ReconciliationController;
@@ -130,6 +131,13 @@ Route::middleware('auth')->group(function () {
         Route::post('lots', [SourcingLotController::class, 'store'])->name('lots.store')->middleware('can:sourcing.manage');
         Route::get('lots/{lot}', [SourcingLotController::class, 'show'])->name('lots.show');
 
+        // The simple lot workflow: live numbers, a supplier's products, one-click client billing / receipt, one-step close.
+        Route::get('suppliers/{supplier}/products.json', [SourcingLotController::class, 'supplierProducts'])->name('suppliers.products');
+        Route::post('lots/preview', [SourcingLotController::class, 'preview'])->name('lots.preview')->middleware('can:sourcing.manage');
+        Route::post('lots/{lot}/bill-client', [SourcingLotController::class, 'billClient'])->name('lots.bill-client')->middleware('can:sourcing.manage');
+        Route::post('lots/{lot}/client-payment', [SourcingLotController::class, 'clientPayment'])->name('lots.client-payment')->middleware('can:clienthub');
+        Route::post('lots/{lot}/close', [SourcingLotController::class, 'close'])->name('lots.close')->middleware('can:sourcing.settle');
+
         Route::middleware('can:sourcing.manage')->group(function () {
             Route::post('lots/{lot}/lines', [SourcingLotController::class, 'addLine'])->name('lots.lines.store');
             Route::put('lines/{line}', [SourcingLotController::class, 'updateLine'])->name('lines.update');
@@ -165,6 +173,34 @@ Route::middleware('auth')->group(function () {
         Route::post('fund/{fundRequest}/utilise', [EmergencyFundController::class, 'utilise'])->name('fund.utilise')->middleware('can:sourcing.fund.utilize');
         Route::post('fund/{fundRequest}/reverse', [EmergencyFundController::class, 'reverse'])->name('fund.reverse')->middleware('can:sourcing.fund.utilize');
         Route::post('fund/{fundRequest}/cancel', [EmergencyFundController::class, 'cancel'])->name('fund.cancel')->middleware('can:sourcing.fund.request');
+    });
+
+    // Product operations: inventory, orders & delivery, client settlements. Reads need inventory.view / settlement.view; each write has its own permission.
+    Route::middleware('can:inventory.view')->prefix('product')->name('product.')->group(function () {
+        Route::get('inventory', [ProductOperationsController::class, 'inventory'])->name('inventory');
+        Route::get('inventory/{line}', [ProductOperationsController::class, 'inventoryShow'])->name('inventory.show')->whereNumber('line');
+        Route::post('inventory/{line}/adjust', [ProductOperationsController::class, 'adjust'])->name('inventory.adjust')->middleware('can:inventory.adjust')->whereNumber('line');
+        Route::post('lots/{lot}/ownership', [ProductOperationsController::class, 'ownership'])->name('lots.ownership')->middleware('can:sourcing.manage');
+        Route::post('lots/{lot}/area', [ProductOperationsController::class, 'area'])->name('lots.area')->middleware('can:sourcing.manage');
+
+        Route::get('orders', [ProductOperationsController::class, 'orders'])->name('orders');
+        Route::middleware('can:orders.manage')->group(function () {
+            Route::post('orders', [ProductOperationsController::class, 'orderStore'])->name('orders.store');
+            Route::post('orders/{order}/confirm', [ProductOperationsController::class, 'orderConfirm'])->name('orders.confirm');
+            Route::post('orders/{order}/dispatch', [ProductOperationsController::class, 'orderDispatch'])->name('orders.dispatch');
+            Route::post('orders/{order}/deliver', [ProductOperationsController::class, 'orderDeliver'])->name('orders.deliver');
+            Route::post('orders/{order}/fail', [ProductOperationsController::class, 'orderFail'])->name('orders.fail');
+            Route::post('orders/{order}/cancel', [ProductOperationsController::class, 'orderCancel'])->name('orders.cancel');
+            Route::post('orders/{order}/return', [ProductOperationsController::class, 'orderReturn'])->name('orders.return');
+            Route::post('order-items/{item}/inspect', [ProductOperationsController::class, 'itemInspect'])->name('items.inspect');
+        });
+        Route::post('orders/{order}/collect', [ProductOperationsController::class, 'orderCollect'])->name('orders.collect')->middleware('can:collection.record');
+
+        Route::middleware('can:settlement.view')->group(function () {
+            Route::get('settlements', [ProductOperationsController::class, 'settlements'])->name('settlements');
+            Route::get('settlements/{client}', [ProductOperationsController::class, 'settlementShow'])->name('settlements.show');
+        });
+        Route::post('settlements/{client}', [ProductOperationsController::class, 'settlementStore'])->name('settlements.store')->middleware('can:settlement.record');
     });
 
     Route::middleware('can:users.manage')->group(function () {
@@ -234,6 +270,7 @@ Route::middleware('auth')->group(function () {
             Route::post('orders/{order}/reduce-invoiced', [OrderCommissionController::class, 'reduceInvoiced'])->name('orders.reduce');
         });
         Route::post('commission-rates', [OrderCommissionController::class, 'rates'])->name('orders.rates')->middleware('can:commission.rates');
+        Route::post('storage-settings', [OrderCommissionController::class, 'storageSettings'])->name('orders.storage')->middleware('can:commission.rates');
         Route::post('automation/run', [AutomationController::class, 'run'])->name('automation.run')->middleware('can:period.close');
         Route::post('automation/revoke/{key}', [AutomationController::class, 'revoke'])->name('automation.revoke')->middleware('can:resolution.decide');
 

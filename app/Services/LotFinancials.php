@@ -138,6 +138,7 @@ class LotFinancials
             'supplier_paid' => $paid,
             'supplier_outstanding' => $supplierOutstanding,
             'costs_unpaid' => $costsUnpaid,
+            'costs_paid' => (int) $current->where('kind', 'actual')->filter(fn ($c) => $c->isPaid())->sum('amount'),
             'cash_required' => $supplierOutstanding + $costsUnpaid,
             'billed' => $billed,
             'unbilled' => max(0, $revenue - $billed),

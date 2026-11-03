@@ -2,9 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Enums\PaymentMethod;
 use App\Models\AuditLog;
 use App\Models\Document;
 use App\Models\FinancialAccount;
+use App\Models\Invoice;
+use App\Models\Payment;
 use App\Models\Project;
 use App\Models\SourcingAllocation;
 use App\Models\SourcingLot;
@@ -17,15 +20,20 @@ use App\Services\Audit;
 use App\Services\EmergencyFund;
 use App\Services\LotFinancials;
 use App\Services\LotStatus;
+use App\Services\PaymentRecorder;
+use App\Services\QuickLot;
 use App\Services\Sourcing;
 use App\Services\SourcingPayments;
 use App\Support\Costing;
 use App\Support\Money;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 use Illuminate\View\View;
+use RuntimeException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class SourcingLotController extends Controller
@@ -51,11 +59,150 @@ class SourcingLotController extends Controller
 
     public function create(): View
     {
-        return view('sourcing.lots.create', ['projects' => Project::with('client:id,name')->whereNull('archived_at')->orderBy('name')->get()]);
+        return view('sourcing.lots.create', [
+            'projects' => Project::with('client:id,name')->whereNull('archived_at')->orderBy('name')->get(),
+            'suppliers' => Supplier::where('is_active', true)->orderBy('name')->get(['id', 'name']),
+        ]);
+    }
+
+    /** The simple form's live numbers: the SAME calculation the save uses (QuickLot), so the screen can never disagree with the stored lot. */
+    public function preview(Request $request): JsonResponse
+    {
+        try {
+            $supplier = Supplier::findOrFail((int) $request->input('supplier_id'));
+            $items = $this->quickItems($request, lenient: true);
+            if ($items === []) {
+                return response()->json(['rows' => [], 'totals' => null]);
+            }
+            $delivery = $this->money($request->input('delivery_cost'));
+            $calc = QuickLot::calculate($supplier, $items, $delivery);
+        } catch (RuntimeException $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+        $fmt = fn (int $v) => Money::format($v);
+        $rows = collect($calc['rows'])->map(fn ($r) => [
+            'product_id' => $r['product']->id, 'base' => $fmt($r['base_price']), 'purchase' => $fmt($r['purchase']), 'delivery' => $fmt($r['delivery']),
+            'unit_cost' => $fmt((int) bcadd($r['unit_cost'], '0.5', 0)), 'price' => $fmt($r['price']), 'selling' => $fmt($r['selling']), 'profit' => $fmt($r['expected_profit']),
+            'minor' => ['purchase' => $r['purchase'], 'delivery' => $r['delivery'], 'landed' => $r['landed'], 'price' => $r['price'], 'selling' => $r['selling'], 'profit' => $r['expected_profit']],
+        ])->all();
+
+        return response()->json(['rows' => $rows, 'totals' => [
+            'purchase' => $fmt($calc['purchase']), 'delivery' => $fmt($calc['delivery']), 'landed' => $fmt($calc['landed']), 'selling' => $fmt($calc['selling']), 'profit' => $fmt($calc['profit']),
+            'minor' => ['purchase' => $calc['purchase'], 'delivery' => $calc['delivery'], 'landed' => $calc['landed'], 'selling' => $calc['selling'], 'profit' => $calc['profit']],
+        ]]);
+    }
+
+    /** Active products of one supplier, with their current base price (loaded by the lot form when a supplier is chosen). */
+    public function supplierProducts(Supplier $supplier): JsonResponse
+    {
+        return response()->json($supplier->products()->where('is_active', true)->orderBy('name')->get()->map(fn ($p) => [
+            'id' => $p->id, 'name' => $p->label(), 'sku' => $p->sku, 'unit' => $p->unit, 'price' => Money::format((int) $p->reference_price), 'price_minor' => (int) $p->reference_price,
+        ])->values());
+    }
+
+    private function money(mixed $value): int
+    {
+        $value = trim((string) $value);
+
+        return $value !== '' && preg_match(Money::AMOUNT_REGEX, $value) ? Money::toMinor($value) : 0;
+    }
+
+    /** @return list<array{product_id: int, quantity: string, profit: int}> */
+    private function quickItems(Request $request, bool $lenient = false): array
+    {
+        $items = [];
+        foreach ((array) $request->input('items', []) as $row) {
+            $quantity = trim((string) ($row['quantity'] ?? ''));
+            if ($lenient && (empty($row['product_id']) || $quantity === '' || ! preg_match(self::QTY, $quantity) || bccomp($quantity, '0', 2) <= 0)) {
+                continue; // a half-typed row is simply not priced yet
+            }
+            $items[] = ['product_id' => (int) ($row['product_id'] ?? 0), 'quantity' => $quantity, 'profit' => $this->money($row['profit'] ?? '')];
+        }
+
+        return $items;
+    }
+
+    private function storeQuick(Request $request): RedirectResponse
+    {
+        $data = $request->validate([
+            'supplier_id' => ['required', 'exists:suppliers,id'], 'title' => ['nullable', 'string', 'max:255'], 'purchase_order' => ['nullable', 'string', 'max:191'],
+            'project_id' => ['nullable', 'exists:projects,id'], 'notes' => ['nullable', 'string', 'max:5000'], 'delivery_cost' => ['nullable', 'regex:'.Money::AMOUNT_REGEX],
+            'submission_key' => ['nullable', 'uuid'], 'items' => ['required', 'array', 'min:1'], 'items.*.product_id' => ['required', 'integer'],
+            'items.*.quantity' => ['required', 'regex:'.self::QTY], 'items.*.profit' => ['nullable', 'regex:'.Money::AMOUNT_REGEX],
+        ], ['items.required' => 'Add at least one product.', 'items.*.quantity.*' => 'Enter a valid quantity for every product.']);
+        $supplier = Supplier::findOrFail($data['supplier_id']);
+        if (! $supplier->is_active) {
+            return back()->with('error', 'That supplier is archived.')->withInput();
+        }
+
+        // A double click or a retry with the same form must not create a second lot: the form's key is remembered for ten minutes.
+        $key = 'quick-lot:'.($data['submission_key'] ?? (string) str()->uuid());
+        try {
+            return Cache::lock($key.':lock', 10)->block(5, function () use ($request, $data, $supplier, $key) {
+                if ($existing = Cache::get($key)) {
+                    return redirect()->route('sourcing.lots.show', $existing)->with('warning', 'This lot was already saved; nothing was duplicated.');
+                }
+                $lot = Sourcing::createQuick($supplier, $this->quickItems($request), $this->money($data['delivery_cost'] ?? ''), [
+                    'title' => $data['title'] ?? null, 'purchase_order' => $data['purchase_order'] ?? null, 'project_id' => $data['project_id'] ?? null, 'notes' => $data['notes'] ?? null,
+                ], $request->user());
+                Cache::put($key, $lot->id, 600);
+
+                return redirect()->route('sourcing.lots.show', $lot)->with('status', $lot->status === 'approved' ? 'Lot '.$lot->number.' saved and approved under the standing policy.' : 'Lot '.$lot->number.' saved. It waits for pricing approval before it can be billed.');
+            });
+        } catch (RuntimeException $e) {
+            return back()->with('error', $e->getMessage())->withInput();
+        }
+    }
+
+    /** Put everything in the lot on one invoice of a client project, using the normal allocation and billing code. */
+    public function billClient(Request $request, SourcingLot $lot): RedirectResponse
+    {
+        $data = $request->validate(['project_id' => ['required', 'exists:projects,id']]);
+
+        return $this->attempt(function () use ($lot, $data, $request) {
+            $invoice = Sourcing::billWholeLot($lot, (int) $data['project_id'], $request->user());
+            $lot->project_id ??= (int) $data['project_id'];
+            $lot->save();
+            session()->flash('status', 'Client billed on invoice '.$invoice->number.'.');
+        }, 'Client billed.');
+    }
+
+    /**
+     * Record a REAL client receipt against the lot's invoice, through the normal payment recorder (so the invoice, the segment credit and
+     * company income all update exactly once). Blank amount = the whole remaining balance. The same form submitted twice records one payment.
+     */
+    public function clientPayment(Request $request, SourcingLot $lot, PaymentRecorder $recorder): RedirectResponse
+    {
+        $data = $request->validate([
+            'paid_on' => ['required', 'date'], 'method' => ['required', Rule::enum(PaymentMethod::class)], 'reference' => ['nullable', 'string', 'max:255'],
+            'amount' => ['nullable', 'regex:'.Money::AMOUNT_REGEX], 'invoice_id' => ['nullable', 'integer'], 'idempotency_key' => ['required', 'uuid'],
+        ]);
+        $invoices = Invoice::whereIn('id', $lot->allocations()->whereNotNull('billed_invoice_id')->pluck('billed_invoice_id'))->get()->filter(fn ($i) => $i->balance() > 0);
+        $invoice = $data['invoice_id'] ?? null ? $invoices->firstWhere('id', (int) $data['invoice_id']) : $invoices->first();
+        if (! $invoice) {
+            return back()->with('error', 'There is no unpaid client invoice for this lot.');
+        }
+        $amount = ($data['amount'] ?? '') !== '' ? Money::toMinor($data['amount']) : $invoice->balance();
+
+        return $this->attempt(function () use ($recorder, $invoice, $data, $amount) {
+            $saved = $recorder->save(new Payment, $invoice->project, $invoice, ['amount' => $amount, 'paid_on' => $data['paid_on'], 'method' => $data['method'],
+                'reference' => $data['reference'] ?? null, 'idempotency_key' => $data['idempotency_key']], null);
+            session()->flash($saved ? 'status' : 'warning', $saved ? 'Client payment recorded.' : 'That payment was already recorded; nothing was duplicated.');
+        }, 'Done.');
+    }
+
+    /** Finish a fully paid lot: completes and settles it in one step (the normal settlement rules still apply). */
+    public function close(Request $request, SourcingLot $lot): RedirectResponse
+    {
+        return $this->attempt(fn () => Sourcing::close($lot, $request->user()), 'Lot closed and financially settled.');
     }
 
     public function store(Request $request): RedirectResponse
     {
+        if ($request->has('items')) {
+            return $this->storeQuick($request);
+        }
+
         $data = $request->validate([
             'title' => ['required', 'string', 'max:255'], 'allocation_basis' => ['required', Rule::in(['value', 'quantity'])], 'notes' => ['nullable', 'string', 'max:5000'],
             'purchase_order' => ['nullable', 'string', 'max:191'], 'project_id' => ['nullable', 'exists:projects,id'],
@@ -67,7 +214,8 @@ class SourcingLotController extends Controller
 
     public function show(Request $request, SourcingLot $lot): View
     {
-        $tab = in_array($request->query('tab'), ['overview', 'lines', 'receiving', 'pricing', 'billing', 'payments', 'emergency', 'activity'], true) ? $request->query('tab') : 'overview';
+        // No tab = the simple one-page summary; the detailed tabs are the Advanced view.
+        $tab = in_array($request->query('tab'), ['overview', 'lines', 'receiving', 'pricing', 'billing', 'payments', 'emergency', 'activity'], true) ? $request->query('tab') : null;
         $f = LotFinancials::for($lot);
 
         $preview = null;
@@ -118,7 +266,7 @@ class SourcingLotController extends Controller
 
         return $this->attempt(function () use ($lot, $data) {
             if ($lot->isClosed()) {
-                throw new \RuntimeException('This lot is '.strtolower($lot->statusLabel()).' and can no longer be changed.');
+                throw new RuntimeException('This lot is '.strtolower($lot->statusLabel()).' and can no longer be changed.');
             }
             $lot->update(['purchase_order' => ($data['purchase_order'] ?? null) ?: null, 'project_id' => ($data['project_id'] ?? null) ?: null]);
             Audit::log('sourcing.lot.details', 'lot '.$lot->number, 'PO '.($lot->purchase_order ?? '-').' project '.($lot->project_id ?? '-'));

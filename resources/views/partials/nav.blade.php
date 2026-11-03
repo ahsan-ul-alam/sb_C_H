@@ -23,6 +23,11 @@
             ['Supplier Advances', 'sourcing.advances', 'sourcing.reports', 'wallet', ['sourcing.advances*', 'sourcing.cost-recognitions*']],
             ['Project Margins', 'sourcing.projects', 'sourcing.reports', 'chart', ['sourcing.projects']],
         ],
+        'Product Operations' => [
+            ['Inventory', 'product.inventory', 'inventory.view', 'layers', ['product.inventory*']],
+            ['Orders & Delivery', 'product.orders', 'inventory.view', 'invoice', ['product.orders*']],
+            ['Client Settlements', 'product.settlements', 'settlement.view', 'wallet', ['product.settlements*']],
+        ],
         'Finance' => [
             ['Financial Overview', 'finance.overview', 'finance.view', 'dashboard', ['finance.overview']],
             ['Cash & Bank Accounts', 'finance.accounts', 'finance.view', 'wallet', ['finance.accounts*', 'finance.cash-allocation*']],

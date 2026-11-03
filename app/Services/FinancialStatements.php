@@ -152,14 +152,14 @@ class FinancialStatements
             'liabilities' => 'Supplier / other liabilities', 'partner.payable' => 'Partner profit entitlement payable', 'partner.capital' => 'Partner capital (net of loss charges)',
             'fund.salary' => 'Salary Fund', 'fund.office' => 'Office & Growth Fund', 'fund.emergency' => 'Emergency Reserve', 'fund.coverage' => 'Emergency coverage held for partner losses',
             'equity.opening' => 'Opening equity', 'assets.equipment' => 'Office equipment & fixed assets (at cost, not depreciated)', 'supplier.credit' => 'Supplier credit notes receivable',
-            'assets.prepaid' => 'Prepaid expenses (not yet used)', 'loans.payable' => 'Loans payable (principal owed)', 'income.other' => 'Other income',
+            'assets.prepaid' => 'Prepaid expenses (not yet used)', 'loans.payable' => 'Loans payable (principal owed)', 'client.funds' => 'Client funds held (customer money owed to clients)', 'income.other' => 'Other income',
             'assets.loans_receivable' => 'Loans receivable (money lent, to be repaid)',
             'assets.supplier_advances' => 'Supplier advances (paid, goods not yet accepted)', 'assets.inventory' => 'Product acquisition cost held (inventory)', 'assets.transport_prepaid' => 'Transport paid in advance (service not yet done)',
         ];
         foreach ($balances as $account => $debit) {
             $bucket = match (true) {
                 in_array($account, ['cash', 'receivables', 'assets.equipment', 'assets.prepaid', 'assets.loans_receivable', 'assets.supplier_advances', 'assets.inventory', 'assets.transport_prepaid', 'supplier.credit'], true) => 'assets',
-                in_array($account, ['customer.advances', 'liabilities', 'partner.payable', 'loans.payable'], true) => 'liabilities',
+                in_array($account, ['customer.advances', 'liabilities', 'partner.payable', 'loans.payable', 'client.funds'], true) => 'liabilities',
                 $account === 'partner.capital' || $account === 'equity.opening' => 'capital',
                 str_starts_with($account, 'fund.') => 'funds',
                 default => 'result',
@@ -172,7 +172,7 @@ class FinancialStatements
         $currency = config('finance.currency');
         $receivable = (int) Invoice::where('currency', $currency)->sum('total') - (int) Invoice::where('currency', $currency)->sum('amount_paid');
         $cash = (int) ($balances['cash'] ?? 0);
-        $recorded = -(int) ($balances['partner.payable'] ?? 0) - (int) ($balances['customer.advances'] ?? 0) - (int) ($balances['liabilities'] ?? 0);
+        $recorded = -(int) ($balances['partner.payable'] ?? 0) - (int) ($balances['customer.advances'] ?? 0) - (int) ($balances['liabilities'] ?? 0) - (int) ($balances['client.funds'] ?? 0); // client money held is never free cash
         $committed = $recorded + $sourcing['total'];
 
         return [

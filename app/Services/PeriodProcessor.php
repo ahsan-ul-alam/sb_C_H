@@ -174,6 +174,17 @@ class PeriodProcessor
         foreach ($released as $r) {
             $result['processed'][] = 'Emergency coverage '.$r.' released to the reserve';
         }
+        try {
+            $storage = StorageBilling::runDue(); // monthly warehouse charges (only under the Board's storage policy)
+            foreach ($storage['billed'] ?? [] as $lotNumber) {
+                $result['processed'][] = 'Storage charge billed for lot '.$lotNumber;
+            }
+            foreach ($storage['needs_measurement'] ?? [] as $lotNumber) {
+                $result['exceptions'][] = ['month' => '—', 'reason' => 'Lot '.$lotNumber.' qualifies for a storage charge but its occupied area has not been measured.', 'action' => 'Enter the occupied square feet on the lot inventory page.'];
+            }
+        } catch (RuntimeException $e) {
+            $result['exceptions'][] = ['month' => '—', 'reason' => $e->getMessage(), 'action' => 'Resolve the cause; the next run continues automatically.'];
+        }
         self::report($result);
 
         return $result;

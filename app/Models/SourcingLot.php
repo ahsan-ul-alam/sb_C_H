@@ -25,7 +25,7 @@ class SourcingLot extends Model
     {
         return [
             'pricing_value' => 'integer', 'approved_cost' => 'integer', 'approved_revenue' => 'integer',
-            'approved_at' => 'datetime', 'settled_at' => 'datetime', 'cancelled_at' => 'datetime',
+            'approved_at' => 'datetime', 'settled_at' => 'datetime', 'cancelled_at' => 'datetime', 'storage_measured_on' => 'date',
         ];
     }
 
@@ -85,6 +85,12 @@ class SourcingLot extends Model
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    /** The client project this lot is for (decides whose stock it is once the lot is stated as client-owned). */
+    public function project(): BelongsTo
+    {
+        return $this->belongsTo(Project::class);
     }
 
     public function isClosed(): bool

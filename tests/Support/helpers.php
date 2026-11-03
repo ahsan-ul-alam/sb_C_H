@@ -78,7 +78,7 @@ if (! function_exists('ledgerAudit')) {
     {
         $tables = ['expense' => 'expenses', 'capital' => 'capital_entries', 'period' => 'accounting_periods', 'allocation' => 'allocations', 'payout' => 'payouts',
             'sourcing_fund' => 'emergency_fund_requests', 'sourcing_fund_reversal' => 'emergency_fund_requests', 'resolution' => 'resolutions', 'exit' => 'exit_settlements',
-            'opening' => 'opening_batches', 'revenue' => 'revenue_adjustments'];
+            'opening' => 'opening_batches', 'revenue' => 'revenue_adjustments', 'order_collection' => 'order_collections', 'client_settlement' => 'client_settlements'];
         $entries = JournalEntry::all();
         $orphans = [];
         foreach ($entries as $e) {

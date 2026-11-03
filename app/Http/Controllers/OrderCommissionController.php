@@ -6,6 +6,7 @@ use App\Models\BusinessSetting;
 use App\Models\Client;
 use App\Models\ClientOrder;
 use App\Models\Project;
+use App\Services\Audit;
 use App\Services\OrderCommission;
 use App\Support\Money;
 use Illuminate\Http\RedirectResponse;
@@ -88,5 +89,24 @@ class OrderCommissionController extends Controller
         }
 
         return back()->with('status', 'Commission rates saved. Existing orders keep the rate they were made successful at.');
+    }
+
+    /** Warehouse storage settings: monthly rate per sq ft, the on-hand threshold, whether fees may be netted from settlements, and a per-client rate. */
+    public function storageSettings(Request $request): RedirectResponse
+    {
+        $data = $request->validate([
+            'storage_rate' => ['required', 'regex:'.Money::AMOUNT_REGEX], 'storage_threshold' => ['required', 'integer', 'min:0', 'max:1000000'],
+            'client_id' => ['nullable', 'exists:clients,id'], 'client_storage_rate' => ['nullable', 'regex:'.Money::AMOUNT_REGEX],
+        ]);
+        $setting = BusinessSetting::current();
+        $setting->update(['storage_rate_minor' => Money::toMinor($data['storage_rate']), 'storage_threshold' => (int) $data['storage_threshold'], 'storage_deduct' => $request->boolean('storage_deduct')]);
+        if (! empty($data['client_id'])) {
+            $client = Client::findOrFail($data['client_id']);
+            $client->storage_rate_minor = ($data['client_storage_rate'] ?? '') !== '' ? Money::toMinor($data['client_storage_rate']) : null;
+            $client->save();
+        }
+        Audit::log('storage.settings', 'settings', 'rate '.$setting->storage_rate_minor.' threshold '.$setting->storage_threshold.' deduct '.(int) $setting->storage_deduct);
+
+        return back()->with('status', 'Storage settings saved. Charges still need the Board\'s storage policy; issued bills keep the rate they were made at.');
     }
 }

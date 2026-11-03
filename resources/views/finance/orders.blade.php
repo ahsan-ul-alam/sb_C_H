@@ -26,6 +26,20 @@
             <button class="btn btn-primary" style="margin-top:.9rem">Save rates</button>
         </form>
     </section>
+    @php($bs = \App\Models\BusinessSetting::current())
+    <section class="panel">
+        <div class="panel-head"><h2>Warehouse storage</h2><span class="sub">Nothing is charged until the rate is above zero AND the Board has approved the storage policy (Finance Automation). Issued bills never change.</span></div>
+        <form method="POST" action="{{ route('finance.orders.storage') }}" class="panel-body">@csrf
+            <div class="form-grid">
+                <div class="field"><label>Monthly rate per sq ft</label><input name="storage_rate" inputmode="decimal" value="{{ \App\Support\Money::toDecimal((int) $bs->storage_rate_minor) }}" required></div>
+                <div class="field"><label>Charge a lot only while MORE than this many units are on hand</label><input name="storage_threshold" inputmode="numeric" value="{{ $bs->storage_threshold }}" required></div>
+                <div class="field"><label>Client with their own rate</label><select name="client_id"><option value="">— none —</option>@foreach ($clients as $c)<option value="{{ $c->id }}">{{ $c->name }} ({{ $c->storage_rate_minor === null ? 'default' : \App\Support\Money::format($c->storage_rate_minor) }})</option>@endforeach</select></div>
+                <div class="field"><label>That client's rate — blank resets to default</label><input name="client_storage_rate" inputmode="decimal"></div>
+            </div>
+            <label class="check" style="margin-top:.7rem"><input type="checkbox" name="storage_deduct" value="1" @checked($bs->storage_deduct)> Storage fees may be netted from a client's sales proceeds at settlement (only where the client agreement permits)</label>
+            <div><button class="btn btn-primary" style="margin-top:.7rem">Save storage settings</button></div>
+        </form>
+    </section>
     @endcan
 
     @can('commission.manage')

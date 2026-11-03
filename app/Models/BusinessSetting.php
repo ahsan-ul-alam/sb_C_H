@@ -6,7 +6,7 @@ use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Storage;
 
-#[Fillable(['name', 'address', 'phone', 'email', 'website', 'show_watermark', 'default_currency', 'commission_bps'])]
+#[Fillable(['name', 'address', 'phone', 'email', 'website', 'show_watermark', 'default_currency', 'commission_bps', 'storage_rate_minor', 'storage_threshold', 'storage_deduct'])]
 class BusinessSetting extends Model
 {
     /**
