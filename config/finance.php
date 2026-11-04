@@ -64,6 +64,13 @@ return [
     'sourcing_recognition_trigger' => env('FINANCE_SOURCING_RECOGNITION'),
 
     /*
+    | Inventory valuation engine (OFF while empty). A date (any day of a month): lots may be enrolled in the engine with an effective date in or after
+    | that month. It records the value of Sellbees-owned stock per lot line in a subledger that reconciles to the ledger; it posts nothing and
+    | recognises no cost. Whole-lot cost release stays as it is for every lot that is not enrolled.
+    */
+    'inventory_engine_from' => env('FINANCE_INVENTORY_ENGINE_FROM'),
+
+    /*
     | Liquidity model (OFF by default). When on, FinancialStatements::position() also returns LiquidityService::report(): ledger cash,
     | recognised liabilities, partner entitlements, commitments not yet in the ledger, reserved funds and the available operational cash,
     | each obligation deducted once. Nothing in the existing screens or in profit allocation uses it; switching it on only adds the figures.
