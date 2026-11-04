@@ -183,6 +183,8 @@ class FinancialStatements
             'capital' => $total('capital'), 'funds' => $total('funds'), 'result' => $total('result'),
             'balanced' => $total('assets') === $total('liabilities') + $total('capital') + $total('funds') + $total('result'),
             'cash' => $cash, 'recorded_liabilities' => $recorded, 'client_receivable' => $receivable, 'sourcing' => $sourcing, 'committed' => $committed, 'free_cash' => $cash - $committed,
+            // The fuller liquidity model, only while finance.liquidity_model is on (off by default; nothing else reads it).
+            'liquidity' => LiquidityService::enabled() ? LiquidityService::report() : null,
         ];
     }
 

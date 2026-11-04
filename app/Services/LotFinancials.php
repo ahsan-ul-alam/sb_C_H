@@ -94,7 +94,8 @@ class LotFinancials
 
         $paid = (int) $lot->payments->sum(fn ($p) => $p->effectiveAmount());
         $supplierOutstanding = max(0, $purchase - $paid);
-        $costsUnpaid = (int) $current->where('kind', 'actual')->reject(fn ($c) => $c->isPaid())->sum('amount');
+        // What is still owed (a part-paid cost owes the remainder) and what has been paid (a part-paid cost has paid its live payments).
+        $costsUnpaid = (int) $current->where('kind', 'actual')->sum(fn ($c) => $c->remainingUnpaid());
 
         $billedByInvoice = $lot->allocations->whereNotNull('billed_invoice_id')->groupBy('billed_invoice_id');
         $billed = 0;
@@ -138,7 +139,7 @@ class LotFinancials
             'supplier_paid' => $paid,
             'supplier_outstanding' => $supplierOutstanding,
             'costs_unpaid' => $costsUnpaid,
-            'costs_paid' => (int) $current->where('kind', 'actual')->filter(fn ($c) => $c->isPaid())->sum('amount'),
+            'costs_paid' => (int) $current->where('kind', 'actual')->sum(fn ($c) => $c->paidAmount()),
             'cash_required' => $supplierOutstanding + $costsUnpaid,
             'billed' => $billed,
             'unbilled' => max(0, $revenue - $billed),

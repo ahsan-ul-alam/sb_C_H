@@ -2,7 +2,6 @@
 
 namespace App\Services;
 
-use App\Models\Allocation;
 use App\Models\Expense;
 use App\Models\Resolution;
 use App\Models\SourcingLot;
@@ -13,7 +12,8 @@ use Illuminate\Support\Facades\DB;
 
 /**
  * Read-only views that keep Main Finance honest about sourcing: money owed but not yet in the ledger, and
- * Emergency Fund coverage waiting to be applied to a partner loss. Nothing here posts anything.
+ * Emergency Fund coverage waiting to be applied to a partner loss. Nothing here posts anything. Every figure is a projection of
+ * SourcingReconciliation, which is built from the source transactions, so the views cannot disagree with each other.
  */
 class SourcingObligations
 {
@@ -21,93 +21,52 @@ class SourcingObligations
     public const COVERAGE_RESOLUTION = 'Apply Emergency Fund coverage to partner loss allocation';
 
     /**
-     * Sourcing money not yet in the ledger as an expense: supplier payables, unpaid actual costs of live lots, and
-     * sourcing payments awaiting Board verification — all created by $asOf (everything when null).
+     * Everything sourcing owes or has paid out unverified, by the lot, supplier and cost that owes it: supplier payables (ordered, net of
+     * payments), unpaid costs of live lots (a part-paid cost owes only the remainder), and payments awaiting Board verification.
+     * A proposed cost awaiting verification is counted once, as an owed cost, never again as a pending payment.
+     *
+     * This is the COMPLETE list that holds back profit allocation (a payable the ledger already carries is still an open obligation);
+     * profit allocation only asks whether the total is above zero. See notInLedger() for what the ledger does not carry yet.
      *
      * @return array{suppliers: int, costs: int, pending: int, total: int}
      */
     public static function outstanding(?string $asOf = null): array
     {
-        $suppliers = 0;
-        $costs = 0;
-        SourcingLot::where('status', '!=', 'cancelled')
-            ->when($asOf, fn ($q) => $q->whereDate('created_at', '<=', $asOf))
-            ->get()
-            ->each(function (SourcingLot $lot) use (&$suppliers, &$costs) {
-                $f = LotFinancials::for($lot);
-                $suppliers += $f['supplier_outstanding'];
-                $costs += $f['costs_unpaid'];
-            });
-
-        $pending = self::pendingExpenses($asOf);
+        $model = SourcingReconciliation::build($asOf);
+        $rows = collect($model['rows']);
+        $suppliers = (int) $rows->where('kind', 'supplier')->sum('remaining_owed');
+        $costs = (int) $rows->where('kind', 'cost')->sum('remaining_owed');
+        $pending = (int) $rows->sum('pending_payment') + $model['unlinked_pending'];
 
         return ['suppliers' => $suppliers, 'costs' => $costs, 'pending' => $pending, 'total' => $suppliers + $costs + $pending];
     }
 
     /**
-     * The part of the sourcing obligations the general ledger does not carry yet. Under the accrual sourcing basis, accepted goods not yet
+     * The part of the obligations the general ledger does not carry yet. Under the accrual sourcing basis, accepted goods not yet
      * paid for (a payable settlement) and incurred-but-unpaid acquisition costs are already ledger liabilities, so a free-cash figure that adds
-     * the ledger's liabilities and the obligations above would count them twice. outstanding() stays the complete list that holds back profit
-     * (a payable the ledger knows is still an open obligation); this view is what is left once what the ledger already carries is taken out.
+     * the ledger's liabilities and the obligations above would count them twice. It is worked out per lot, supplier and cost from the source
+     * transactions, never by subtracting one aggregate from another. Under the cash basis nothing is in the ledger yet, so the result equals
+     * outstanding().
      *
-     * It is worked out from the source transactions, never by subtracting one aggregate from another: per lot and supplier the ledger payable
-     * of THAT lot and supplier absorbs that lot's supplier obligation (never another lot's, and never below zero), and a lot cost is already in
-     * the ledger only when its own expense is verified. Under the cash basis nothing is in the ledger yet, so the result equals outstanding().
-     *
-     * @return array{suppliers: int, costs: int, pending: int, total: int, in_ledger: int, lines: list<array{lot: string, kind: string, ref: int, obligation: int, in_ledger: int, not_in_ledger: int}>}
+     * @return array{suppliers: int, costs: int, pending: int, total: int, in_ledger: int, lines: list<array{lot: string, kind: string, ref: int, obligation: int, in_ledger: int, not_in_ledger: int}>, rows: list<array<string, mixed>>}
      */
     public static function notInLedger(?string $asOf = null): array
     {
-        $suppliers = 0;
-        $costs = 0;
-        $pending = 0;
-        $inLedger = 0;
-        $lines = [];
-        $accounted = []; // pending expenses already counted inside a supplier or cost line below
+        $model = SourcingReconciliation::build($asOf);
+        $rows = collect($model['rows']);
+        $suppliers = (int) $rows->where('kind', 'supplier')->sum('not_recognised_owed');
+        $costs = (int) $rows->where('kind', 'cost')->sum('not_recognised');
+        $pending = (int) $rows->where('kind', 'supplier')->sum('not_recognised_pending') + (int) $rows->where('kind', 'cost')->sum('pending_payment') + $model['unlinked_pending'];
 
-        SourcingLot::where('status', '!=', 'cancelled')->when($asOf, fn ($q) => $q->whereDate('created_at', '<=', $asOf))->get()
-            ->each(function (SourcingLot $lot) use (&$suppliers, &$costs, &$pending, &$inLedger, &$lines, &$accounted) {
-                $f = LotFinancials::for($lot);
-                foreach (collect($f['lines'])->groupBy(fn ($r) => $r['line']->supplier_id) as $supplierId => $rows) {
-                    $payments = $lot->payments->where('supplier_id', (int) $supplierId);
-                    $owed = max(0, (int) $rows->sum('purchase') - SourcingPayments::paidTotal($payments));
-                    $awaiting = $payments->filter(fn ($p) => ! $p->isVoided() && $p->expense?->status === 'pending' && ! $p->expense->reverses_id);
-                    $awaitingAmount = (int) $awaiting->sum(fn ($p) => (int) $p->expense->amount);
-                    $accounted = [...$accounted, ...$awaiting->pluck('expense_id')->all()];
-
-                    // The ledger payable of this lot and supplier covers its obligation first, then its payments awaiting verification
-                    // (a pending payment of that payable is part of the same liability, not a second claim on cash).
-                    $ledger = AdvanceSettlementService::payableOutstanding($lot, (int) $supplierId);
-                    $owedLeft = max(0, $owed - $ledger);
-                    $awaitingLeft = max(0, $awaitingAmount - max(0, $ledger - $owed));
-                    $suppliers += $owedLeft;
-                    $pending += $awaitingLeft;
-                    $covered = ($owed + $awaitingAmount) - ($owedLeft + $awaitingLeft);
-                    $inLedger += $covered;
-                    $lines[] = ['lot' => $lot->number, 'kind' => 'supplier', 'ref' => (int) $supplierId, 'obligation' => $owed + $awaitingAmount, 'in_ledger' => $covered, 'not_in_ledger' => $owedLeft + $awaitingLeft];
-                }
-
-                $replaced = $lot->costs->pluck('replaces_id')->filter()->all();
-                foreach ($lot->costs->where('kind', 'actual')->reject(fn ($c) => in_array($c->id, $replaced, true) || $c->isPaid()) as $cost) {
-                    $expense = $cost->expense;
-                    if ($expense?->status === 'verified') { // incurred, unpaid and verified: Dr inventory / Cr liabilities is already in the ledger
-                        $inLedger += $expense->outstanding();
-                        $lines[] = ['lot' => $lot->number, 'kind' => 'cost', 'ref' => $cost->id, 'obligation' => (int) $cost->amount, 'in_ledger' => $expense->outstanding(), 'not_in_ledger' => 0];
-
-                        continue;
-                    }
-                    $costs += (int) $cost->amount;
-                    if ($expense?->status === 'pending') {
-                        $accounted[] = $expense->id;
-                    }
-                    $lines[] = ['lot' => $lot->number, 'kind' => 'cost', 'ref' => $cost->id, 'obligation' => (int) $cost->amount, 'in_ledger' => 0, 'not_in_ledger' => (int) $cost->amount];
-                }
-            });
-
-        // Anything else awaiting verification (paid lot costs, payments of cancelled lots, expenses linked to no live line).
-        $pending += (int) self::pendingQuery($asOf)->when($accounted !== [], fn ($q) => $q->whereNotIn('id', $accounted))->sum('amount');
-
-        return ['suppliers' => $suppliers, 'costs' => $costs, 'pending' => $pending, 'total' => $suppliers + $costs + $pending, 'in_ledger' => $inLedger, 'lines' => $lines];
+        return [
+            'suppliers' => $suppliers, 'costs' => $costs, 'pending' => $pending, 'total' => $suppliers + $costs + $pending,
+            'in_ledger' => (int) $rows->sum('recognised_in_ledger'),
+            'lines' => $rows->map(fn ($r) => [
+                'lot' => $r['lot'], 'kind' => $r['kind'], 'ref' => $r['ref'], 'obligation' => $r['remaining_owed'] + $r['pending_payment'],
+                'in_ledger' => $r['recognised_in_ledger'], 'not_in_ledger' => $r['not_recognised'] + ($r['kind'] === 'cost' ? $r['pending_payment'] : 0),
+            ])->all(),
+            'rows' => $model['rows'],
+        ];
     }
 
     /**
@@ -118,24 +77,23 @@ class SourcingObligations
      */
     public static function details(?string $asOf = null): array
     {
+        $model = SourcingReconciliation::build($asOf);
         $rows = [];
-        SourcingLot::where('status', '!=', 'cancelled')->when($asOf, fn ($q) => $q->whereDate('created_at', '<=', $asOf))->get()->each(function (SourcingLot $lot) use (&$rows) {
-            $f = LotFinancials::for($lot);
-            foreach (collect($f['lines'])->groupBy(fn ($r) => $r['line']->supplier_id) as $supplierId => $lines) {
-                $paid = SourcingPayments::paidTotal($lot->payments->where('supplier_id', $supplierId));
-                $owed = max(0, (int) $lines->sum('purchase') - $paid);
-                if ($owed > 0) {
-                    $rows[] = ['lot' => $lot->number, 'lot_id' => $lot->id, 'who' => $lines->first()['line']->supplier->name, 'amount' => $owed,
-                        'reason' => 'Supplier payable not yet paid', 'action' => 'Pay the supplier, then record the payment on the lot'];
-                }
+        foreach ($model['rows'] as $r) {
+            if ($r['remaining_owed'] > 0) {
+                $rows[] = $r['kind'] === 'supplier'
+                    ? ['lot' => $r['lot'], 'lot_id' => $r['lot_id'], 'who' => $r['label'], 'amount' => $r['remaining_owed'],
+                        'reason' => 'Supplier payable not yet paid', 'action' => 'Pay the supplier, then record the payment on the lot']
+                    : ['lot' => $r['lot'], 'lot_id' => $r['lot_id'], 'who' => $r['label'], 'amount' => $r['remaining_owed'],
+                        'reason' => 'Lot cost not yet paid ('.($r['status'] === 'awaiting_verification' ? 'recorded as a payable, awaiting verification' : 'remaining balance').')',
+                        'action' => 'Pay the cost, then mark it paid on the lot'];
             }
-            foreach ($lot->costs->where('kind', 'actual')->reject(fn ($c) => $c->isPaid() || $lot->costs->contains('replaces_id', $c->id)) as $cost) {
-                $rows[] = ['lot' => $lot->number, 'lot_id' => $lot->id, 'who' => $cost->payee ?: $cost->category, 'amount' => $cost->amount,
-                    'reason' => 'Lot cost not yet paid ('.$cost->category.')', 'action' => 'Pay the cost, then mark it paid on the lot'];
-            }
-        });
-        $pending = Expense::where('status', 'pending')->where('category', 'like', 'Sourcing:%')->whereNull('reverses_id')->get();
+        }
+        $pending = self::pendingQuery($asOf)->get();
         foreach ($pending as $e) {
+            if (in_array($e->id, $model['proposed_cost_expense_ids'], true)) {
+                continue; // a proposed cost already shows above as an owed cost
+            }
             $lotId = SupplierPayment::where('expense_id', $e->id)->value('sourcing_lot_id') ?? SourcingLotCost::where('expense_id', $e->id)->value('sourcing_lot_id');
             $lot = $lotId ? SourcingLot::find($lotId) : null;
             if ($asOf && $lot && $lot->created_at->toDateString() > $asOf) {
@@ -157,14 +115,9 @@ class SourcingObligations
     /**
      * @return Builder<Expense>
      */
-    private static function pendingQuery(?string $asOf): Builder
+    private static function pendingQuery(?string $asOf)
     {
-        $lotIds = SourcingLot::when($asOf, fn ($q) => $q->whereDate('created_at', '<=', $asOf))->select('id');
-
-        return Expense::where('status', 'pending')->where('category', 'like', 'Sourcing:%')->whereNull('reverses_id')
-            ->when($asOf, fn ($q) => $q->where(fn ($w) => $w
-                ->whereIn('id', SupplierPayment::whereIn('sourcing_lot_id', $lotIds)->select('expense_id'))
-                ->orWhereIn('id', SourcingLotCost::whereIn('sourcing_lot_id', $lotIds)->select('expense_id'))));
+        return SourcingReconciliation::pendingQuery($asOf);
     }
 
     public static function coverageResolutionApproved(): bool

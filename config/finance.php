@@ -63,4 +63,11 @@ return [
     */
     'sourcing_recognition_trigger' => env('FINANCE_SOURCING_RECOGNITION'),
 
+    /*
+    | Liquidity model (OFF by default). When on, FinancialStatements::position() also returns LiquidityService::report(): ledger cash,
+    | recognised liabilities, partner entitlements, commitments not yet in the ledger, reserved funds and the available operational cash,
+    | each obligation deducted once. Nothing in the existing screens or in profit allocation uses it; switching it on only adds the figures.
+    */
+    'liquidity_model' => (bool) env('FINANCE_LIQUIDITY_MODEL', false),
+
 ];

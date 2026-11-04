@@ -130,7 +130,7 @@ class ProjectSourcingReport
         $current = $lot->costs->reject(fn ($c) => in_array($c->id, $replaced, true));
         $totals = [
             'supplier_paid' => (int) $f['supplier_paid'], 'supplier_outstanding' => (int) $f['supplier_outstanding'],
-            'costs_paid' => (int) $current->where('kind', 'actual')->filter(fn (SourcingLotCost $c) => $c->isPaid())->sum('amount'),
+            'costs_paid' => (int) $current->where('kind', 'actual')->sum(fn (SourcingLotCost $c) => $c->paidAmount()),
             'costs_unpaid' => (int) $f['costs_unpaid'], 'estimates_open' => (int) $f['estimates_open'],
             'recognised_cost' => (int) $lot->costRecognitions()->where('status', 'verified')->sum('amount'),
         ];
