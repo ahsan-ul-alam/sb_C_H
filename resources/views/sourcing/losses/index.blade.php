@@ -66,6 +66,62 @@
     </section>
 
     <section class="panel">
+        <div class="panel-head"><h2>Impaired stock: release or dispose</h2></div>
+        <div class="panel-body muted">Units held apart at a recoverable value are either released to sellable stock at exactly that value (repaired, or found resalable) or disposed of with the proceeds, if any. A Board member who did not request it approves; nothing posts before.</div>
+        <div class="table-wrap"><table class="table table-min-760"><thead><tr><th>Case</th><th>Item</th><th class="num">Still held apart</th><th></th></tr></thead><tbody>
+            @forelse ($impaired as $r)
+                <tr><td><a href="{{ route('sourcing.losses.show', $r['case']) }}">#{{ $r['case']->id }}</a></td><td>{{ $r['case']->line->description }} · {{ str_replace('_', ' ', $r['case']->outcome) }}</td><td class="num">{{ $r['left'] }}</td>
+                    <td class="num">@can('inventory.loss.propose')<details><summary class="btn btn-sm">Release or dispose</summary>
+                        <form method="POST" action="{{ route('sourcing.losses.impaired.store', $r['case']) }}" style="display:grid; gap:.4rem; margin-top:.4rem; min-width:15rem">@csrf
+                            <input type="hidden" name="idempotency_key" value="{{ (string) \Illuminate\Support\Str::uuid() }}">
+                            <select name="action" aria-label="Action"><option value="release">Release to sellable stock</option><option value="dispose">Dispose (salvage or scrap)</option></select>
+                            <input name="quantity" placeholder="Quantity (max {{ $r['left'] }})" inputmode="decimal" required><input type="date" name="event_on" max="{{ today()->toDateString() }}" value="{{ today()->toDateString() }}" required>
+                            <input name="reference" placeholder="Repair report / salvage invoice" required minlength="5"><input name="evidence_reference" placeholder="Evidence" required minlength="5">
+                            <input name="proceeds" placeholder="Proceeds (disposal only)" inputmode="decimal"><select name="financial_account_id" aria-label="Account"><option value="">Account (if proceeds)</option>@foreach ($accounts as $acct)<option value="{{ $acct->id }}">{{ $acct->name }}</option>@endforeach</select>
+                            <button class="btn btn-sm btn-primary">Submit</button></form></details>@endcan</td></tr>
+            @empty
+                <tr><td colspan="4" class="muted">No impaired stock is being held apart.</td></tr>
+            @endforelse
+        </tbody></table></div>
+        @if ($impairedPending->isNotEmpty())
+        <div class="panel-body"><strong>Awaiting the Board</strong></div>
+        <div class="table-wrap"><table class="table table-min-640"><thead><tr><th>#</th><th>Case</th><th>Action</th><th class="num">Qty</th><th class="num">Proceeds</th><th>Requested by</th><th></th></tr></thead><tbody>
+            @foreach ($impairedPending as $e)
+                <tr><td>#{{ $e->id }}</td><td>#{{ $e->inventory_loss_case_id }} {{ $e->lossCase->line->description }}</td><td>{{ $e->action }}</td><td class="num">{{ $e->quantity }}</td><td class="num">{{ Money::format($e->proceeds) }}</td><td>{{ $e->preparer->name }}</td>
+                    <td class="num">@can('inventory.loss.approve') @if ($e->prepared_by !== auth()->id())<form method="POST" action="{{ route('sourcing.losses.impaired.decide', $e) }}" style="display:inline-flex; gap:.3rem">@csrf<input name="reason" placeholder="Reason (to reject)" size="14"><button class="btn btn-sm btn-success" name="decision" value="approve">Approve</button><button class="btn btn-sm btn-danger" name="decision" value="reject">Reject</button></form>@else<span class="muted">You requested this</span>@endif @endcan</td></tr>
+            @endforeach
+        </tbody></table></div>
+        @endif
+    </section>
+
+    <section class="panel">
+        <div class="panel-head"><h2>Revaluation to net realisable value</h2></div>
+        <div class="panel-body muted">A write-down needs the evidence of the net realisable value; a reversal can only give back earlier write-downs, never above cost. Proposed, reviewed by Finance and approved by the Board, three different people, whatever the amount.</div>
+        @can('inventory.loss.propose')
+        <form method="POST" action="{{ route('sourcing.revaluations.store') }}" class="panel-body">@csrf
+            <input type="hidden" name="idempotency_key" value="{{ (string) \Illuminate\Support\Str::uuid() }}">
+            <div class="form-grid">
+                <div class="field full"><label for="rv_line">Lot line <span class="req" aria-hidden="true">*</span></label><select id="rv_line" name="sourcing_lot_line_id" required><option value="">Choose…</option>@foreach ($valuedLines as $l)<option value="{{ $l->id }}">{{ $l->lot->number }} · {{ $l->description }}</option>@endforeach</select></div>
+                <div class="field"><label for="rv_dir">Direction</label><select id="rv_dir" name="direction"><option value="write_down">Write down</option><option value="reversal">Reverse an earlier write-down</option></select></div>
+                <div class="field"><label for="rv_amount">Amount <span class="req" aria-hidden="true">*</span></label><input id="rv_amount" name="amount" inputmode="decimal" required></div>
+                <div class="field"><label for="rv_on">Effective <span class="req" aria-hidden="true">*</span></label><input type="date" id="rv_on" name="effective_on" max="{{ today()->toDateString() }}" value="{{ today()->toDateString() }}" required></div>
+                <div class="field"><label for="rv_evidence">Evidence <span class="req" aria-hidden="true">*</span></label><input id="rv_evidence" name="evidence_reference" required minlength="5" placeholder="Price list, sales quote, market report"></div>
+                <div class="field full"><label for="rv_basis">Net realisable value basis <span class="req" aria-hidden="true">*</span></label><input id="rv_basis" name="basis" required minlength="5"></div>
+            </div>
+            <button class="btn btn-primary" style="margin-top:.9rem">Submit for review</button>
+        </form>
+        @endcan
+        <div class="table-wrap"><table class="table table-min-760"><thead><tr><th>#</th><th>Line</th><th>Direction</th><th class="num">Amount</th><th>Basis</th><th>Status</th><th></th></tr></thead><tbody>
+            @forelse ($revaluations as $v)
+                <tr><td>#{{ $v->id }}</td><td>{{ $v->line->description }}</td><td>{{ str_replace('_', ' ', $v->direction) }}</td><td class="num">{{ Money::format($v->amount) }}</td><td>{{ $v->basis }}</td><td><x-status :value="$v->status" /></td>
+                    <td class="num">@if ($v->status === 'pending_review')@can('inventory.loss.review') @if ($v->prepared_by !== auth()->id())<form method="POST" action="{{ route('sourcing.revaluations.review', $v) }}" style="display:inline-flex; gap:.3rem">@csrf<input name="review_note" placeholder="What Finance checked" required><button class="btn btn-sm btn-primary">Review</button></form>@endif @endcan
+                        @elseif ($v->status === 'reviewed')@can('inventory.loss.approve') @if ($v->prepared_by !== auth()->id() && $v->reviewed_by !== auth()->id())<form method="POST" action="{{ route('sourcing.revaluations.decide', $v) }}" style="display:inline-flex; gap:.3rem">@csrf<input name="reason" placeholder="Reason (to reject)" size="14"><button class="btn btn-sm btn-success" name="decision" value="approve">Approve</button><button class="btn btn-sm btn-danger" name="decision" value="reject">Reject</button></form>@endif @endcan @endif</td></tr>
+            @empty
+                <tr><td colspan="7" class="muted">No revaluations yet.</td></tr>
+            @endforelse
+        </tbody></table></div>
+    </section>
+    <section class="panel">
         <div class="panel-head"><h2>Ownership and custody</h2></div>
         <div class="panel-body muted">Every approved handover's units, by where they stand now. Ownership passed to the client at handover; the goods stay in our warehouse as custody stock unless they physically left. The units of one handover are never counted in another's.</div>
         <div class="table-wrap"><table class="table table-min-760">

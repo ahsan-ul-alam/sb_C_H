@@ -2,17 +2,22 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\FinancialAccount;
+use App\Models\ImpairedStockEvent;
 use App\Models\InventoryHandover;
 use App\Models\InventoryHandoverReturn;
 use App\Models\InventoryLossCase;
+use App\Models\InventoryRevaluation;
 use App\Models\InventoryValueMovement;
 use App\Models\SourcingLot;
 use App\Models\SourcingLotLine;
+use App\Services\ImpairedStockService;
 use App\Services\Inventory;
 use App\Services\InventoryCustody;
 use App\Services\InventoryEngine;
 use App\Services\InventoryLossService;
 use App\Services\InventoryReconciliation;
+use App\Services\InventoryRevaluationService;
 use App\Support\Money;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -41,6 +46,12 @@ class InventoryLossController extends Controller
             'open' => InventoryLossCase::with(['line', 'preparer', 'reviewer', 'handover.project.client'])->whereIn('status', InventoryLossCase::ACTIVE)->orderBy('id')->get(),
             'history' => InventoryLossCase::with(['line', 'approver'])->whereIn('status', ['approved', 'rejected', 'cancelled'])->latest('id')->limit(100)->get(),
             'reconciliation' => InventoryReconciliation::losses(),
+            'impaired' => InventoryLossCase::with('line')->where('status', 'approved')->whereIn('outcome', ['impaired', 'repairable'])->where('scope', '!=', 'custody')->get()
+                ->map(fn (InventoryLossCase $c) => ['case' => $c, 'left' => bcsub((string) $c->quantity, ImpairedStockService::used($c), 2)])->filter(fn ($r) => bccomp($r['left'], '0', 2) > 0)->values(),
+            'impairedPending' => ImpairedStockEvent::with(['lossCase.line', 'preparer'])->where('status', 'pending')->orderBy('id')->get(),
+            'revaluations' => InventoryRevaluation::with(['line', 'preparer', 'reviewer'])->latest('id')->limit(50)->get(),
+            'valuedLines' => SourcingLotLine::with('lot')->whereIn('sourcing_lot_id', $lotIds)->orderBy('id')->get(),
+            'accounts' => FinancialAccount::where('is_active', true)->orderBy('name')->get(),
         ]);
     }
 
@@ -92,5 +103,44 @@ class InventoryLossController extends Controller
         $data = $request->validate(['reason' => ['required', 'string', 'max:200']]);
 
         return $this->attempt(fn () => InventoryLossService::cancel($case, $request->user(), $data['reason']), 'Case cancelled.');
+    }
+
+    public function impairedStore(Request $request, InventoryLossCase $case): RedirectResponse
+    {
+        $data = $request->validate(['action' => ['required', 'in:release,dispose'], 'quantity' => ['required', 'regex:/^\d{1,10}(\.\d{1,2})?$/'], 'event_on' => ['required', 'date', 'before_or_equal:today'], 'reference' => ['required', 'string', 'min:5', 'max:255'],
+            'evidence_reference' => ['required', 'string', 'min:5', 'max:255'], 'proceeds' => ['nullable', 'regex:'.Money::AMOUNT_REGEX], 'financial_account_id' => ['nullable', 'exists:financial_accounts,id'], 'idempotency_key' => ['nullable', 'uuid']]);
+
+        return $this->attempt(fn () => ImpairedStockService::propose($request->user(), $case, $data['action'], $data['quantity'], $data['event_on'], $data['reference'], $data['evidence_reference'], Money::toMinor($data['proceeds'] ?? 0),
+            isset($data['financial_account_id']) ? (int) $data['financial_account_id'] : null, $data['idempotency_key'] ?? (string) Str::uuid()), 'Recorded. A Board member must approve it before anything is posted.');
+    }
+
+    public function impairedDecide(Request $request, ImpairedStockEvent $event): RedirectResponse
+    {
+        $approve = $request->input('decision') === 'approve';
+
+        return $this->attempt(fn () => ImpairedStockService::decide($event, $approve, $request->user(), $request->input('reason')), $approve ? 'Approved and posted.' : 'Rejected.');
+    }
+
+    public function revalStore(Request $request): RedirectResponse
+    {
+        $data = $request->validate(['sourcing_lot_line_id' => ['required', 'exists:sourcing_lot_lines,id'], 'direction' => ['required', 'in:write_down,reversal'], 'amount' => ['required', 'regex:'.Money::AMOUNT_REGEX],
+            'basis' => ['required', 'string', 'min:5', 'max:255'], 'evidence_reference' => ['required', 'string', 'min:5', 'max:255'], 'effective_on' => ['required', 'date', 'before_or_equal:today'], 'idempotency_key' => ['nullable', 'uuid']]);
+
+        return $this->attempt(fn () => InventoryRevaluationService::propose($request->user(), SourcingLotLine::findOrFail($data['sourcing_lot_line_id']), $data['direction'], Money::toMinor($data['amount']), $data['basis'], $data['evidence_reference'],
+            $data['effective_on'], $data['idempotency_key'] ?? (string) Str::uuid()), 'Recorded. Finance must review it and a Board member decide it; nothing is posted until then.');
+    }
+
+    public function revalReview(Request $request, InventoryRevaluation $revaluation): RedirectResponse
+    {
+        $data = $request->validate(['review_note' => ['required', 'string', 'max:255']]);
+
+        return $this->attempt(fn () => InventoryRevaluationService::review($revaluation, $request->user(), $data['review_note']), 'Reviewed.');
+    }
+
+    public function revalDecide(Request $request, InventoryRevaluation $revaluation): RedirectResponse
+    {
+        $approve = $request->input('decision') === 'approve';
+
+        return $this->attempt(fn () => InventoryRevaluationService::decide($revaluation, $approve, $request->user(), $request->input('reason')), $approve ? 'Approved and posted.' : 'Rejected.');
     }
 }

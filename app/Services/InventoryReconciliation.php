@@ -5,9 +5,11 @@ namespace App\Services;
 use App\Models\AdvanceSettlement;
 use App\Models\CostRecognition;
 use App\Models\Expense;
+use App\Models\ImpairedStockEvent;
 use App\Models\InventoryEngineEnrolment;
 use App\Models\InventoryHandover;
 use App\Models\InventoryLossCase;
+use App\Models\InventoryRevaluation;
 use App\Models\InventoryValueMovement;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
@@ -187,8 +189,10 @@ class InventoryReconciliation
                 // less what has since left the warehouse (delivered to the client's customers, or released to the client at handover).
                 // Units quarantined at a recoverable value left the cost layers but are still physically here; units of a damaged return that were written off left the count
                 // but were never in the layers (they stay in the handed-over quantity).
-                $quarantined = (string) InventoryLossCase::where('sourcing_lot_line_id', $line->id)->where('scope', 'owned')->where('status', 'approved')->whereIn('outcome', ['repairable', 'impaired'])->sum('quantity');
-                $writtenOffReturns = (string) InventoryLossCase::where('sourcing_lot_line_id', $line->id)->where('scope', 'return')->where('status', 'approved')->where('outcome', 'write_off')->sum('quantity');
+                $ownedCases = InventoryLossCase::where('sourcing_lot_line_id', $line->id)->where('scope', 'owned')->where('status', 'approved')->whereIn('outcome', ['repairable', 'impaired']);
+                $quarantined = bcsub((string) (clone $ownedCases)->sum('quantity'), (string) ImpairedStockEvent::whereIn('inventory_loss_case_id', (clone $ownedCases)->select('id'))->where('status', 'posted')->sum('quantity'), 2);
+                $returnCases = InventoryLossCase::where('sourcing_lot_line_id', $line->id)->where('scope', 'return')->where('status', 'approved');
+                $writtenOffReturns = bcadd((string) (clone $returnCases)->where('outcome', 'write_off')->sum('quantity'), (string) ImpairedStockEvent::whereIn('inventory_loss_case_id', (clone $returnCases)->select('id'))->where('status', 'posted')->where('action', 'dispose')->sum('quantity'), 2);
                 $expectedHeld = bcsub(bcadd(bcsub(bcadd($figures['quantity'], $issued, 2), $balances['delivered'], 2), $quarantined, 2), $writtenOffReturns, 2);
                 if ($status === 'valued' && bccomp($held, $expectedHeld, 2) !== 0) {
                     $differences[] = 'The physical count held ('.$held.') differs from the valued quantity ('.$figures['quantity'].') plus goods handed over ('.$issued.'): this needs an approved stock adjustment; nothing is corrected automatically.';
@@ -266,6 +270,7 @@ class InventoryReconciliation
         }
         // A normal loss on Sellbees stock is part of the cost of goods sold, so it is in this account too (but belongs to no handover).
         $net += (int) InventoryLossCase::where('scope', 'owned')->where('classification', 'normal')->where('status', 'approved')->sum('loss_value');
+        $net += (int) ImpairedStockEvent::where('status', 'posted')->where('loss_account', 'cogs')->whereIn('inventory_loss_case_id', InventoryLossCase::where('classification', 'normal')->select('id'))->sum('loss_delta');
         $gl = Ledger::debitBalance('cogs');
         if ($gl !== $net) {
             $problems[] = 'Cost of goods sold in the ledger ('.$gl.') differs from the handovers ('.$net.').';
@@ -303,8 +308,13 @@ class InventoryReconciliation
                 $problems[] = 'Case #'.$case->id.': carrying value does not equal recoverable value plus loss.';
             }
         }
-        $impairedCases = (int) $approved->whereIn('outcome', ['repairable', 'impaired'])->sum('recoverable_value');
-        $abnormalCases = (int) $approved->where('classification', 'abnormal')->sum('loss_value');
+        $posted = ImpairedStockEvent::where('status', 'posted')->get();
+        $impairedCases = (int) $approved->whereIn('outcome', ['repairable', 'impaired'])->sum('recoverable_value') - (int) $posted->sum('carrying_value');
+        $abnormalCases = (int) $approved->where('classification', 'abnormal')->sum('loss_value') + (int) $posted->where('loss_account', 'inventory_loss')->sum('loss_delta');
+        $revalued = (int) InventoryRevaluation::where('status', 'approved')->where('direction', 'write_down')->sum('amount') - (int) InventoryRevaluation::where('status', 'approved')->where('direction', 'reversal')->sum('amount');
+        if (Ledger::debitBalance('inventory_writedown') !== $revalued) {
+            $problems[] = 'Inventory write-downs in the ledger ('.Ledger::debitBalance('inventory_writedown').') differ from the approved revaluations ('.$revalued.').';
+        }
         $impairedGl = Ledger::debitBalance('assets.inventory_impaired');
         $abnormalGl = Ledger::debitBalance('inventory_loss');
         if ($impairedGl !== $impairedCases) {
@@ -450,6 +460,12 @@ class InventoryReconciliation
         }
         foreach (SupplierReturn::where('sourcing_lot_id', $lot->id)->where('status', 'approved')->pluck('id') as $returnId) {
             $total += InventoryValuation::inventoryNet('supplier_return', $returnId);
+        }
+        foreach (ImpairedStockEvent::whereIn('inventory_loss_case_id', InventoryLossCase::where('sourcing_lot_id', $lot->id)->select('id'))->where('status', 'posted')->pluck('id') as $eventId) {
+            $total += InventoryValuation::inventoryNet('impaired_stock_event', $eventId);
+        }
+        foreach (InventoryRevaluation::where('sourcing_lot_id', $lot->id)->where('status', 'approved')->pluck('id') as $revaluationId) {
+            $total += InventoryValuation::inventoryNet('inventory_revaluation', $revaluationId);
         }
 
         return $total;

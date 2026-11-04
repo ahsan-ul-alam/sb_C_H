@@ -196,6 +196,12 @@ Route::middleware('auth')->group(function () {
         Route::post('losses/{case}/review', [InventoryLossController::class, 'review'])->name('losses.review')->middleware('can:inventory.loss.review');
         Route::post('losses/{case}/decide', [InventoryLossController::class, 'decide'])->name('losses.decide')->middleware('can:inventory.loss.approve');
 
+        Route::post('losses/{case}/impaired', [InventoryLossController::class, 'impairedStore'])->name('losses.impaired.store')->middleware('can:inventory.loss.propose');
+        Route::post('impaired-events/{event}/decide', [InventoryLossController::class, 'impairedDecide'])->name('losses.impaired.decide')->middleware('can:inventory.loss.approve');
+        Route::post('revaluations', [InventoryLossController::class, 'revalStore'])->name('revaluations.store')->middleware('can:inventory.loss.propose');
+        Route::post('revaluations/{revaluation}/review', [InventoryLossController::class, 'revalReview'])->name('revaluations.review')->middleware('can:inventory.loss.review');
+        Route::post('revaluations/{revaluation}/decide', [InventoryLossController::class, 'revalDecide'])->name('revaluations.decide')->middleware('can:inventory.loss.approve');
+
         // Supplier returns: Operations requests (supplier.return.propose), Finance records the supplier's answer, verifies and records settlements (supplier.return.review),
         // the Board approves (supplier.return.approve, never the requester or verifier).
         Route::get('supplier-returns', [SupplierReturnController::class, 'index'])->name('supplier-returns')->middleware('can:inventory.view');

@@ -4,10 +4,12 @@ namespace App\Services;
 
 use App\Models\AdvanceSettlement;
 use App\Models\Expense;
+use App\Models\ImpairedStockEvent;
 use App\Models\InventoryEngineEnrolment;
 use App\Models\InventoryHandover;
 use App\Models\InventoryHandoverReturn;
 use App\Models\InventoryLossCase;
+use App\Models\InventoryRevaluation;
 use App\Models\InventoryValueMovement;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
@@ -77,7 +79,7 @@ class InventoryValuation
     public static function lineFigures(SourcingLotLine $line): array
     {
         $rows = InventoryValueMovement::where('sourcing_lot_line_id', $line->id)->selectRaw('component, COALESCE(SUM(value_delta),0) v, COALESCE(SUM(quantity_delta),0) q')->groupBy('component')->get()->keyBy('component');
-        $valued = (int) InventoryValueMovement::where('sourcing_lot_line_id', $line->id)->where('component', 'purchase')->whereNotIn('type', ['issue', 'issue_return', 'writeoff', 'quarantine', 'supplier_return'])->sum('value_delta');
+        $valued = (int) InventoryValueMovement::where('sourcing_lot_line_id', $line->id)->where('component', 'purchase')->whereNotIn('type', ['issue', 'issue_return', 'writeoff', 'quarantine', 'supplier_return', 'quarantine_release', 'revaluation'])->sum('value_delta');
 
         return ['purchase' => (int) ($rows['purchase']->v ?? 0), 'landed' => (int) ($rows['landed']->v ?? 0), 'quantity' => bcadd((string) ($rows['quantity']->q ?? 0), '0', 2), 'purchase_valued' => $valued];
     }
@@ -327,7 +329,7 @@ class InventoryValuation
     /** Quantity taken out of the line's valuation by approved write-offs and quarantines (units written off, or held apart at a recoverable value). */
     public static function lossQuantity(SourcingLotLine $line): string
     {
-        $sum = InventoryValueMovement::where('sourcing_lot_line_id', $line->id)->where('component', 'quantity')->whereIn('type', ['writeoff', 'quarantine', 'supplier_return'])->sum('quantity_delta');
+        $sum = InventoryValueMovement::where('sourcing_lot_line_id', $line->id)->where('component', 'quantity')->whereIn('type', ['writeoff', 'quarantine', 'supplier_return', 'quarantine_release'])->sum('quantity_delta');
 
         return bcmul(bcadd((string) $sum, '0', 2), '-1', 2);
     }
@@ -389,6 +391,44 @@ class InventoryValuation
     public static function hasIssued(SourcingLot $lot): bool
     {
         return InventoryValueMovement::where('sourcing_lot_id', $lot->id)->whereIn('type', ['issue', 'supplier_return'])->exists();
+    }
+
+    /**
+     * Put units that were held apart at a recoverable value back into the line's cost layers at exactly that value (repair completed, or found resalable). Units that
+     * came out of the layers (an owned case) go back as a quarantine release; units that were never taken out of the handed-over count (a damaged return) go back as
+     * a return of the handover, so physical and valued quantities stay in step either way.
+     */
+    public static function recordImpairedRelease(ImpairedStockEvent $event, InventoryLossCase $case, SourcingLotLine $line, int $purchase, int $landed, int $journalId, User $approver): void
+    {
+        $lot = SourcingLot::findOrFail($case->sourcing_lot_id);
+        $enrolment = InventoryEngineEnrolment::where('sourcing_lot_id', $lot->id)->where('status', 'approved')->where('ownership', 'company')->firstOrFail();
+        $common = ['type' => $case->scope === 'return' ? 'issue_return' : 'quarantine_release', 'project_id' => null, 'valuation_status' => 'valued', 'source_type' => 'impaired_stock_event', 'source_id' => $event->id,
+            'journal_entry_id' => $journalId, 'effective_on' => self::effectiveOn($event->posted_on->toDateString(), $enrolment), 'verified_by' => $approver->id, 'verified_at' => now(), 'created_by' => $event->prepared_by,
+            'reason' => 'Released to sellable stock at its carrying value (impairment case #'.$case->id.', event #'.$event->id.')'];
+        foreach (['purchase' => $purchase, 'landed' => $landed] as $component => $value) {
+            if ($value !== 0) {
+                self::record($lot, $line, $enrolment, $common + ['component' => $component, 'value_delta' => $value, 'move_key' => 'imprel:'.$event->id.':'.$component]);
+            }
+        }
+        self::record($lot, $line, $enrolment, $common + ['component' => 'quantity', 'quantity_delta' => (string) $event->quantity, 'move_key' => 'imprel:'.$event->id.':quantity']);
+    }
+
+    /** A Board-approved change of a line's value with no change of quantity (write-down to net realisable value, or the reversal of one). Split over purchase and landed as they stand. */
+    public static function recordRevaluation(InventoryRevaluation $revaluation, SourcingLotLine $line, int $signedAmount, int $journalId, User $approver): void
+    {
+        $lot = SourcingLot::findOrFail($revaluation->sourcing_lot_id);
+        $enrolment = InventoryEngineEnrolment::where('sourcing_lot_id', $lot->id)->where('status', 'approved')->where('ownership', 'company')->firstOrFail();
+        $f = self::lineFigures($line);
+        $total = max(1, $f['purchase'] + $f['landed']);
+        $purchase = (int) round($signedAmount * $f['purchase'] / $total);
+        $common = ['type' => 'revaluation', 'project_id' => null, 'valuation_status' => 'valued', 'source_type' => 'inventory_revaluation', 'source_id' => $revaluation->id, 'journal_entry_id' => $journalId,
+            'effective_on' => self::effectiveOn($revaluation->posted_on->toDateString(), $enrolment), 'verified_by' => $approver->id, 'verified_at' => now(), 'created_by' => $revaluation->prepared_by,
+            'reason' => ucfirst(str_replace('_', ' ', $revaluation->direction)).' to net realisable value (revaluation #'.$revaluation->id.')'];
+        foreach (['purchase' => $purchase, 'landed' => $signedAmount - $purchase] as $component => $value) {
+            if ($value !== 0) {
+                self::record($lot, $line, $enrolment, $common + ['component' => $component, 'value_delta' => $value, 'move_key' => 'reval:'.$revaluation->id.':'.$component]);
+            }
+        }
     }
 
     /** Take the returned quantity and its exact purchase and landed value out of the line's cost layers for an approved supplier return. The journal entry carries the recovery. */

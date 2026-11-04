@@ -3,21 +3,25 @@
 use App\Models\AccountingPeriod;
 use App\Models\CostRecognition;
 use App\Models\FinancialAccount;
+use App\Models\ImpairedStockEvent;
 use App\Models\InventoryHandover;
 use App\Models\InventoryHandoverReturn;
 use App\Models\InventoryLossCase;
+use App\Models\InventoryRevaluation;
 use App\Models\InventoryValueMovement;
 use App\Models\JournalEntry;
 use App\Models\StockMovement;
 use App\Models\Supplier;
 use App\Models\SupplierProduct;
 use App\Services\AdvanceSettlementService;
+use App\Services\ImpairedStockService;
 use App\Services\Inventory;
 use App\Services\InventoryCustody;
 use App\Services\InventoryEngine;
 use App\Services\InventoryHandoverService;
 use App\Services\InventoryLossService;
 use App\Services\InventoryReconciliation;
+use App\Services\InventoryRevaluationService;
 use App\Services\InventoryValuation;
 use App\Services\Ledger;
 use App\Services\OrderFulfilment;
@@ -815,4 +819,131 @@ it('never lets partial returns of one handover take cost from another: each hand
     expect($ra->refresh()->restored_value)->toBe(385_000)->and($rb->refresh()->restored_value)->toBe(715_000)
         ->and(InventoryHandoverService::costedUnits($a->refresh()))->toBe('7.00')->and(InventoryHandoverService::costedUnits($b->refresh()))->toBe('13.00')
         ->and(hoCogs())->toBe(5_500_000 - 385_000 - 715_000)->and(InventoryReconciliation::handovers()['ok'])->toBeTrue();
+});
+
+/*
+| Inventory completion: what finally happens to units held apart at a recoverable value, and revaluation to net realisable value.
+*/
+
+function impairedCase($line, string $quantity = '10', int $recoverable = 300_000, string $classification = 'abnormal'): InventoryLossCase
+{
+    Inventory::adjust($line, '-'.$quantity, 'Found damaged at the stock-take', test()->finance, asDamage: true);
+
+    return lossDecide(lossCase(['sourcing_lot_line_id' => $line->id, 'from_bucket' => 'damaged', 'quantity' => $quantity, 'outcome' => 'impaired', 'classification' => $classification,
+        'recoverable_value' => $recoverable, 'valuation_basis' => 'Salvage offer SO-1']));
+}
+
+function impairedEvent(InventoryLossCase $case, string $action, string $quantity, int $proceeds = 0, bool $approve = true): ImpairedStockEvent
+{
+    $event = ImpairedStockService::propose(test()->co->users['clients'], $case->refresh(), $action, $quantity, '2026-11-10', $action === 'release' ? 'Repair completion report RC-5' : 'Salvage invoice SV-9', 'Signed by the warehouse manager',
+        $proceeds, $proceeds > 0 ? FinancialAccount::firstOrFail()->id : null, (string) Str::uuid());
+    if ($approve) {
+        ImpairedStockService::decide($event, true, test()->board);
+    }
+
+    return $event->refresh();
+}
+
+it('releases impaired units back to sellable stock at exactly the value they were held at, in parts, with no gain or loss', function () {
+    [$lot, $line] = hoLot();
+    $case = impairedCase($line);
+    expect(dr('assets.inventory'))->toBe(4_950_000)->and(dr('assets.inventory_impaired'))->toBe(300_000)->and(InventoryValuation::lineFigures($line->refresh())['quantity'])->toBe('90.00');
+
+    $pending = impairedEvent($case, 'release', '4', approve: false);
+    expect($pending->status)->toBe('pending')->and(dr('assets.inventory_impaired'))->toBe(300_000)
+        ->and(fn () => ImpairedStockService::decide($pending, true, $this->co->users['clients']))->toThrow(RuntimeException::class, 'cannot approve a request you made');
+    ImpairedStockService::decide($pending, true, $this->board);
+    impairedEvent($case, 'release', '6');
+
+    // 4 units carry 120,000 and the last 6 the remaining 180,000: together exactly the 300,000 the case held.
+    expect(dr('assets.inventory'))->toBe(5_250_000)->and(dr('assets.inventory_impaired'))->toBe(0)->and(dr('inventory_loss'))->toBe(250_000)
+        ->and(InventoryValuation::lineFigures($line->refresh())['quantity'])->toBe('100.00')->and(InventoryValuation::lineValue($line))->toBe(5_250_000)
+        ->and(Inventory::balances($line)['available'])->toBe('100.00')->and(Inventory::balances($line)['damaged'])->toBe('0.00')
+        ->and(fn () => impairedEvent($case, 'release', '1'))->toThrow(RuntimeException::class, 'Only 0.00')
+        ->and(InventoryReconciliation::company()['ok'])->toBeTrue()->and(ledgerAudit()['unbalanced'])->toBe(0);
+    foreach (InventoryReconciliation::quantities() as $row) {
+        expect($row['differences'])->toBe([]);
+    }
+});
+
+it('disposes of impaired units: proceeds settle the carrying value, a shortfall is a loss and a recovery above it reduces the loss, never above cost', function () {
+    [$lot, $line] = hoLot();
+    $case = impairedCase($line);                                   // carrying 550,000, recoverable 300,000, abnormal loss 250,000
+    $a = impairedEvent($case, 'dispose', '4', 100_000);            // 4 units: recoverable share 120,000, cost 220,000
+    $entry = JournalEntry::where('source_type', 'impaired_stock_event')->where('source_id', $a->id)->firstOrFail();
+    expect($entry->lines->map(fn ($l) => [$l->account, (int) $l->debit, (int) $l->credit])->sortBy(0)->values()->all())->toBe([['assets.inventory_impaired', 0, 120_000], ['cash', 100_000, 0], ['inventory_loss', 20_000, 0]])
+        ->and($a->loss_delta)->toBe(20_000);
+
+    $big = impairedEvent($case, 'dispose', '6', 400_000, approve: false);
+    expect(fn () => ImpairedStockService::decide($big, true, $this->board))->toThrow(RuntimeException::class, 'never recovered above cost');
+    ImpairedStockService::decide($big, false, $this->board, 'Above the cost of the goods');
+    $b = impairedEvent($case, 'dispose', '6', 250_000);            // 6 units: recoverable share 180,000, proceeds 250,000 recover 70,000 of the loss
+    expect($b->loss_delta)->toBe(-70_000)->and(dr('assets.inventory_impaired'))->toBe(0)->and(dr('inventory_loss'))->toBe(250_000 + 20_000 - 70_000)
+        ->and(Inventory::balances($line->refresh())['damaged'])->toBe('0.00')->and(Inventory::balances($line)['available'])->toBe('90.00')
+        ->and(InventoryReconciliation::losses()['ok'])->toBeTrue()->and(InventoryReconciliation::company()['ok'])->toBeTrue();
+
+    // A normal loss's disposal result goes to cost of goods sold, like the loss itself.
+    [$lot2, $line2] = hoLot();
+    $normal = impairedCase($line2, '10', 300_000, 'normal');
+    $cogs = hoCogs();
+    impairedEvent($normal, 'dispose', '10', 0);
+    expect(hoCogs())->toBe($cogs + 300_000)->and(InventoryReconciliation::handovers()['ok'])->toBeTrue();
+});
+
+it('releases the impaired units of a damaged return and keeps the physical and valued quantities in step', function () {
+    [$lot, $line, $handover, $return] = damagedReturn();
+    $case = lossDecide(lossCase(['scope' => 'return', 'inventory_handover_return_id' => $return->id, 'outcome' => 'repairable', 'recoverable_value' => 300_000, 'valuation_basis' => 'Repair quote RQ-2']));
+    expect(InventoryValuation::lineFigures($line->refresh())['quantity'])->toBe('60.00');
+
+    impairedEvent($case, 'release', '10');
+    expect(InventoryValuation::lineFigures($line->refresh())['quantity'])->toBe('70.00')->and(Inventory::sliceBalances($line, null)['available'])->toBe('70.00')->and(dr('assets.inventory_impaired'))->toBe(0)
+        ->and(dr('assets.inventory'))->toBe(3_300_000 + 300_000)->and(InventoryReconciliation::company()['ok'])->toBeTrue();
+    foreach (InventoryReconciliation::quantities() as $row) {
+        expect($row['differences'])->toBe([]);
+    }
+});
+
+it('writes stock down to net realisable value in three separate hands, never above cost on reversal, and never below zero', function () {
+    [$lot, $line, $allocation] = hoLot();
+    $svc = InventoryRevaluationService::class;
+    $r = $svc::propose($this->co->users['clients'], $line, 'write_down', 500_000, 'Current price list PL-11 is below cost', 'Price list PL-11', '2026-11-10', (string) Str::uuid());
+    expect($r->status)->toBe('pending_review')->and(dr('assets.inventory'))->toBe(5_500_000)
+        ->and(fn () => $svc::propose($this->co->users['clients'], $line, 'write_down', 900_000_000, 'Price list PL-11', 'Price list PL-11', '2026-11-10', (string) Str::uuid()))->toThrow(RuntimeException::class, 'already has a revaluation')
+        ->and(fn () => $svc::review($r, $this->co->users['clients'], 'Checked'))->toThrow(RuntimeException::class, 'Only Finance')
+        ->and(fn () => $svc::decide($r, true, $this->board))->toThrow(RuntimeException::class, 'Finance must review');
+    $svc::review($r, $this->finance, 'Price list and quantity checked');
+    expect(fn () => $svc::decide($r->refresh(), true, $this->finance))->toThrow(RuntimeException::class, 'proposed or reviewed')->and(fn () => $svc::decide($r, true, $this->co->users['multi']))->toThrow(RuntimeException::class, 'Only a Board member');
+    $svc::decide($r, true, $this->board);
+
+    expect(dr('assets.inventory'))->toBe(5_000_000)->and(dr('inventory_writedown'))->toBe(500_000)->and(InventoryValuation::lineValue($line->refresh()))->toBe(5_000_000)->and(InventoryValuation::lineFigures($line)['quantity'])->toBe('100.00')
+        ->and(InventoryReconciliation::company()['ok'])->toBeTrue();
+    expect(fn () => $svc::propose($this->co->users['clients'], $line, 'reversal', 600_000, 'Prices recovered', 'Price list PL-12', '2026-11-10', (string) Str::uuid()))->toThrow(RuntimeException::class, 'never carried above cost');
+    $back = $svc::propose($this->co->users['clients'], $line, 'reversal', 200_000, 'Prices partly recovered', 'Price list PL-12', '2026-11-10', (string) Str::uuid());
+    $svc::review($back, $this->finance, 'Checked');
+    $svc::decide($back, true, $this->board);
+    expect(dr('assets.inventory'))->toBe(5_200_000)->and(dr('inventory_writedown'))->toBe(300_000)->and($svc::netWrittenDown($line))->toBe(300_000)
+        ->and(InventoryReconciliation::losses()['ok'])->toBeTrue()->and(InventoryReconciliation::company()['ok'])->toBeTrue();
+    // The stock still hands over at its written-down value, and the handover releases exactly what the line now holds.
+    $handover = hoApprove(hoPropose($allocation, '100'));
+    expect($handover->cogs_value)->toBe(5_200_000)->and(dr('assets.inventory'))->toBe(0)->and(InventoryReconciliation::company()['ok'])->toBeTrue();
+});
+
+it('serves the impaired stock and revaluation screens with the same separation of duties', function () {
+    [$lot, $line] = hoLot();
+    $case = impairedCase($line);
+    $page = $this->co->as('clients')->get(route('sourcing.losses'))->assertOk()->getContent();
+    expect($page)->toContain('Impaired stock: release or dispose')->and($page)->toContain('Revaluation to net realisable value');
+    $this->co->post('clients', 'sourcing.losses.impaired.store', ['action' => 'release', 'quantity' => '4', 'event_on' => '2026-11-10', 'reference' => 'Repair report RC-1', 'evidence_reference' => 'Signed by the warehouse', 'idempotency_key' => (string) Str::uuid()], $case)->assertSessionHasNoErrors()->assertSessionMissing('error');
+    $event = ImpairedStockEvent::firstOrFail();
+    $this->co->post('clients', 'sourcing.losses.impaired.decide', ['decision' => 'approve'], $event)->assertForbidden();
+    $this->co->post('board', 'sourcing.losses.impaired.decide', ['decision' => 'approve'], $event)->assertSessionHasNoErrors()->assertSessionMissing('error');
+    expect($event->refresh()->status)->toBe('posted')->and(dr('assets.inventory_impaired'))->toBe(180_000);
+
+    $this->co->post('clients', 'sourcing.revaluations.store', ['sourcing_lot_line_id' => $line->id, 'direction' => 'write_down', 'amount' => '1000', 'basis' => 'Price list PL-3 below cost', 'evidence_reference' => 'Price list PL-3', 'effective_on' => '2026-11-10'])->assertSessionHasNoErrors()->assertSessionMissing('error');
+    $r = InventoryRevaluation::firstOrFail();
+    $this->co->post('board', 'sourcing.revaluations.review', ['review_note' => 'ok'], $r)->assertForbidden();
+    $this->co->post('finance', 'sourcing.revaluations.review', ['review_note' => 'Checked'], $r)->assertSessionHasNoErrors()->assertSessionMissing('error');
+    $this->co->post('finance', 'sourcing.revaluations.decide', ['decision' => 'approve'], $r)->assertForbidden();
+    $this->co->post('board', 'sourcing.revaluations.decide', ['decision' => 'approve'], $r)->assertSessionHasNoErrors()->assertSessionMissing('error');
+    expect($r->refresh()->status)->toBe('approved')->and(dr('inventory_writedown'))->toBe(100_000);
 });
