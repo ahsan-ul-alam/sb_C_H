@@ -72,10 +72,16 @@ class SourcingPayments
                 if ($data['amount'] > $payable - $paid) {
                     throw new RuntimeException('Payment exceeds what this lot owes the supplier ('.Money::format(max(0, $payable - $paid)).' outstanding).');
                 }
+                // Settlements awaiting the Board decide whether accepted goods are covered by an advance or are a payable. A payment recorded
+                // meanwhile would be classified on a position that is about to change (a payable paid as a new advance), so it waits.
+                if (AdvanceSettlementService::pendingSettlements($lot, $supplierId) > 0) {
+                    throw new RuntimeException('Settlements for this supplier await Board verification. Verify or reject them before recording another payment, so the payment is classified correctly.');
+                }
                 // Accrual basis (forward-only, Board-approved): the payment is a SUPPLIER ADVANCE, an asset, and must say what it paid for.
                 $advance = SourcingBasis::accrualOn($data['paid_on']);
                 // Accepted goods not yet paid for are a payable: paying it is a settlement of that liability (Dr payable / Cr cash), not a new advance.
-                $payableDue = $advance ? AdvanceSettlementService::payableOutstanding($lot, $supplierId) : 0;
+                // Payments of it still awaiting verification count here, so two pending payments cannot together pay more than is owed.
+                $payableDue = $advance ? AdvanceSettlementService::payableOutstanding($lot, $supplierId, includePending: true) : 0;
                 if ($payableDue > 0 && $data['amount'] > $payableDue) {
                     throw new RuntimeException('The supplier is owed '.Money::format($payableDue).' for accepted goods; pay that amount (or less) first.');
                 }
@@ -143,9 +149,11 @@ class SourcingPayments
                     throw new RuntimeException('The correction must be between 0.01 and '.Money::format($remaining).' (what is not yet corrected).');
                 }
                 $reversal = self::expenseFor('Sourcing: supplier payment correction', 'Reverses expense #'.$expense->id.' ('.$type.') — '.$reason.($reference ? ' ref '.$reference : ''), $amount, today()->toDateString(), $user, [],
-                    // Money coming back goes to the account it left from (never silently to the default account).
-                    // Money coming back goes to the account that actually receives it: the one chosen here, else the one it left from.
-                    ['reverses_id' => $expense->id, 'correction_type' => $type, 'financial_account_id' => $type === 'credit_note' ? $expense->financial_account_id : ($refundAccountId ?? $expense->financial_account_id)]);
+                    // Money coming back goes to the account that actually receives it: the one chosen here, else the one it left from
+                    // (never silently to the default account). The correction keeps the classification of the payment it reverses, so a
+                    // refund of an advance (an asset) is not read as a cost reduction; a cash-basis payment keeps its cash-basis treatment.
+                    ['reverses_id' => $expense->id, 'correction_type' => $type, 'classification' => $expense->classification, 'is_asset' => $expense->is_asset,
+                        'financial_account_id' => $type === 'credit_note' ? $expense->financial_account_id : ($refundAccountId ?? $expense->financial_account_id)]);
                 $payment->update(['reversal_expense_id' => $reversal->id, 'void_reason' => $reason]);
                 Audit::log('sourcing.supplier_payment.correction_requested', 'lot '.optional($payment->lot)->number, $type.' '.$amount.': '.$reason);
 

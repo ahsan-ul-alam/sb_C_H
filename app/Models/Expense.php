@@ -30,16 +30,23 @@ class Expense extends Model
             ->whereColumn('loan_receivables.expense_id', 'expenses.id')->where('loan_receivables.status', 'verified'));
     }
 
+    /** Expense classifications that are balance-sheet items of the sourcing accrual basis, never a cost of the period. */
+    public const SOURCING_ASSET_CLASSIFICATIONS = ['supplier_advance', 'acquisition', 'supplier_payable', 'transport_prepayment'];
+
     /**
      * Leave out supplier advances and capitalised acquisition costs: they are assets, and reach profit only when their cost is
-     * recognised (CostRecognitionService), never when cash is paid.
+     * recognised (CostRecognitionService), never when cash is paid. A correction (refund, credit note) follows the expense it
+     * reverses, so a refund of an asset can never reduce cost, whatever classification the correction row itself carries.
      *
      * @param  Builder<Expense>  $query
      * @return Builder<Expense>
      */
     public function scopeExcludingSourcingAssets(Builder $query): Builder
     {
-        return $query->whereNotIn('classification', ['supplier_advance', 'acquisition', 'supplier_payable', 'transport_prepayment']);
+        return $query->whereNotIn('expenses.classification', self::SOURCING_ASSET_CLASSIFICATIONS)
+            ->whereNotExists(fn ($q) => $q->select(DB::raw(1))->from('expenses as reversed_original')
+                ->whereColumn('reversed_original.id', 'expenses.reverses_id')
+                ->whereIn('reversed_original.classification', self::SOURCING_ASSET_CLASSIFICATIONS));
     }
 
     public function creator(): BelongsTo

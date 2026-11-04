@@ -168,7 +168,9 @@ class FinancialStatements
         }
         $total = fn (string $g) => (int) collect($groups[$g])->sum('amount');
 
-        $sourcing = SourcingObligations::outstanding();
+        // Only what the ledger does not already hold: its liabilities are subtracted separately below, so counting the same payable in both would
+        // understate free cash. (The complete list, which holds back profit, is SourcingObligations::outstanding().)
+        $sourcing = SourcingObligations::notInLedger();
         $currency = config('finance.currency');
         $receivable = (int) Invoice::where('currency', $currency)->sum('total') - (int) Invoice::where('currency', $currency)->sum('amount_paid');
         $cash = (int) ($balances['cash'] ?? 0);

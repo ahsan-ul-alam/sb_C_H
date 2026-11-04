@@ -75,14 +75,59 @@ class AdvanceSettlementService
      * Accepted goods the supplier has not been paid for yet (a payable): verified "payable" settlements minus verified payments that settle
      * them (supplier payments classified supplier_payable).
      */
-    public static function payableOutstanding(SourcingLot $lot, int $supplierId): int
+    public static function payableOutstanding(SourcingLot $lot, int $supplierId, bool $includePending = false): int
     {
         $owed = (int) AdvanceSettlement::where('sourcing_lot_id', $lot->id)->where('supplier_id', $supplierId)->where('kind', 'payable')->where('status', 'verified')->sum('amount');
+        $counted = $includePending ? ['verified', 'pending'] : ['verified'];
         $paid = (int) $lot->payments()->with(['expense', 'corrections'])->get()
-            ->filter(fn (SupplierPayment $p) => $p->supplier_id === $supplierId && ! $p->isVoided() && $p->expense?->classification === 'supplier_payable' && $p->expense->status === 'verified')
+            ->filter(fn (SupplierPayment $p) => $p->supplier_id === $supplierId && ! $p->isVoided() && $p->expense?->classification === 'supplier_payable' && in_array($p->expense->status, $counted, true))
             ->sum(fn (SupplierPayment $p) => $p->effectiveAmount());
 
         return max(0, $owed - $paid);
+    }
+
+    /**
+     * Payments of this supplier on the lot that are recorded but not yet verified by the Board. Until they are verified the ledger does not
+     * know them, so a settlement worked out now would be based on a position that is about to change.
+     */
+    public static function paymentsAwaitingVerification(SourcingLot $lot, int $supplierId): int
+    {
+        return $lot->payments()->with('expense')->get()
+            ->filter(fn (SupplierPayment $p) => $p->supplier_id === $supplierId && ! $p->isVoided() && $p->expense?->status === 'pending')
+            ->count();
+    }
+
+    /** Settlements of this supplier on the lot that the Board has not decided yet. */
+    public static function pendingSettlements(SourcingLot $lot, int $supplierId): int
+    {
+        return AdvanceSettlement::where('sourcing_lot_id', $lot->id)->where('supplier_id', $supplierId)->where('status', 'pending')->count();
+    }
+
+    /** A supplier payment classified as paying a payable that the Board has not verified yet. */
+    private static function payablePaymentsAwaitingVerification(SourcingLot $lot, int $supplierId): int
+    {
+        return $lot->payments()->with('expense')->get()
+            ->filter(fn (SupplierPayment $p) => $p->supplier_id === $supplierId && ! $p->isVoided() && $p->expense?->classification === 'supplier_payable' && $p->expense->status === 'pending')
+            ->count();
+    }
+
+    /**
+     * Why a settlement cannot be proposed or approved right now, or null. The same rules are applied when it is proposed and again when
+     * the Board approves it, because the position can change in between. An advance or payment awaiting verification is never resolved
+     * automatically: the Board verifies or rejects it first, so the result does not depend on the order of two approvals.
+     */
+    private static function blocker(SourcingLot $lot, int $supplierId): ?string
+    {
+        if ($lot->status === 'cancelled') {
+            return 'This lot is cancelled.';
+        }
+        $awaiting = self::paymentsAwaitingVerification($lot, $supplierId);
+        if ($awaiting > 0) {
+            return $awaiting.' payment(s) to this supplier on this lot await Board verification. Verify or reject them first: until then the money advanced is not in the books, '
+                .'so a settlement would treat accepted goods as unpaid.';
+        }
+
+        return null;
     }
 
     /** Every supplier payable still owed for goods accepted under the advance model (all lots). */
@@ -111,8 +156,8 @@ class AdvanceSettlementService
         try {
             return DB::transaction(function () use ($lot, $supplierId, $user) {
                 $lot = SourcingLot::whereKey($lot->id)->lockForUpdate()->firstOrFail();
-                if ($lot->status === 'cancelled') {
-                    throw new RuntimeException('This lot is cancelled.');
+                if ($problem = self::blocker($lot, $supplierId)) {
+                    throw new RuntimeException($problem);
                 }
                 $received = $lot->lines()->where('supplier_id', $supplierId)->whereNotNull('received_quantity')->get();
                 if ($received->isEmpty()) {
@@ -179,6 +224,15 @@ class AdvanceSettlementService
                 if (AccountingService::isClosed($settlement->settled_on->toDateString())) {
                     throw new RuntimeException('That month is already closed; the settlement cannot be dated in it.');
                 }
+                if ($problem = self::blocker($lot, (int) $settlement->supplier_id)) {
+                    throw new RuntimeException($problem);
+                }
+                // The goods accepted when this was proposed must still cover every live settlement of this supplier on the lot, this one included
+                // (the arrival can be recorded again after the proposal). It is the same test propose() applies, so a valid set always passes.
+                $live = (int) AdvanceSettlement::where('sourcing_lot_id', $lot->id)->where('supplier_id', $settlement->supplier_id)->whereIn('status', ['pending', 'verified'])->sum('amount');
+                if ($live > self::acceptedValue($lot, (int) $settlement->supplier_id) - self::legacyPaid($lot, (int) $settlement->supplier_id)) {
+                    throw new RuntimeException('The goods accepted no longer cover the settlements of this supplier (the arrival changed after they were proposed). Reject them and propose again.');
+                }
                 if ($settlement->kind === 'payable') {
                     Ledger::post($settlement->settled_on->toDateString(), 'Accepted goods not yet paid for (supplier payable): lot '.$lot->number, 'advance_settlement', $settlement->id, [
                         ['assets.inventory', null, (int) $settlement->amount, 0], ['liabilities', null, 0, (int) $settlement->amount],
@@ -221,6 +275,9 @@ class AdvanceSettlementService
             }
             if ($settlement->kind === 'payable' && self::payableOutstanding($lot, $settlement->supplier_id) < $settlement->amount) {
                 throw new RuntimeException('Part of this payable has already been paid; refund or correct that payment first.');
+            }
+            if ($settlement->kind === 'payable' && self::payablePaymentsAwaitingVerification($lot, (int) $settlement->supplier_id) > 0) {
+                throw new RuntimeException('A payment of this payable awaits Board verification; verify or reject it before reversing the payable.');
             }
             $original = JournalEntry::where('source_type', 'advance_settlement')->where('source_id', $settlement->id)->firstOrFail();
             Ledger::reverse($original, $original->entry_date->toDateString(), 'Reversal of advance settlement #'.$settlement->id.': '.$reason, 'advance_settlement_rev', $settlement->id, $user->id);
