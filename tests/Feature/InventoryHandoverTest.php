@@ -5,6 +5,7 @@ use App\Models\CostRecognition;
 use App\Models\FinancialAccount;
 use App\Models\InventoryHandover;
 use App\Models\InventoryHandoverReturn;
+use App\Models\InventoryLossCase;
 use App\Models\InventoryValueMovement;
 use App\Models\JournalEntry;
 use App\Models\StockMovement;
@@ -15,6 +16,7 @@ use App\Services\Inventory;
 use App\Services\InventoryCustody;
 use App\Services\InventoryEngine;
 use App\Services\InventoryHandoverService;
+use App\Services\InventoryLossService;
 use App\Services\InventoryReconciliation;
 use App\Services\InventoryValuation;
 use App\Services\Ledger;
@@ -491,12 +493,283 @@ it('records goods that physically leave at handover as a physical movement, not 
     hoApprove($handover);
 
     expect(Inventory::balances($line)['available'])->toBe('75.00')                              // the physical count fell
-        ->and(Inventory::sliceBalances($line, null)['delivered'])->toBe('25.00')
-        ->and(StockMovement::where('inventory_handover_id', $handover->id)->count())->toBe(0)  // never counted as custody too
+        ->and(Inventory::sliceBalances($line, $handover->id)['delivered'])->toBe('25.00')      // traceable to this handover, with the client
+        ->and(Inventory::sliceBalances($line, $handover->id)['available'])->toBe('0.00')       // never counted as warehouse custody too
+        ->and(Inventory::sliceBalances($line, null)['delivered'])->toBe('0.00')
         ->and(Inventory::stockFor($this->client->id, $product, $this->project->id))->toHaveCount(0)
         ->and(InventoryReconciliation::company()['ok'])->toBeTrue();
     // They come back physically, and the same units are not counted twice.
     $return = InventoryHandoverService::proposeReturn($handover->refresh(), '25', 'resalable', '2026-11-10', 'Return note RT-9 signed', 'Rejected on site', (string) Str::uuid(), $this->finance);
     InventoryHandoverService::decideReturn($return, true, $this->board);
-    expect(Inventory::balances($line)['available'])->toBe('100.00')->and(Inventory::sliceBalances($line, null)['delivered'])->toBe('0.00');
+    expect(Inventory::balances($line)['available'])->toBe('100.00')->and(Inventory::sliceBalances($line, $handover->id)['delivered'])->toBe('0.00');
+});
+
+/*
+| Phase 2D-1: damage, impairment and write-off cases. Worked lot: 100 units at BDT 550 (55,000 paisa a unit, BDT 55,000 in all). A handover of 40 releases BDT 22,000
+| of cost; a damaged return of 10 units carries BDT 5,500 (550,000 paisa) of that cost.
+*/
+
+function lossCase(array $over = [], ?string $who = 'clients'): InventoryLossCase
+{
+    return InventoryLossService::propose(test()->co->users[$who], $over + ['scope' => 'owned', 'quantity' => '10', 'outcome' => 'write_off', 'classification' => 'abnormal', 'cause' => 'Water damage in storage',
+        'evidence_reference' => 'Inspection report IR-77', 'recoverable_value' => 0, 'valuation_basis' => 'Scrapped, no buyer', 'event_on' => '2026-11-10'], (string) Str::uuid());
+}
+
+function lossDecide(InventoryLossCase $case, ?int $recoverable = null, ?string $basis = null): InventoryLossCase
+{
+    InventoryLossService::review($case, test()->finance, 'Evidence and valuation checked', $recoverable, $basis);
+    InventoryLossService::decide($case->refresh(), true, test()->board);
+
+    return $case->refresh();
+}
+
+/** A handover of 40 with a damaged return of 10 approved: returns [lot, line, handover, return]. */
+function damagedReturn(string $returned = '10'): array
+{
+    [$lot, $line, $allocation] = hoLot(product: custodyProduct());
+    $handover = hoApprove(hoPropose($allocation, '40'));
+    $return = InventoryHandoverService::proposeReturn($handover, $returned, 'damaged', '2026-11-10', 'Return note RT-31 signed by the client', 'Crushed in transit', (string) Str::uuid(), test()->finance);
+    InventoryHandoverService::decideReturn($return, true, test()->board);
+
+    return [$lot, $line, $handover->refresh(), $return->refresh()];
+}
+
+function lossAccounts(InventoryLossCase $case): array
+{
+    return JournalEntry::where('source_type', 'inventory_loss_case')->where('source_id', $case->id)->firstOrFail()->lines->map(fn ($l) => [$l->account, (int) $l->debit, (int) $l->credit])->sortBy(0)->values()->all();
+}
+
+it('keeps a resalable return on its own path: cost restored at the original cost, and no loss case for it', function () {
+    [$lot, $line, $allocation] = hoLot(product: custodyProduct());
+    $handover = hoApprove(hoPropose($allocation, '40'));
+    $return = InventoryHandoverService::proposeReturn($handover, '10', 'resalable', '2026-11-10', 'Return note RT-30 signed', 'Wrong item', (string) Str::uuid(), $this->finance);
+    InventoryHandoverService::decideReturn($return, true, $this->board);
+
+    expect($return->refresh()->restored_value)->toBe(550_000)->and(hoCogs())->toBe(1_650_000)
+        ->and(fn () => lossCase(['scope' => 'return', 'inventory_handover_return_id' => $return->id]))->toThrow(RuntimeException::class, 'damaged goods');
+});
+
+it('recognises a repairable damaged return at its recoverable value: COGS reversed, inventory impaired at BDT 3,000, loss of BDT 2,500 shown separately', function () {
+    [$lot, $line, $handover, $return] = damagedReturn();
+    $case = lossCase(['scope' => 'return', 'inventory_handover_return_id' => $return->id, 'quantity' => '10', 'outcome' => 'repairable', 'recoverable_value' => 300_000, 'valuation_basis' => 'Repair quote RQ-9 from the tailor']);
+    expect($case->status)->toBe('pending_review')->and(hoCogs())->toBe(2_200_000);     // a proposal posts nothing
+    $case = lossDecide($case);
+
+    // Original cost 550,000 reversed from COGS; 300,000 held as impaired inventory; 250,000 abnormal loss on its own line.
+    expect(lossAccounts($case))->toBe([['assets.inventory_impaired', 300_000, 0], ['cogs', 0, 550_000], ['inventory_loss', 250_000, 0]])
+        ->and($case->carrying_value)->toBe(550_000)->and($case->loss_value)->toBe(250_000)->and($case->cogs_reversed)->toBe(550_000)->and($case->treatment)->toBe('impaired_inventory')
+        ->and(hoCogs())->toBe(1_650_000)->and(dr('assets.inventory_impaired'))->toBe(300_000)->and(dr('inventory_loss'))->toBe(250_000)
+        ->and(Inventory::sliceBalances($line, null)['damaged'])->toBe('10.00')                   // quarantined: not released to sellable stock
+        ->and(Inventory::sliceBalances($line, null)['available'])->toBe('60.00')
+        ->and(InventoryReconciliation::handovers()['damaged_awaiting_classification'])->toBe(0)
+        ->and(InventoryReconciliation::company()['ok'])->toBeTrue()->and(ledgerAudit()['unbalanced'])->toBe(0);
+});
+
+it('keeps a normal loss in cost of goods sold: only the verified recoverable value of a damaged return is reversed', function () {
+    [$lot, $line, $handover, $return] = damagedReturn();
+    $case = lossDecide(lossCase(['scope' => 'return', 'inventory_handover_return_id' => $return->id, 'outcome' => 'impaired', 'classification' => 'normal', 'recoverable_value' => 200_000, 'valuation_basis' => 'Salvage offer SO-4']));
+
+    expect(lossAccounts($case))->toBe([['assets.inventory_impaired', 200_000, 0], ['cogs', 0, 200_000]])
+        ->and($case->loss_value)->toBe(350_000)->and($case->cogs_reversed)->toBe(200_000)->and(dr('inventory_loss'))->toBe(0)->and(hoCogs())->toBe(2_000_000)
+        ->and(InventoryReconciliation::handovers()['ok'])->toBeTrue();
+});
+
+it('writes off a damaged return with a verified zero recovery value as an abnormal inventory loss, reclassified out of cost of goods sold', function () {
+    [$lot, $line, $handover, $return] = damagedReturn();
+    $case = lossDecide(lossCase(['scope' => 'return', 'inventory_handover_return_id' => $return->id]));
+
+    expect(lossAccounts($case))->toBe([['cogs', 0, 550_000], ['inventory_loss', 550_000, 0]])->and($case->treatment)->toBe('inventory_loss_expense')
+        ->and(Inventory::sliceBalances($line, null)['damaged'])->toBe('0.00')->and(Inventory::balances($line)['available'])->toBe('90.00')
+        ->and(dr('assets.inventory_impaired'))->toBe(0)->and(hoCogs())->toBe(1_650_000)->and(InventoryReconciliation::company()['ok'])->toBeTrue();
+});
+
+it('holds a case with no supported recoverable value as pending: nothing is recognised, released or assumed to be zero', function () {
+    [$lot, $line, $handover, $return] = damagedReturn();
+    $case = lossCase(['scope' => 'return', 'inventory_handover_return_id' => $return->id, 'outcome' => 'impaired', 'recoverable_value' => null, 'valuation_basis' => null]);
+    expect($case->status)->toBe('pending_valuation');
+
+    expect(fn () => InventoryLossService::review($case, $this->finance, 'Looked at it'))->toThrow(RuntimeException::class, 'no supported recoverable value')
+        ->and(fn () => InventoryLossService::decide($case, true, $this->board))->toThrow(RuntimeException::class, 'Finance must review')
+        ->and(JournalEntry::where('source_type', 'inventory_loss_case')->count())->toBe(0)->and(Inventory::sliceBalances($line, null)['damaged'])->toBe('10.00')
+        ->and(Inventory::sliceBalances($line, null)['available'])->toBe('60.00')->and(InventoryReconciliation::losses()['pending_valuation'])->toBe(1);
+    // A recoverable value above the cost is refused at approval: inventory is never carried above cost.
+    expect(fn () => lossDecide($case, 900_000, 'Optimistic quote'))->toThrow(RuntimeException::class, 'cannot exceed the carrying value');
+    InventoryLossService::decide($case->refresh(), false, $this->board, 'Recoverable value is above cost');
+    expect($case->refresh()->status)->toBe('rejected')->and(JournalEntry::where('source_type', 'inventory_loss_case')->count())->toBe(0);
+    $retry = lossCase(['scope' => 'return', 'inventory_handover_return_id' => $return->id, 'outcome' => 'impaired', 'recoverable_value' => 100_000, 'valuation_basis' => 'Salvage offer SO-5']);
+    expect(lossDecide($retry)->treatment)->toBe('impaired_inventory');
+});
+
+it('treats a physical return that is only custody damage differently from a valid sale reversal: no Sellbees entry for the client\'s own stock', function () {
+    [$lot, $line, $allocation] = hoLot(product: custodyProduct());
+    $handover = hoApprove(hoPropose($allocation, '40'));
+    $cogs = hoCogs();
+    $inventory = dr('assets.inventory');
+    $journals = JournalEntry::count();
+
+    $case = lossDecide(lossCase(['scope' => 'custody', 'inventory_handover_id' => $handover->id, 'quantity' => '5', 'event_on' => '2026-11-10']));
+
+    expect($case->treatment)->toBe('custody_incident')->and(JournalEntry::count())->toBe($journals)->and(hoCogs())->toBe($cogs)->and(dr('assets.inventory'))->toBe($inventory)
+        ->and(dr('inventory_loss'))->toBe(0)->and(Inventory::sliceBalances($line, $handover->id)['damaged'])->toBe('5.00')->and(Inventory::sliceBalances($line, $handover->id)['available'])->toBe('35.00')
+        ->and(Inventory::sliceBalances($line, null)['available'])->toBe('60.00')                  // Sellbees' own stock is not touched
+        ->and(InventoryCustody::check($handover)['ok'])->toBeTrue()->and(InventoryReconciliation::company()['ok'])->toBeTrue();
+    // The damaged custody units cannot be reserved for an order, by their own project or any other.
+    expect(Inventory::stockFor($this->client->id, $handover->supplier_product_id, $this->project->id)->first()['available'])->toBe('35.00')
+        ->and(Inventory::stockFor($this->co->client('Other Co')->id, $handover->supplier_product_id, $this->co->project($this->co->client('Other Co 2'), 'Z')->id))->toHaveCount(0);
+});
+
+it('writes off Sellbees stock in full as an abnormal loss: Dr inventory loss expense / Cr inventory at the exact carrying value', function () {
+    [$lot, $line] = hoLot(product: custodyProduct());
+    Inventory::adjust($line, '-10', 'Found damaged at the stock-take', $this->finance, asDamage: true);
+    $case = lossDecide(lossCase(['sourcing_lot_line_id' => $line->id, 'from_bucket' => 'damaged']));
+
+    expect(lossAccounts($case))->toBe([['assets.inventory', 0, 550_000], ['inventory_loss', 550_000, 0]])->and($case->treatment)->toBe('inventory_loss_expense')
+        ->and(dr('assets.inventory'))->toBe(4_950_000)->and(InventoryValuation::lineFigures($line->refresh())['quantity'])->toBe('90.00')->and(InventoryValuation::lineValue($line))->toBe(4_950_000)
+        ->and(Inventory::balances($line)['available'])->toBe('90.00')->and(Inventory::balances($line)['damaged'])->toBe('0.00')->and(Inventory::reconciles($line))->toBeTrue()
+        ->and(InventoryValueMovement::where('source_type', 'inventory_loss_case')->where('source_id', $case->id)->count())->toBe(3)
+        ->and(InventoryReconciliation::company()['ok'])->toBeTrue()->and(InventoryReconciliation::losses()['abnormal_loss_gl'])->toBe(550_000);
+});
+
+it('writes off part of the damaged units and refuses to count the same units twice', function () {
+    [$lot, $line] = hoLot(product: custodyProduct());
+    Inventory::adjust($line, '-10', 'Found damaged at the stock-take', $this->finance, asDamage: true);
+    $key = (string) Str::uuid();
+    $first = InventoryLossService::propose($this->co->users['clients'], ['scope' => 'owned', 'sourcing_lot_line_id' => $line->id, 'from_bucket' => 'damaged', 'quantity' => '4', 'outcome' => 'write_off', 'classification' => 'abnormal',
+        'cause' => 'Water damage', 'evidence_reference' => 'Inspection report IR-78', 'recoverable_value' => 0, 'valuation_basis' => 'Scrapped, no buyer', 'event_on' => '2026-11-10'], $key);
+    $again = InventoryLossService::propose($this->co->users['clients'], ['scope' => 'owned', 'quantity' => '4'], $key);
+    expect($again->id)->toBe($first->id);                                                         // the same submission twice is one case
+
+    expect(fn () => lossCase(['sourcing_lot_line_id' => $line->id, 'from_bucket' => 'damaged', 'quantity' => '7']))->toThrow(RuntimeException::class, 'Only 6.00');   // 4 of the 10 are spoken for
+    $first = lossDecide($first);
+    expect($first->carrying_value)->toBe(220_000)->and(Inventory::balances($line)['damaged'])->toBe('6.00')->and(dr('assets.inventory'))->toBe(5_280_000);
+
+    expect(fn () => InventoryLossService::decide($first, true, $this->board))->toThrow(RuntimeException::class, 'Already decided')
+        ->and(fn () => lossCase(['sourcing_lot_line_id' => $line->id, 'from_bucket' => 'damaged', 'quantity' => '7']))->toThrow(RuntimeException::class, 'Only 6.00');
+    expect(lossDecide(lossCase(['sourcing_lot_line_id' => $line->id, 'from_bucket' => 'damaged', 'quantity' => '6']))->carrying_value)->toBe(330_000)
+        ->and(dr('assets.inventory'))->toBe(4_950_000)->and(JournalEntry::where('source_type', 'inventory_loss_case')->count())->toBe(2);
+});
+
+it('classifies by cause: a normal loss on Sellbees stock is part of cost of goods sold, an abnormal one is a separate inventory loss expense', function () {
+    [$lot, $line] = hoLot(product: custodyProduct());
+    Inventory::adjust($line, '-10', 'Handling wastage', $this->finance, asDamage: true);
+    $normal = lossDecide(lossCase(['sourcing_lot_line_id' => $line->id, 'from_bucket' => 'damaged', 'quantity' => '2', 'classification' => 'normal', 'cause' => 'Documented handling wastage within the approved process']));
+    expect(lossAccounts($normal))->toBe([['assets.inventory', 0, 110_000], ['cogs', 110_000, 0]])->and($normal->treatment)->toBe('retained_in_cogs')->and(dr('inventory_loss'))->toBe(0);
+    $abnormal = lossDecide(lossCase(['sourcing_lot_line_id' => $line->id, 'from_bucket' => 'damaged', 'quantity' => '3', 'classification' => 'abnormal', 'cause' => 'Theft reported to the police']));
+    expect(lossAccounts($abnormal))->toBe([['assets.inventory', 0, 165_000], ['inventory_loss', 165_000, 0]])->and(dr('inventory_loss'))->toBe(165_000)->and(hoCogs())->toBe(110_000)
+        ->and(InventoryReconciliation::company()['ok'])->toBeTrue()
+        ->and(fn () => lossCase(['sourcing_lot_line_id' => $line->id, 'from_bucket' => 'damaged', 'quantity' => '1', 'classification' => 'sometimes']))->toThrow(RuntimeException::class, 'normal or abnormal');
+});
+
+it('keeps proposing, reviewing and approving apart: nobody approves or reviews their own case', function () {
+    [$lot, $line] = hoLot(product: custodyProduct());
+    Inventory::adjust($line, '-10', 'Found damaged', $this->finance, asDamage: true);
+    $mine = lossCase(['sourcing_lot_line_id' => $line->id, 'from_bucket' => 'damaged', 'quantity' => '1'], 'finance');
+    expect(fn () => InventoryLossService::review($mine, $this->finance, 'Checked'))->toThrow(RuntimeException::class, 'proposed')
+        ->and(fn () => InventoryLossService::review($mine, $this->co->users['clients'], 'Checked'))->toThrow(RuntimeException::class, 'Only Finance');
+
+    $boardCase = lossCase(['sourcing_lot_line_id' => $line->id, 'from_bucket' => 'damaged', 'quantity' => '1'], 'board');
+    InventoryLossService::review($boardCase, $this->finance, 'Checked');
+    expect(fn () => InventoryLossService::decide($boardCase->refresh(), true, $this->board))->toThrow(RuntimeException::class, 'proposed or reviewed')
+        ->and(fn () => InventoryLossService::decide($boardCase, true, $this->finance))->toThrow(RuntimeException::class, 'proposed or reviewed');
+    // A reviewed case from someone else is decided by the Board only: the proposer or reviewer cannot, and a second Board member can.
+    expect(fn () => InventoryLossService::decide($boardCase, true, $this->co->users['board2']))->not->toThrow(RuntimeException::class);
+    expect(JournalEntry::where('source_type', 'inventory_loss_case')->count())->toBe(1);
+    // Rejection needs a reason and posts nothing.
+    $other = lossCase(['sourcing_lot_line_id' => $line->id, 'from_bucket' => 'damaged', 'quantity' => '1']);
+    InventoryLossService::review($other, $this->finance, 'Checked');
+    expect(fn () => InventoryLossService::decide($other->refresh(), false, $this->board))->toThrow(RuntimeException::class, 'reason');
+    InventoryLossService::decide($other, false, $this->board, 'Not supported by the evidence');
+    expect($other->refresh()->status)->toBe('rejected')->and(JournalEntry::where('source_type', 'inventory_loss_case')->count())->toBe(1);
+});
+
+it('records a damage found after the month closed in the open period, flagged, with the original journal untouched', function () {
+    Carbon::setTestNow('2026-11-25');
+    [$lot, $line, $allocation] = hoLot(product: custodyProduct());
+    $handover = hoApprove(hoPropose($allocation, '40', on: '2026-11-20'));
+    $return = InventoryHandoverService::proposeReturn($handover, '10', 'damaged', '2026-11-24', 'Return note RT-33 signed', 'Crushed', (string) Str::uuid(), $this->finance);
+    InventoryHandoverService::decideReturn($return, true, $this->board);
+    $original = JournalEntry::where('source_type', 'inventory_handover')->where('source_id', $handover->id)->firstOrFail();
+    $snapshot = $original->lines->map(fn ($l) => [$l->account, $l->debit, $l->credit])->all();
+
+    Carbon::setTestNow('2026-12-05');
+    AccountingPeriod::create(['month' => '2026-11', 'income' => 0, 'expenses' => 0, 'net_profit' => 0, 'closed_by' => $this->finance->id]);
+    $case = lossDecide(lossCase(['scope' => 'return', 'inventory_handover_return_id' => $return->id, 'event_on' => '2026-11-01']));   // the return's own date wins over input
+
+    $entry = JournalEntry::where('source_type', 'inventory_loss_case')->where('source_id', $case->id)->firstOrFail();
+    expect($case->event_on->toDateString())->toBe('2026-11-24')->and($case->discovered_on->toDateString())->toBe('2026-12-05')->and($case->posted_on->toDateString())->toBe('2026-12-05')
+        ->and($case->prior_period)->toBeTrue()->and($entry->entry_date->toDateString())->toBe('2026-12-05')->and($entry->memo)->toContain('closed period')
+        ->and($original->fresh()->lines->map(fn ($l) => [$l->account, $l->debit, $l->credit])->all())->toBe($snapshot)
+        ->and(InventoryReconciliation::losses()['prior_period'])->toBe(1);
+});
+
+it('refuses a return validated against the wrong handover, or against the line\'s aggregate, and a repeated released-mode return', function () {
+    $product = custodyProduct();
+    [$lot, $line, $first] = hoLot(allocate: '25', product: $product);
+    $other = $this->co->project($this->client, 'Second project');
+    $second = Sourcing::allocate($lot->refresh(), ['project_id' => $other->id, 'line_id' => $line->id, 'kind' => 'sale', 'quantity' => '25'], $this->finance);
+    $a = hoApprove(InventoryHandoverService::propose($first->refresh(), '25', '2026-11-09', '2026-11-09', 'Signed receiving note RN-A1', null, (string) Str::uuid(), $this->finance, 'released'));
+    $b = hoApprove(InventoryHandoverService::propose($second->refresh(), '25', '2026-11-09', '2026-11-09', 'Signed receiving note RN-B1', null, (string) Str::uuid(), $this->finance, 'released'));
+    expect(Inventory::balances($line)['delivered'])->toBe('50.00')->and(Inventory::sliceBalances($line, $a->id)['delivered'])->toBe('25.00')->and(Inventory::sliceBalances($line, $b->id)['delivered'])->toBe('25.00');
+
+    $ret = InventoryHandoverService::proposeReturn($a, '25', 'resalable', '2026-11-10', 'Return note RT-A signed', 'Rejected on site', (string) Str::uuid(), $this->finance);
+    InventoryHandoverService::decideReturn($ret, true, $this->board);
+    expect(Inventory::sliceBalances($line, $a->id)['delivered'])->toBe('0.00')->and(Inventory::sliceBalances($line, $b->id)['delivered'])->toBe('25.00')->and(Inventory::balances($line)['delivered'])->toBe('25.00');
+
+    // The units of A are back: a repeated return of A is refused by the handover, and even a return forced past that check cannot take B's units out of the aggregate.
+    expect(fn () => InventoryHandoverService::proposeReturn($a->refresh(), '1', 'resalable', '2026-11-10', 'Return note RT-A2 signed', 'Again', (string) Str::uuid(), $this->finance))->toThrow(RuntimeException::class, 'Only 0.00');
+    $forced = InventoryHandoverReturn::forceCreate(['inventory_handover_id' => $a->id, 'quantity' => '5', 'condition' => 'resalable', 'returned_on' => '2026-11-10', 'evidence_reference' => 'Return note forced', 'reason' => 'x', 'prepared_by' => $this->finance->id, 'idempotency_key' => (string) Str::uuid()]);
+    expect(fn () => InventoryCustody::giveBack($a, $forced, $this->board))->toThrow(RuntimeException::class, 'Only 0.00')
+        ->and(fn () => InventoryCustody::giveBack($b, $forced, $this->board))->toThrow(RuntimeException::class, 'another handover')
+        ->and(Inventory::sliceBalances($line, $b->id)['delivered'])->toBe('25.00')
+        ->and(InventoryCustody::check($a->refresh())['ok'])->toBeTrue()->and(InventoryCustody::check($b->refresh())['ok'])->toBeTrue();
+});
+
+it('reconciles the inventory ledger, cost of goods sold, impairment and loss after a mix of cases, with every approved case on one treatment', function () {
+    [$lot, $line, $handover, $return] = damagedReturn('10');
+    $r1 = lossDecide(lossCase(['scope' => 'return', 'inventory_handover_return_id' => $return->id, 'quantity' => '6', 'outcome' => 'impaired', 'recoverable_value' => 180_000, 'valuation_basis' => 'Salvage offer SO-6']));
+    $r2 = lossDecide(lossCase(['scope' => 'return', 'inventory_handover_return_id' => $return->id, 'quantity' => '4']));
+    Inventory::adjust($line, '-3', 'Stock-take', $this->finance, asDamage: true);
+    $o1 = lossDecide(lossCase(['sourcing_lot_line_id' => $line->id, 'from_bucket' => 'damaged', 'quantity' => '3', 'outcome' => 'impaired', 'classification' => 'normal', 'recoverable_value' => 50_000, 'valuation_basis' => 'Discount sale quote']));
+    expect(fn () => lossCase(['scope' => 'return', 'inventory_handover_return_id' => $return->id, 'quantity' => '1']))->toThrow(RuntimeException::class, 'Only 0.00');
+
+    // 6 returned units carry 330,000 (R 180,000, abnormal loss 150,000); 4 carry 220,000 (zero recovery, abnormal); 3 owned units carry 165,000 (R 50,000, 115,000 normal loss in COGS).
+    // COGS: 2,200,000 released, less 330,000 and 220,000 reversed, plus the normal loss of 115,000 on Sellbees stock = 1,765,000.
+    expect([$r1->carrying_value, $r2->carrying_value, $o1->carrying_value])->toBe([330_000, 220_000, 165_000])
+        ->and(dr('assets.inventory_impaired'))->toBe(230_000)->and(dr('inventory_loss'))->toBe(370_000)->and(hoCogs())->toBe(1_765_000)
+        ->and(Inventory::reconciles($line))->toBeTrue();
+    $losses = InventoryReconciliation::losses();
+    expect($losses['ok'])->toBeTrue()->and($losses['impaired_gl'])->toBe($losses['impaired_cases'])->and($losses['abnormal_loss_gl'])->toBe($losses['abnormal_loss_cases'])
+        ->and(InventoryReconciliation::company()['ok'])->toBeTrue()->and(ledgerAudit()['unbalanced'])->toBe(0)->and(ledgerAudit()['duplicates'])->toBe(0);
+    foreach (InventoryReconciliation::quantities() as $row) {
+        expect($row['differences'])->toBe([]);
+    }
+});
+
+it('serves the damage and write-off screens with the same separation of duties: propose, Finance review, Board decision', function () {
+    [$lot, $line] = hoLot(product: custodyProduct());
+    Inventory::adjust($line, '-10', 'Found damaged at the stock-take', $this->finance, asDamage: true);
+
+    $page = $this->co->as('clients')->get(route('sourcing.losses'))->assertOk()->getContent();
+    expect($page)->toContain('Record damage or loss')->and($page)->toContain('Zipper Hoodie')->and($page)->toContain('Ownership and custody');
+    $this->co->as('board')->get(route('sourcing.losses'))->assertOk();
+    expect($this->co->as('board')->get(route('sourcing.losses'))->getContent())->not->toContain('Record damage or loss');   // the Board decides, it does not propose
+
+    $input = ['scope' => 'owned', 'sourcing_lot_line_id' => $line->id, 'from_bucket' => 'damaged', 'quantity' => '4', 'outcome' => 'write_off', 'classification' => 'abnormal', 'cause' => 'Water damage',
+        'evidence_reference' => 'Inspection report IR-90', 'recoverable_value' => '0', 'valuation_basis' => 'Scrapped, no buyer', 'event_on' => '2026-11-10', 'idempotency_key' => (string) Str::uuid()];
+    $this->co->post('clients', 'sourcing.losses.store', $input)->assertSessionHasNoErrors()->assertSessionMissing('error');
+    $this->co->post('clients', 'sourcing.losses.store', $input);                                  // the same form twice
+    $case = InventoryLossCase::firstOrFail();
+    expect(InventoryLossCase::count())->toBe(1)->and($case->status)->toBe('pending_review');
+
+    $this->co->post('clients', 'sourcing.losses.review', ['review_note' => 'ok'], $case)->assertForbidden();            // Operations cannot review
+    $this->co->post('board', 'sourcing.losses.review', ['review_note' => 'ok'], $case)->assertForbidden();              // nor can the Board
+    $this->co->post('board', 'sourcing.losses.decide', ['decision' => 'approve'], $case);
+    expect($case->refresh()->status)->toBe('pending_review');                                       // not reviewed yet: refused
+    $this->co->post('finance', 'sourcing.losses.review', ['review_note' => 'Evidence and basis checked'], $case)->assertSessionHasNoErrors()->assertSessionMissing('error');
+    $this->co->post('finance', 'sourcing.losses.decide', ['decision' => 'approve'], $case)->assertForbidden();         // Finance holds no approval right
+    $this->co->post('board', 'sourcing.losses.decide', ['decision' => 'approve'], $case)->assertSessionHasNoErrors()->assertSessionMissing('error');
+
+    expect($case->refresh()->status)->toBe('approved')->and(dr('inventory_loss'))->toBe(220_000);
+    $detail = $this->co->as('board')->get(route('sourcing.losses.show', $case))->assertOk()->getContent();
+    expect($detail)->toContain('Source journal entry')->and($detail)->toContain('inventory_loss')->and($detail)->toContain('Inventory value movements');
 });

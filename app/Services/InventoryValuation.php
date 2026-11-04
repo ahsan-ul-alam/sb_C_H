@@ -7,6 +7,7 @@ use App\Models\Expense;
 use App\Models\InventoryEngineEnrolment;
 use App\Models\InventoryHandover;
 use App\Models\InventoryHandoverReturn;
+use App\Models\InventoryLossCase;
 use App\Models\InventoryValueMovement;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
@@ -75,7 +76,7 @@ class InventoryValuation
     public static function lineFigures(SourcingLotLine $line): array
     {
         $rows = InventoryValueMovement::where('sourcing_lot_line_id', $line->id)->selectRaw('component, COALESCE(SUM(value_delta),0) v, COALESCE(SUM(quantity_delta),0) q')->groupBy('component')->get()->keyBy('component');
-        $valued = (int) InventoryValueMovement::where('sourcing_lot_line_id', $line->id)->where('component', 'purchase')->whereNotIn('type', ['issue', 'issue_return'])->sum('value_delta');
+        $valued = (int) InventoryValueMovement::where('sourcing_lot_line_id', $line->id)->where('component', 'purchase')->whereNotIn('type', ['issue', 'issue_return', 'writeoff', 'quarantine'])->sum('value_delta');
 
         return ['purchase' => (int) ($rows['purchase']->v ?? 0), 'landed' => (int) ($rows['landed']->v ?? 0), 'quantity' => bcadd((string) ($rows['quantity']->q ?? 0), '0', 2), 'purchase_valued' => $valued];
     }
@@ -295,7 +296,7 @@ class InventoryValuation
         foreach ($lines as $line) {
             $accepted = self::acceptedValue($line);
             // Valued goods are the accepted quantity less what has been handed over; nothing is counted until the purchase is fully valued.
-            $target = $accepted > 0 && $state['purchase'][$line->id] >= $accepted ? bcsub((string) $line->usable_quantity, self::issuedQuantity($line), 2) : '0.00';
+            $target = $accepted > 0 && $state['purchase'][$line->id] >= $accepted ? bcsub(bcsub((string) $line->usable_quantity, self::issuedQuantity($line), 2), self::lossQuantity($line), 2) : '0.00';
             $delta = bcsub($target, $state['quantity'][$line->id], 2);
             if (bccomp($delta, '0', 2) === 0) {
                 continue;
@@ -320,6 +321,33 @@ class InventoryValuation
         $sum = InventoryValueMovement::where('sourcing_lot_line_id', $line->id)->where('component', 'quantity')->whereIn('type', ['issue', 'issue_return'])->sum('quantity_delta');
 
         return bcmul(bcadd((string) $sum, '0', 2), '-1', 2);
+    }
+
+    /** Quantity taken out of the line's valuation by approved write-offs and quarantines (units written off, or held apart at a recoverable value). */
+    public static function lossQuantity(SourcingLotLine $line): string
+    {
+        $sum = InventoryValueMovement::where('sourcing_lot_line_id', $line->id)->where('component', 'quantity')->whereIn('type', ['writeoff', 'quarantine'])->sum('quantity_delta');
+
+        return bcmul(bcadd((string) $sum, '0', 2), '-1', 2);
+    }
+
+    /**
+     * Take a quantity and its exact value out of the line's cost layers for an approved write-off or quarantine of Sellbees-owned stock. The journal entry carries the
+     * loss and, for quarantined goods, the recoverable value recognised separately; nothing here posts.
+     */
+    public static function recordLoss(InventoryLossCase $case, SourcingLotLine $line, int $purchase, int $landed, int $journalId, User $approver): void
+    {
+        $lot = SourcingLot::findOrFail($case->sourcing_lot_id);
+        $enrolment = InventoryEngineEnrolment::where('sourcing_lot_id', $lot->id)->where('status', 'approved')->where('ownership', 'company')->firstOrFail();
+        $common = ['type' => $case->outcome === 'write_off' ? 'writeoff' : 'quarantine', 'project_id' => null, 'valuation_status' => 'valued', 'source_type' => 'inventory_loss_case', 'source_id' => $case->id,
+            'journal_entry_id' => $journalId, 'effective_on' => self::effectiveOn($case->posted_on->toDateString(), $enrolment), 'verified_by' => $approver->id, 'verified_at' => now(), 'created_by' => $case->prepared_by,
+            'reason' => 'Loss case #'.$case->id.' ('.$case->outcome.', '.$case->classification.')'];
+        foreach (['purchase' => $purchase, 'landed' => $landed] as $component => $value) {
+            if ($value !== 0) {
+                self::record($lot, $line, $enrolment, $common + ['component' => $component, 'value_delta' => -$value, 'move_key' => 'loss:'.$case->id.':'.$component]);
+            }
+        }
+        self::record($lot, $line, $enrolment, $common + ['component' => 'quantity', 'quantity_delta' => bcmul((string) $case->quantity, '-1', 2), 'move_key' => 'loss:'.$case->id.':quantity']);
     }
 
     /**

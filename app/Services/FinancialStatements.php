@@ -154,11 +154,11 @@ class FinancialStatements
             'equity.opening' => 'Opening equity', 'assets.equipment' => 'Office equipment & fixed assets (at cost, not depreciated)', 'supplier.credit' => 'Supplier credit notes receivable',
             'assets.prepaid' => 'Prepaid expenses (not yet used)', 'loans.payable' => 'Loans payable (principal owed)', 'client.funds' => 'Client funds held (customer money owed to clients)', 'income.other' => 'Other income',
             'assets.loans_receivable' => 'Loans receivable (money lent, to be repaid)',
-            'assets.supplier_advances' => 'Supplier advances (paid, goods not yet accepted)', 'assets.inventory' => 'Product acquisition cost held (inventory)', 'cogs' => 'Cost of goods sold (inventory handed over to clients)', 'assets.transport_prepaid' => 'Transport paid in advance (service not yet done)',
+            'assets.supplier_advances' => 'Supplier advances (paid, goods not yet accepted)', 'assets.inventory' => 'Product acquisition cost held (inventory)', 'cogs' => 'Cost of goods sold (inventory handed over to clients)', 'assets.inventory_impaired' => 'Damaged stock held at its recoverable value (impaired inventory)', 'inventory_loss' => 'Inventory loss expense (abnormal losses)', 'assets.transport_prepaid' => 'Transport paid in advance (service not yet done)',
         ];
         foreach ($balances as $account => $debit) {
             $bucket = match (true) {
-                in_array($account, ['cash', 'receivables', 'assets.equipment', 'assets.prepaid', 'assets.loans_receivable', 'assets.supplier_advances', 'assets.inventory', 'assets.transport_prepaid', 'supplier.credit'], true) => 'assets',
+                in_array($account, ['cash', 'receivables', 'assets.equipment', 'assets.prepaid', 'assets.loans_receivable', 'assets.supplier_advances', 'assets.inventory', 'assets.inventory_impaired', 'assets.transport_prepaid', 'supplier.credit'], true) => 'assets',
                 in_array($account, ['customer.advances', 'liabilities', 'partner.payable', 'loans.payable', 'client.funds'], true) => 'liabilities',
                 $account === 'partner.capital' || $account === 'equity.opening' => 'capital',
                 str_starts_with($account, 'fund.') => 'funds',

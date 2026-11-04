@@ -7,6 +7,7 @@ use App\Models\CostRecognition;
 use App\Models\Expense;
 use App\Models\InventoryEngineEnrolment;
 use App\Models\InventoryHandover;
+use App\Models\InventoryLossCase;
 use App\Models\InventoryValueMovement;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
@@ -131,8 +132,8 @@ class InventoryReconciliation
             'lots' => $rows, 'gl_inventory' => $gl, 'journal_by_lot' => $byLot, 'unattributed' => $gl - $byLot,
             'engine_subledger' => (int) $engine->sum('subledger_value'), 'engine_journal' => (int) $engine->sum('journal_value'), 'engine_unvalued' => (int) $engine->sum('unvalued_accepted'),
             'duplicates' => $duplicates, 'negative_lines' => $negative,
-            'handovers' => $handovers = self::handovers(),
-            'ok' => $gl === $byLot && $duplicates === 0 && $negative === 0 && $engine->every(fn ($r) => $r['ok']) && $handovers['ok'],
+            'handovers' => $handovers = self::handovers(), 'losses' => $losses = self::losses(),
+            'ok' => $gl === $byLot && $duplicates === 0 && $negative === 0 && $engine->every(fn ($r) => $r['ok']) && $handovers['ok'] && $losses['ok'],
         ];
     }
 
@@ -172,13 +173,17 @@ class InventoryReconciliation
             }
             if ($class === 'company_valued') {
                 $status = InventoryValuation::status(InventoryValuation::acceptedValue($line), $figures['purchase_valued']);
-                $expected = $status === 'valued' ? bcsub($accepted, $issued, 2) : '0.00';
+                $expected = $status === 'valued' ? bcsub(bcsub($accepted, $issued, 2), InventoryValuation::lossQuantity($line), 2) : '0.00';
                 if (bccomp($figures['quantity'], $expected, 2) !== 0) {
                     $differences[] = 'Valued quantity ('.$figures['quantity'].') differs from what the settled, accepted goods imply ('.$expected.').';
                 }
                 // Goods handed over to a client stay in our warehouse as the client's custody stock, so the physical count is the valued quantity plus what was handed over,
                 // less what has since left the warehouse (delivered to the client's customers, or released to the client at handover).
-                $expectedHeld = bcsub(bcadd($figures['quantity'], $issued, 2), $balances['delivered'], 2);
+                // Units quarantined at a recoverable value left the cost layers but are still physically here; units of a damaged return that were written off left the count
+                // but were never in the layers (they stay in the handed-over quantity).
+                $quarantined = (string) InventoryLossCase::where('sourcing_lot_line_id', $line->id)->where('scope', 'owned')->where('status', 'approved')->whereIn('outcome', ['repairable', 'impaired'])->sum('quantity');
+                $writtenOffReturns = (string) InventoryLossCase::where('sourcing_lot_line_id', $line->id)->where('scope', 'return')->where('status', 'approved')->where('outcome', 'write_off')->sum('quantity');
+                $expectedHeld = bcsub(bcadd(bcsub(bcadd($figures['quantity'], $issued, 2), $balances['delivered'], 2), $quarantined, 2), $writtenOffReturns, 2);
                 if ($status === 'valued' && bccomp($held, $expectedHeld, 2) !== 0) {
                     $differences[] = 'The physical count held ('.$held.') differs from the valued quantity ('.$figures['quantity'].') plus goods handed over ('.$issued.'): this needs an approved stock adjustment; nothing is corrected automatically.';
                 }
@@ -216,7 +221,11 @@ class InventoryReconciliation
                 $restoredJournal += (int) JournalLine::whereIn('journal_entry_id', $ids)->where('account', 'cogs')->sum('credit');
                 $restoredMoved += (int) InventoryValueMovement::where('source_type', 'inventory_handover_return')->where('source_id', $r->id)->whereIn('component', ['purchase', 'landed'])->sum('value_delta');
             }
-            $netCogs = (int) $h->cogs_value - $restoredJournal;
+            // Cost of goods sold reversed by damaged returns that were classified (loss cases): in the journal and as recorded on the case.
+            $caseIds = InventoryLossCase::where('inventory_handover_id', $h->id)->where('scope', 'return')->where('status', 'approved')->pluck('id');
+            $caseReversedJournal = (int) JournalLine::whereIn('journal_entry_id', JournalEntry::where('source_type', 'inventory_loss_case')->whereIn('source_id', $caseIds)->pluck('id'))->where('account', 'cogs')->sum('credit');
+            $caseReversed = (int) InventoryLossCase::whereIn('id', $caseIds)->sum('cogs_reversed');
+            $netCogs = (int) $h->cogs_value - $restoredJournal - $caseReversedJournal;
             $row = ['handover' => $h->id, 'project_id' => $h->project_id, 'lot' => $h->lot->number, 'quantity' => (string) $h->quantity, 'cogs_value' => (int) $h->cogs_value, 'journal_cogs' => $journal, 'movement_value' => $moved,
                 'restored_journal' => $restoredJournal, 'restored_movements' => $restoredMoved, 'net_cogs' => $netCogs, 'issues' => []];
             if ((int) $h->cogs_value !== $journal || $journal !== $moved) {
@@ -224,6 +233,9 @@ class InventoryReconciliation
             }
             if ($restoredJournal !== $restoredMoved) {
                 $row['issues'][] = 'Handover #'.$h->id.': restored cost in the journal ('.$restoredJournal.') and in the value movements ('.$restoredMoved.') differ.';
+            }
+            if ($caseReversedJournal !== $caseReversed) {
+                $row['issues'][] = 'Handover #'.$h->id.': cost of goods sold reversed by loss cases in the journal ('.$caseReversedJournal.') differs from the cases ('.$caseReversed.').';
             }
             if ($netCogs < 0 || bccomp($h->netQuantity(), '0', 2) < 0) {
                 $row['issues'][] = 'Handover #'.$h->id.' has returned more than was handed over.';
@@ -243,15 +255,61 @@ class InventoryReconciliation
             $problems = [...$problems, ...$row['issues']];
             $byProject[$h->project_id] = ($byProject[$h->project_id] ?? 0) + $netCogs;
             $net += $netCogs;
-            $damaged += bccomp((string) $h->damaged_returned_quantity, '0', 2) > 0 ? 1 : 0;
+            $damaged += bccomp((string) $h->damaged_returned_quantity, bcadd((string) InventoryLossCase::where('inventory_handover_id', $h->id)->where('scope', 'return')->where('status', 'approved')->sum('quantity'), '0', 2), 2) > 0 ? 1 : 0;
             $rows[] = $row;
         }
+        // A normal loss on Sellbees stock is part of the cost of goods sold, so it is in this account too (but belongs to no handover).
+        $net += (int) InventoryLossCase::where('scope', 'owned')->where('classification', 'normal')->where('status', 'approved')->sum('loss_value');
         $gl = Ledger::debitBalance('cogs');
         if ($gl !== $net) {
             $problems[] = 'Cost of goods sold in the ledger ('.$gl.') differs from the handovers ('.$net.').';
         }
 
         return ['rows' => $rows, 'by_project' => $byProject, 'gl_cogs' => $gl, 'handover_net_cogs' => $net, 'difference' => $gl - $net, 'problems' => $problems, 'damaged_awaiting_classification' => $damaged, 'ok' => $problems === []];
+    }
+
+    /**
+     * Damage, impairment and write-off cases against the ledger. Every approved case carries exactly one financial treatment and at most one journal entry; the
+     * impaired-inventory and inventory-loss accounts equal what the approved cases say; cases still waiting for a recoverable value are listed, not assumed.
+     * Nothing is posted to close a gap: a difference is reported with the case it comes from.
+     *
+     * @return array{cases: int, approved: int, pending_valuation: int, prior_period: int, impaired_gl: int, impaired_cases: int, abnormal_loss_gl: int, abnormal_loss_cases: int, problems: list<string>, ok: bool}
+     */
+    public static function losses(): array
+    {
+        $problems = [];
+        $approved = InventoryLossCase::where('status', 'approved')->get();
+        foreach ($approved as $case) {
+            $entries = JournalEntry::where('source_type', 'inventory_loss_case')->where('source_id', $case->id)->pluck('id');
+            if ($case->treatment === null) {
+                $problems[] = 'Case #'.$case->id.' is approved without a financial treatment.';
+            }
+            if ($entries->count() > 1) {
+                $problems[] = 'Case #'.$case->id.' has been posted more than once.';
+            }
+            if ($case->treatment === 'custody_incident' && $entries->isNotEmpty()) {
+                $problems[] = 'Case #'.$case->id.' is a client custody incident but has a Sellbees journal entry.';
+            }
+            if ($case->treatment !== 'custody_incident' && $case->treatment !== 'retained_in_cogs' && $entries->isEmpty()) {
+                $problems[] = 'Case #'.$case->id.' ('.$case->treatment.') has no journal entry.';
+            }
+            if ($case->scope !== 'custody' && (int) $case->carrying_value !== (int) $case->recoverable_value + (int) $case->loss_value) {
+                $problems[] = 'Case #'.$case->id.': carrying value does not equal recoverable value plus loss.';
+            }
+        }
+        $impairedCases = (int) $approved->whereIn('outcome', ['repairable', 'impaired'])->sum('recoverable_value');
+        $abnormalCases = (int) $approved->where('classification', 'abnormal')->sum('loss_value');
+        $impairedGl = Ledger::debitBalance('assets.inventory_impaired');
+        $abnormalGl = Ledger::debitBalance('inventory_loss');
+        if ($impairedGl !== $impairedCases) {
+            $problems[] = 'Impaired inventory in the ledger ('.$impairedGl.') differs from the approved cases ('.$impairedCases.').';
+        }
+        if ($abnormalGl !== $abnormalCases) {
+            $problems[] = 'Inventory loss expense in the ledger ('.$abnormalGl.') differs from the approved abnormal losses ('.$abnormalCases.').';
+        }
+
+        return ['cases' => InventoryLossCase::count(), 'approved' => $approved->count(), 'pending_valuation' => InventoryLossCase::where('status', 'pending_valuation')->count(), 'prior_period' => $approved->where('prior_period', true)->count(),
+            'impaired_gl' => $impairedGl, 'impaired_cases' => $impairedCases, 'abnormal_loss_gl' => $abnormalGl, 'abnormal_loss_cases' => $abnormalCases, 'problems' => $problems, 'ok' => $problems === []];
     }
 
     /** Inventory value of one lot as its own journal entries state it (settlements, capitalised costs, transport, whole-lot release, and their reversals). */
@@ -275,6 +333,9 @@ class InventoryReconciliation
             foreach ($handover->returns()->pluck('id') as $returnId) {
                 $total += InventoryValuation::inventoryNet('inventory_handover_return', $returnId);
             }
+        }
+        foreach (InventoryLossCase::where('sourcing_lot_id', $lot->id)->where('status', 'approved')->pluck('id') as $caseId) {
+            $total += InventoryValuation::inventoryNet('inventory_loss_case', $caseId);
         }
 
         return $total;

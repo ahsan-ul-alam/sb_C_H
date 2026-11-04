@@ -22,6 +22,7 @@
             ['Sourcing Reports', 'sourcing.reports', 'sourcing.reports', 'chart', ['sourcing.reports']],
             ['Supplier Advances', 'sourcing.advances', 'sourcing.reports', 'wallet', ['sourcing.advances*', 'sourcing.cost-recognitions*']],
             ['Client Handovers', 'sourcing.handovers', 'inventory.view', 'layers', ['sourcing.handovers*']],
+            ['Damage & Write-offs', 'sourcing.losses', 'inventory.view', 'layers', ['sourcing.losses*']],
             ['Project Margins', 'sourcing.projects', 'sourcing.reports', 'chart', ['sourcing.projects']],
         ],
         'Product Operations' => [

@@ -19,6 +19,7 @@ use App\Http\Controllers\FinancialOverviewController;
 use App\Http\Controllers\FinancialStatementsController;
 use App\Http\Controllers\HomeController;
 use App\Http\Controllers\InventoryHandoverController;
+use App\Http\Controllers\InventoryLossController;
 use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\LoanController;
 use App\Http\Controllers\LoanReceivableController;
@@ -185,6 +186,14 @@ Route::middleware('auth')->group(function () {
         Route::post('handovers/{handover}/returns', [InventoryHandoverController::class, 'storeReturn'])->name('handovers.returns.store')->middleware('can:inventory.handover.propose');
         Route::post('handover-returns/{handoverReturn}/cancel', [InventoryHandoverController::class, 'cancelReturn'])->name('handovers.returns.cancel')->middleware('can:inventory.handover.propose');
         Route::post('handover-returns/{handoverReturn}/decide', [InventoryHandoverController::class, 'decideReturn'])->name('handovers.returns.decide')->middleware('can:inventory.handover.approve');
+
+        // Damage, impairment and write-off cases: Operations proposes (inventory.loss.propose), Finance reviews (inventory.loss.review), the Board decides (inventory.loss.approve).
+        Route::get('losses', [InventoryLossController::class, 'index'])->name('losses')->middleware('can:inventory.view');
+        Route::get('losses/{case}', [InventoryLossController::class, 'show'])->name('losses.show')->middleware('can:inventory.view')->whereNumber('case');
+        Route::post('losses', [InventoryLossController::class, 'store'])->name('losses.store')->middleware('can:inventory.loss.propose');
+        Route::post('losses/{case}/cancel', [InventoryLossController::class, 'cancel'])->name('losses.cancel')->middleware('can:inventory.loss.propose');
+        Route::post('losses/{case}/review', [InventoryLossController::class, 'review'])->name('losses.review')->middleware('can:inventory.loss.review');
+        Route::post('losses/{case}/decide', [InventoryLossController::class, 'decide'])->name('losses.decide')->middleware('can:inventory.loss.approve');
     });
 
     // Product operations: inventory, orders & delivery, client settlements. Reads need inventory.view / settlement.view; each write has its own permission.
