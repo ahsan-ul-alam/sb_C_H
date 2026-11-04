@@ -169,7 +169,7 @@ class LoanReceivableService
                 if (AccountingService::isClosed($repayment->repaid_on->toDateString())) {
                     throw new RuntimeException('That month is already closed; record the repayment in an open month.');
                 }
-                $accountId = AccountingService::resolveAccountId($repayment->financial_account_id);
+                $accountId = AccountingService::activeAccountId($repayment->financial_account_id);
                 Ledger::post($repayment->repaid_on->toDateString(), 'Loan repayment received from '.$loan->borrower_name, 'loan_receivable_repayment', $repayment->id, [
                     ['cash', null, $amount, 0, $accountId],
                     ['assets.loans_receivable', $loan->borrower_partner_id, 0, $amount],

@@ -80,6 +80,16 @@
                                     <form method="POST" action="{{ route('finance.expenses.reverse', $e) }}" style="display:grid; gap:.4rem; margin-top:.4rem; min-width:14rem">@csrf
                                         @if ($e->payment_status === 'paid')
                                             <select name="type" aria-label="What happened"><option value="recording_error">Recording error — money never left</option><option value="refund_received">Refund received</option><option value="credit_note">Credit note (no cash)</option></select>
+                                            {{-- Where each original payment comes back to (a recording error always returns to the account it was recorded in). --}}
+                                            @php($live = $e->payments->where('voided_at', null))
+                                            @if ($live->isNotEmpty())
+                                                @foreach ($live as $pay)
+                                                    <label class="muted">Refund of {{ Money::format($pay->amount) }} paid {{ $pay->paid_on->format('j M Y') }} from {{ $pay->account?->name ?? 'unassigned cash' }} goes to
+                                                        <select name="refund_accounts[{{ $pay->id }}]" aria-label="Refund account"><option value="">Same account</option>@foreach ($accounts as $a)<option value="{{ $a->id }}">{{ $a->name }}</option>@endforeach</select></label>
+                                                @endforeach
+                                            @else
+                                                <label class="muted">Refund goes to <select name="refund_accounts[0]" aria-label="Refund account"><option value="">{{ $e->account?->name ?? 'Default account' }}</option>@foreach ($accounts as $a)<option value="{{ $a->id }}">{{ $a->name }}</option>@endforeach</select></label>
+                                            @endif
                                         @endif
                                         <input name="reason" placeholder="Reason" required aria-label="Reason">
                                         <button class="btn btn-sm btn-danger">Request reversal</button>

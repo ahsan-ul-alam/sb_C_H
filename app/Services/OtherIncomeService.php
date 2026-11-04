@@ -59,7 +59,7 @@ class OtherIncomeService
             $income->update(['status' => $approve ? 'verified' : 'rejected', 'verified_by' => $user->id, 'verified_at' => now()]);
             if ($approve) {
                 Ledger::post($income->received_on->toDateString(), 'Other income: '.$income->description, 'other_income', $income->id, [
-                    ['cash', null, (int) $income->amount, 0, AccountingService::resolveAccountId($income->financial_account_id)],
+                    ['cash', null, (int) $income->amount, 0, AccountingService::activeAccountId($income->financial_account_id)],
                     ['income.other', null, 0, (int) $income->amount],
                 ], $user->id);
             }

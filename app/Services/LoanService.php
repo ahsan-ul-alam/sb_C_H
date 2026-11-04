@@ -76,7 +76,7 @@ class LoanService
     private static function post(LoanEntry $entry, int $userId): void
     {
         $loan = Loan::whereKey($entry->loan_id)->lockForUpdate()->firstOrFail();
-        $accountId = AccountingService::resolveAccountId($entry->financial_account_id);
+        $accountId = AccountingService::activeAccountId($entry->financial_account_id);
         $amount = (int) $entry->amount;
         $date = $entry->entry_date->toDateString();
 

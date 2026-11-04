@@ -32,6 +32,29 @@ class AccountingService
     }
 
     /**
+     * A NEW transaction may only move money in or out of an active account. (null means the default account, or the legacy unassigned cash
+     * when no accounts exist, and is always accepted.) Posted history is never judged by this: reversals of old entries keep their accounts.
+     */
+    public static function assertActive(?int $accountId): void
+    {
+        if ($accountId === null) {
+            return;
+        }
+        $account = FinancialAccount::find($accountId);
+        if (! $account || ! $account->is_active) {
+            throw new RuntimeException('The financial account "'.($account?->name ?? '#'.$accountId).'" is inactive; choose an active account.');
+        }
+    }
+
+    /** resolveAccountId() for a new transaction: the account must be active. */
+    public static function activeAccountId(?int $accountId): ?int
+    {
+        self::assertActive($accountId);
+
+        return self::resolveAccountId($accountId);
+    }
+
+    /**
      * Balance of one account, or of the unassigned legacy cash when null. With $lock the read is a locking read, which always
      * sees the latest committed data (a plain read inside a MySQL transaction can see an older snapshot).
      */

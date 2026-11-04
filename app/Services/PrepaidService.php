@@ -33,8 +33,11 @@ class PrepaidService
         $end = CarbonImmutable::createFromFormat('Y-m-d', $month.'-01')->endOfMonth();
         $released = 0;
 
+        // A prepaid expense with a reversal awaiting the Board is left alone: releasing part of it now would make the reversal (which returns the
+        // whole amount out of the asset) take the prepaid asset below zero. If the reversal is rejected, the cumulative release catches up.
         $expenses = Expense::query()->where('classification', 'prepaid')->where('status', 'verified')->whereNull('reverses_id')
-            ->where('payment_status', '!=', 'reversed')->whereNotNull('prepaid_months')->whereDate('spent_on', '<=', $end)->get();
+            ->where('payment_status', '!=', 'reversed')->whereNotNull('prepaid_months')->whereDate('spent_on', '<=', $end)
+            ->whereNotIn('id', Expense::query()->where('status', 'pending')->whereNotNull('reverses_id')->select('reverses_id'))->get();
 
         foreach ($expenses as $expense) {
             $elapsed = CarbonImmutable::parse($expense->spent_on)->startOfMonth()->diffInMonths($end->startOfMonth()) + 1;

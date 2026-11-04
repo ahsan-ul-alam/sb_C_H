@@ -3,9 +3,11 @@
 namespace App\Services;
 
 use App\Models\Expense;
+use App\Models\ExpenseRefundAllocation;
 use App\Models\Resolution;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
+use RuntimeException;
 
 /**
  * The only place an expense becomes a journal entry. Used by the Board's manual verification and by automatic
@@ -28,13 +30,13 @@ class ExpenseVerifier
         if ($e->reverses_id) {
             $expenseAccount = self::debitAccount(self::original($e));
             // An expense that was never paid is cancelled against its payable; nothing moves in cash.
-            $debit = match ($e->correction_type) {
-                'liability_cancel' => ['liabilities', null, $amount, 0],
-                'credit_note' => ['supplier.credit', null, $amount, 0],
-                default => ['cash', null, $amount, 0, $accountId],
+            $debits = match ($e->correction_type) {
+                'liability_cancel' => [['liabilities', null, $amount, 0]],
+                'credit_note' => [['supplier.credit', null, $amount, 0]],
+                default => self::refundLines($e, $amount, $accountId),
             };
 
-            return [$debit, [$expenseAccount, null, 0, $amount]];
+            return [...$debits, [$expenseAccount, null, 0, $amount]];
         }
 
         $expenseAccount = self::debitAccount($e);
@@ -43,6 +45,26 @@ class ExpenseVerifier
         return $e->payment_status === 'unpaid'
             ? [[$expenseAccount, null, $amount, 0], ['liabilities', null, 0, $amount]]
             : [[$expenseAccount, null, $amount, 0], ['cash', null, 0, $amount, $accountId]];
+    }
+
+    /**
+     * The cash side of a reversal. When the reversal states where each part comes back (one row per original payment, see
+     * ExpenseService::reverse) every part goes to its own account; a reversal without rows (every earlier one, and a supplier-payment
+     * correction) returns the whole amount to the single account on its own row.
+     *
+     * @return list<array{0: string, 1: int|null, 2: int, 3: int, 4: int|null}>
+     */
+    private static function refundLines(Expense $e, int $amount, ?int $accountId): array
+    {
+        $parts = ExpenseRefundAllocation::where('reversal_expense_id', $e->id)->orderBy('id')->get();
+        if ($parts->isEmpty()) {
+            return [['cash', null, $amount, 0, $accountId]];
+        }
+        if ((int) $parts->sum('amount') !== $amount) {
+            throw new RuntimeException('The refund parts of this reversal do not add up to its amount.');
+        }
+
+        return $parts->map(fn (ExpenseRefundAllocation $p) => ['cash', null, (int) $p->amount, 0, $p->financial_account_id])->all();
     }
 
     /**
@@ -69,7 +91,20 @@ class ExpenseVerifier
 
     public static function post(Expense $e, ?int $userId): void
     {
-        if (! $e->reverses_id && $e->payment_status !== 'unpaid') {
+        if ($e->reverses_id) {
+            // What was true when the reversal was requested may not be now (a payment voided, a prepaid release made): decide on the facts
+            // as they are at the moment of posting. Money coming back may only land in an active account; a credit note or the cancellation
+            // of an unpaid expense moves no cash.
+            ExpenseService::assertReversalEligible($e);
+            $parts = ExpenseRefundAllocation::where('reversal_expense_id', $e->id)->get();
+            foreach ($parts as $part) {
+                AccountingService::assertActive($part->financial_account_id);
+            }
+            if ($parts->isEmpty() && ! in_array($e->correction_type, ['liability_cancel', 'credit_note'], true)) {
+                AccountingService::assertActive($e->financial_account_id);
+            }
+        } elseif ($e->payment_status !== 'unpaid') {
+            AccountingService::assertActive($e->financial_account_id);
             AccountingService::assertCanSpend(AccountingService::resolveAccountId($e->financial_account_id), (int) $e->amount);
         }
         Ledger::post($e->spent_on->toDateString(), $e->category.': '.$e->description, 'expense', $e->id, self::lines($e), $userId);
@@ -139,6 +174,7 @@ class ExpenseVerifier
      */
     public static function record(array $attrs, User $creator, array $context = []): Expense
     {
+        AccountingService::assertActive(isset($attrs['financial_account_id']) ? (int) $attrs['financial_account_id'] : null);
         $attrs = self::normalise($attrs);
 
         return DB::transaction(function () use ($attrs, $creator, $context) {

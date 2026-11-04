@@ -143,7 +143,7 @@ class ClientSettlementService
                 Ledger::post($date, 'Client settlement #'.$settlement->id.' — '.$client->name, 'client_settlement', $settlement->id, [
                     ['client.funds', null, $netting + $pay, 0],
                     ['cash', null, 0, $netting],
-                    ['cash', null, 0, $pay, AccountingService::resolveAccountId($accountId)],
+                    ['cash', null, 0, $pay, AccountingService::activeAccountId($accountId)],
                 ], $user->id);
                 Audit::log('client.settled', 'client '.$client->id, "netted $netting, paid $pay, held after ".($held - $netting - $pay));
 

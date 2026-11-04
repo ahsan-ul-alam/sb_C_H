@@ -42,7 +42,7 @@ class InvestmentService
     /** Journal a verified capital entry. Called inside the verification transaction. */
     public static function post(CapitalEntry $entry, int $userId): void
     {
-        $accountId = AccountingService::resolveAccountId($entry->financial_account_id);
+        $accountId = AccountingService::activeAccountId($entry->financial_account_id);
         $amount = (int) $entry->amount;
 
         if ($entry->kind === 'withdrawal') {

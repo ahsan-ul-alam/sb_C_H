@@ -264,7 +264,7 @@ class OrderFulfilment
                 $collection = OrderCollection::create(['client_order_id' => $o->id, 'amount' => $amount, 'collected_on' => $date, 'reference' => $reference,
                     'financial_account_id' => $accountId, 'idempotency_key' => $key, 'created_by' => $user->id]);
                 Ledger::post($date, 'Customer collection held for client — order '.$o->reference, 'order_collection', $collection->id, [
-                    ['cash', null, $amount, 0, AccountingService::resolveAccountId($accountId)],
+                    ['cash', null, $amount, 0, AccountingService::activeAccountId($accountId)],
                     ['client.funds', null, 0, $amount],
                 ], $user->id);
                 Audit::log('order.collected', 'order '.$o->id, (string) $amount);

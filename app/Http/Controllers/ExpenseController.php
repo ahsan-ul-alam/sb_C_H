@@ -16,6 +16,7 @@ use App\Support\Money;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 use Illuminate\View\View;
 use RuntimeException;
 
@@ -42,7 +43,7 @@ class ExpenseController extends Controller
             'classification' => ['nullable', 'in:'.implode(',', array_keys(ExpenseService::CLASSIFICATIONS))],
             'payment_status' => ['nullable', 'in:paid,unpaid'],
             'paid_on' => ['nullable', 'date'],
-            'financial_account_id' => ['nullable', 'exists:financial_accounts,id'],
+            'financial_account_id' => ['nullable', Rule::exists('financial_accounts', 'id')->where('is_active', true)],
             'project_id' => ['nullable', 'exists:projects,id'],
             'vendor' => ['nullable', 'string', 'max:120'],
             'document_id' => ['nullable', 'exists:documents,id'],
@@ -110,7 +111,7 @@ class ExpenseController extends Controller
         $data = $request->validate([
             'amount' => ['required', 'regex:'.Money::AMOUNT_REGEX],
             'paid_on' => ['required', 'date'],
-            'financial_account_id' => ['nullable', 'exists:financial_accounts,id'],
+            'financial_account_id' => ['nullable', Rule::exists('financial_accounts', 'id')->where('is_active', true)],
             'reference' => ['nullable', 'string', 'max:200'],
             'idempotency_key' => ['nullable', 'uuid'],
         ]);
@@ -134,9 +135,13 @@ class ExpenseController extends Controller
         $data = $request->validate([
             'type' => ['nullable', 'in:recording_error,refund_received,credit_note'],
             'reason' => ['required', 'string', 'max:150'],
+            // Where each original payment comes back to: expense payment id (0 = an expense paid in one go) => account.
+            'refund_accounts' => ['nullable', 'array'],
+            'refund_accounts.*' => ['nullable', Rule::exists('financial_accounts', 'id')->where('is_active', true)],
         ]);
+        $refundAccounts = collect($data['refund_accounts'] ?? [])->filter(fn ($account) => $account !== null && $account !== '')->mapWithKeys(fn ($account, $key) => [(int) $key => (int) $account])->all();
 
-        return $this->attempt(fn () => ExpenseService::reverse($expense, $data['type'] ?? null, $data['reason'], $request->user()), 'Reversal recorded; awaiting Board verification.');
+        return $this->attempt(fn () => ExpenseService::reverse($expense, $data['type'] ?? null, $data['reason'], $request->user(), $refundAccounts), 'Reversal recorded; awaiting Board verification.');
     }
 
     /** Shared (non-direct) expenses and how each is currently split across projects. */

@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Expense;
 use App\Models\ExpenseAllocation;
 use App\Models\ExpensePayment;
+use App\Models\ExpenseRefundAllocation;
 use App\Models\JournalEntry;
 use App\Models\LoanReceivable;
 use App\Models\PrepaidRelease;
@@ -67,7 +68,7 @@ class ExpenseService
                 if (AccountingService::isClosed($data['paid_on'])) {
                     throw new RuntimeException('That month is already closed; record the payment in an open month.');
                 }
-                $accountId = AccountingService::resolveAccountId($data['financial_account_id'] ?? $expense->financial_account_id);
+                $accountId = AccountingService::activeAccountId($data['financial_account_id'] ?? $expense->financial_account_id);
                 AccountingService::assertCanSpend($accountId, $amount);
 
                 $payment = ExpensePayment::create([
@@ -100,6 +101,11 @@ class ExpenseService
             if ($expense->payment_status === 'reversed') {
                 throw new RuntimeException('This expense has been reversed.');
             }
+            // A reversal in progress was requested against these very payments (and says which account each part returns to). Voiding one
+            // now would leave the reversal refunding money that was never paid; decide the reversal first.
+            if (Expense::where('reverses_id', $expense->id)->where('status', 'pending')->exists()) {
+                throw new RuntimeException('A reversal of this expense is awaiting verification; the Board must decide it before a payment is voided.');
+            }
             $original = JournalEntry::where('source_type', 'expense_payment')->where('source_id', $payment->id)->firstOrFail();
             Ledger::reverse($original, $original->entry_date->toDateString(), 'Void of expense payment #'.$payment->id, 'expense_payment_rev', $payment->id, $user->id);
             $payment->update(['voided_at' => now(), 'voided_by' => $user->id]);
@@ -124,10 +130,17 @@ class ExpenseService
      * - Never paid: cancelled against its payable (no cash moves).
      * - Fully paid: $type states what really happened (recording error / refund received / credit note).
      * - Partly paid: void the payments first.
+     *
+     * Where the money returns is stated per original payment, never assumed: an expense paid in parts through several accounts is refunded
+     * part by part ($refundAccounts maps an expense payment id to the account that receives its refund, default the account it was paid
+     * from; key 0 names the account for an expense paid in one go, default the account it was paid from). A recording error restores the
+     * account the money was recorded in, so it cannot be redirected.
+     *
+     * @param  array<int, int|null>  $refundAccounts  expense payment id (0 = the expense itself) => financial account id
      */
-    public static function reverse(Expense $original, ?string $type, string $reason, User $user): Expense
+    public static function reverse(Expense $original, ?string $type, string $reason, User $user, array $refundAccounts = []): Expense
     {
-        return DB::transaction(function () use ($original, $type, $reason, $user) {
+        return DB::transaction(function () use ($original, $type, $reason, $user, $refundAccounts) {
             $original = Expense::whereKey($original->id)->lockForUpdate()->firstOrFail();
             if ($original->status !== 'verified' || $original->reverses_id) {
                 throw new RuntimeException('Only a verified, original expense can be reversed.');
@@ -153,16 +166,108 @@ class ExpenseService
                 throw new RuntimeException('The current month is closed; record the reversal after a new month opens.');
             }
 
+            $parts = self::refundParts($original, $type, $refundAccounts);
+
             $reversal = ExpenseVerifier::record([
                 'category' => $original->category, 'description' => 'Reverses expense #'.$original->id.' ('.$type.') — '.$reason,
                 'amount' => $original->amount, 'spent_on' => today()->toDateString(), 'reverses_id' => $original->id, 'correction_type' => $type,
                 'is_asset' => $original->is_asset, 'classification' => $original->classification, 'project_id' => $original->project_id,
-                'financial_account_id' => $original->financial_account_id, 'payment_status' => 'paid', 'vendor' => $original->vendor,
+                'financial_account_id' => $parts[0]['account'] ?? $original->financial_account_id, 'payment_status' => 'paid', 'vendor' => $original->vendor,
             ], $user);
+            foreach ($parts as $part) {
+                ExpenseRefundAllocation::create(['reversal_expense_id' => $reversal->id, 'expense_payment_id' => $part['payment'], 'financial_account_id' => $part['account'], 'amount' => $part['amount']]);
+            }
             Audit::log('expense.reversal_requested', 'expense '.$original->id, $type.': '.$reason);
 
             return $reversal;
         });
+    }
+
+    /**
+     * How a cash reversal is split: one part per live payment of the expense, or a single part for an expense paid in one go. None for a
+     * credit note or the cancellation of an unpaid expense, which move no cash.
+     *
+     * @param  array<int, int|null>  $refundAccounts
+     * @return list<array{payment: int|null, account: int|null, amount: int}>
+     */
+    private static function refundParts(Expense $original, string $type, array $refundAccounts): array
+    {
+        if (! in_array($type, ['recording_error', 'refund_received'], true)) {
+            return [];
+        }
+        $live = $original->payments()->whereNull('voided_at')->orderBy('id')->get();
+        if ($live->isEmpty()) {
+            $account = AccountingService::resolveAccountId(isset($refundAccounts[0]) ? (int) $refundAccounts[0] : $original->financial_account_id);
+            if ($type === 'recording_error' && isset($refundAccounts[0]) && (int) $refundAccounts[0] !== (int) $original->financial_account_id) {
+                throw new RuntimeException('A recording error restores the account the money was recorded in; it cannot be redirected to another account.');
+            }
+            AccountingService::assertActive($account);
+
+            return [['payment' => null, 'account' => $account, 'amount' => (int) $original->amount]];
+        }
+        if ((int) $live->sum('amount') !== (int) $original->amount) {
+            throw new RuntimeException('The payments recorded against this expense do not add up to its amount; correct them before reversing it.');
+        }
+        $unknown = array_diff(array_keys(array_filter($refundAccounts, fn ($a, $k) => $k !== 0 && $a !== null && $a !== '', ARRAY_FILTER_USE_BOTH)), $live->pluck('id')->all());
+        if ($unknown !== []) {
+            throw new RuntimeException('A refund account was given for a payment that is not part of this expense.');
+        }
+
+        return $live->map(function (ExpensePayment $payment) use ($type, $refundAccounts) {
+            $chosen = $refundAccounts[$payment->id] ?? null;
+            $account = $chosen === null || $chosen === '' ? $payment->financial_account_id : (int) $chosen;
+            if ($type === 'recording_error' && (int) $account !== (int) $payment->financial_account_id) {
+                throw new RuntimeException('A recording error restores the account the money was recorded in; it cannot be redirected to another account.');
+            }
+            AccountingService::assertActive($account);
+
+            return ['payment' => $payment->id, 'account' => $account, 'amount' => (int) $payment->amount];
+        })->all();
+    }
+
+    /**
+     * Whether a reversal can still be posted. It is called again at the moment the Board's decision is journaled, because the facts it was
+     * requested on can change in between: a payment voided, a payment recorded, a prepaid release made, the expense reversed or reclassified.
+     * Throws with the reason; the Board then rejects it and a new request is made on the facts as they are.
+     */
+    public static function assertReversalEligible(Expense $reversal): void
+    {
+        $original = Expense::whereKey($reversal->reverses_id)->lockForUpdate()->firstOrFail();
+        if ($original->status !== 'verified') {
+            throw new RuntimeException('The expense being reversed is no longer verified.');
+        }
+        if ($original->payment_status === 'reversed') {
+            throw new RuntimeException('The expense being reversed has already been fully reversed.');
+        }
+        $others = (int) Expense::where('reverses_id', $original->id)->where('status', 'verified')->where('id', '!=', $reversal->id)->sum('amount');
+        if ($others + (int) $reversal->amount > (int) $original->amount) {
+            throw new RuntimeException('The corrections of this expense would exceed its amount.');
+        }
+        if (LoanReceivable::where('expense_id', $original->id)->whereIn('status', ['pending', 'verified'])->exists()) {
+            throw new RuntimeException('This expense is being reclassified as a loan receivable; reverse that reclassification first.');
+        }
+        if ($original->classification === 'prepaid' && PrepaidRelease::where('expense_id', $original->id)->exists()) {
+            throw new RuntimeException('Part of this prepaid expense has been expensed since the reversal was requested; reversing it now would take the prepaid asset below zero. Reject the reversal and record an adjustment instead.');
+        }
+
+        $live = $original->payments()->whereNull('voided_at')->get();
+        if ($reversal->correction_type === 'liability_cancel') {
+            if ($live->isNotEmpty()) {
+                throw new RuntimeException('A payment was recorded against this expense after the reversal was requested; reject the reversal and request it again.');
+            }
+
+            return;
+        }
+        if (! $original->payments()->exists()) {
+            return; // paid in one go: nothing recorded in parts that could have changed
+        }
+        if ((int) $live->sum('amount') !== (int) $original->amount) {
+            throw new RuntimeException('A payment of this expense was voided or changed after the reversal was requested, so the refund no longer matches what was paid. Reject the reversal and request it again.');
+        }
+        $parts = ExpenseRefundAllocation::where('reversal_expense_id', $reversal->id)->get();
+        if ($parts->isNotEmpty() && $parts->pluck('expense_payment_id')->sort()->values()->all() !== $live->pluck('id')->sort()->values()->all()) {
+            throw new RuntimeException('The refund was requested for payments that are no longer the live payments of this expense. Reject the reversal and request it again.');
+        }
     }
 
     /** Called when the Board decides any expense: a verified full reversal retires the original. */
