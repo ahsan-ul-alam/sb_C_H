@@ -54,14 +54,18 @@
                     </div>
                     @php($financialAccounts = \App\Models\FinancialAccount::where('is_active', true)->orderBy('name')->get())
                     @if ($financialAccounts->isNotEmpty())
+                        {{-- A new payment must say which account the money went into: the default account is never assumed. An old payment that
+                             was recorded without an account may be edited without one (its booking is kept as it is). --}}
+                        @php($accountRequired = ! $payment->exists || $payment->financial_account_id !== null)
                         <div class="field">
-                            <label for="financial_account_id">Received into</label>
-                            <select id="financial_account_id" name="financial_account_id">
-                                <option value="">Default account</option>
+                            <label for="financial_account_id">Received into @if ($accountRequired)<span class="req" aria-hidden="true">*</span>@endif</label>
+                            <select id="financial_account_id" name="financial_account_id" @required($accountRequired) @error('financial_account_id') aria-invalid="true" aria-describedby="financial_account_id_error" @enderror>
+                                <option value="">{{ $accountRequired ? 'Choose the account…' : 'Not recorded (as before)' }}</option>
                                 @foreach ($financialAccounts as $account)
                                     <option value="{{ $account->id }}" @selected((int) old('financial_account_id', $payment->financial_account_id) === $account->id)>{{ $account->name }}</option>
                                 @endforeach
                             </select>
+                            @error('financial_account_id') <span class="error" id="financial_account_id_error">{{ $message }}</span> @enderror
                         </div>
                     @endif
                     <div class="field">

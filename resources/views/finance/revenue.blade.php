@@ -4,6 +4,10 @@
         <x-slot:meta>A payment counts as earned revenue unless it is marked as an advance. Advances are liabilities until recognised. Refunds reduce revenue in the month they are made. Voiding a payment = deleting it in ClientHub, only while its month is open.</x-slot:meta>
     </x-page-header>
 
+    @error('financial_account_id')
+        <div class="alert alert-danger" role="alert">{{ $message }}</div>
+    @enderror
+
     <section class="panel">
         <div class="table-wrap"><table class="table table-min-760">
             <thead><tr><th>Paid</th><th>Client / Project</th><th class="num">Amount</th><th class="num">Unearned advance</th><th class="num">Refundable revenue</th>@can('revenue.record')<th>Action</th>@endcan</tr></thead>
@@ -18,7 +22,7 @@
                             <select name="kind"><option value="advance">Mark as advance</option><option value="recognition">Recognise advance</option><option value="refund">Refund</option></select>
                             <select name="against"><option value="revenue">refund of revenue</option><option value="advance">refund of advance</option></select>
                             <input name="amount" size="8" placeholder="amount" inputmode="decimal"><input type="date" name="effective_on" title="Date (not for advances)">
-                            <input name="reason" placeholder="reason" size="12">@php($refundAccounts = \App\Models\FinancialAccount::where('is_active', true)->orderBy('name')->get())@if ($refundAccounts->isNotEmpty())<select name="financial_account_id" title="Account a refund is paid from"><option value="">Refund from: default account</option>@foreach ($refundAccounts as $ra)<option value="{{ $ra->id }}">Refund from: {{ $ra->name }}</option>@endforeach</select>@endif<button class="btn btn-sm">Record</button>
+                            <input name="reason" placeholder="reason" size="12">@php($refundAccounts = \App\Models\FinancialAccount::where('is_active', true)->orderBy('name')->get())@if ($refundAccounts->isNotEmpty())<select name="financial_account_id" data-refund-account title="Account a refund is paid from (required for a refund)"><option value="">Refund paid from…</option>@foreach ($refundAccounts as $ra)<option value="{{ $ra->id }}" @selected((int) old('financial_account_id') === $ra->id)>{{ $ra->name }}</option>@endforeach</select>@endif<button class="btn btn-sm">Record</button>
                         </form>
                     </td>
                     @endcan
@@ -29,6 +33,17 @@
             </tbody>
         </table></div>
     </section>
+
+    {{-- A refund pays money out of a named account, so the account is required for a refund only (not for an advance or a recognition). --}}
+    <script>
+        document.querySelectorAll('form select[name="kind"]').forEach(function (kind) {
+            var account = kind.form.querySelector('select[data-refund-account]');
+            if (!account) { return; }
+            var sync = function () { account.required = kind.value === 'refund'; };
+            kind.addEventListener('change', sync);
+            sync();
+        });
+    </script>
 
     <section class="panel">
         <div class="panel-head"><h2>Adjustments</h2></div>
