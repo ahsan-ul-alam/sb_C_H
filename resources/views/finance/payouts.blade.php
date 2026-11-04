@@ -31,7 +31,9 @@
                             @endcan
                         @elseif ($p->status === 'approved')
                             @can('payout.pay')
-                                <form method="POST" action="{{ route('finance.payouts.pay', $p) }}" data-confirm="Pay this out and post to the ledger?">@csrf<button class="btn btn-sm btn-primary">Mark paid</button></form>
+                                <form method="POST" action="{{ route('finance.payouts.pay', $p) }}" data-confirm="Pay this out and post to the ledger?" class="inline-form">@csrf
+                                    @if ($accounts->isNotEmpty())<select name="financial_account_id" required aria-label="Paid from"><option value="">Paid from…</option>@foreach ($accounts as $a)<option value="{{ $a->id }}">{{ $a->name }}</option>@endforeach</select>@endif
+                                    <button class="btn btn-sm btn-primary">Mark paid</button></form>
                             @endcan
                         @endif
                     </td></tr>

@@ -2,14 +2,17 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\FinancialAccount;
 use App\Models\Partner;
 use App\Models\Payout;
 use App\Services\Audit;
 use App\Services\Ledger;
+use App\Services\PayoutService;
 use App\Support\Money;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 use Illuminate\View\View;
 use RuntimeException;
 
@@ -32,6 +35,7 @@ class PayoutController extends Controller
             'payouts' => $query->get(),
             'partners' => $scoped ? Partner::where('id', $user->partner_id ?? 0)->get() : Partner::orderBy('sort')->get(),
             'available' => Partner::all()->mapWithKeys(fn ($p) => [$p->id => $this->available($p->id)]),
+            'accounts' => FinancialAccount::where('is_active', true)->orderByDesc('is_default')->orderBy('name')->get(),
         ]);
     }
 
@@ -73,29 +77,10 @@ class PayoutController extends Controller
 
     public function pay(Request $request, Payout $payout): RedirectResponse
     {
-        return $this->attempt(function () use ($request, $payout) {
-            DB::transaction(function () use ($request, $payout) {
-                $payout = Payout::lockForUpdate()->findOrFail($payout->id);
-                $user = $request->user();
-                if ($payout->status !== 'approved') {
-                    throw new RuntimeException('Only an approved payout can be paid.');
-                }
-                if ($user->partner_id && $user->partner_id === $payout->partner_id) {
-                    throw new RuntimeException('You cannot pay out to yourself.');
-                }
-                if (Ledger::creditBalance('partner.payable', $payout->partner_id) < $payout->amount) {
-                    throw new RuntimeException('Partner entitlement is lower than the payout amount.');
-                }
-                if (Ledger::debitBalance('cash') < $payout->amount) {
-                    throw new RuntimeException('Not enough cash recorded in the ledger.');
-                }
-                $entry = Ledger::post(today()->toDateString(), 'Partner payout', 'payout', $payout->id, [
-                    ['partner.payable', $payout->partner_id, $payout->amount, 0],
-                    ['cash', null, 0, $payout->amount],
-                ], $user->id);
-                $payout->update(['status' => 'paid', 'paid_by' => $user->id, 'paid_at' => now()]);
-                Audit::log('payout.paid', 'payout '.$payout->id, 'journal '.$entry->id);
-            });
+        $data = $request->validate(['financial_account_id' => ['nullable', Rule::exists('financial_accounts', 'id')->where('is_active', true)]]);
+
+        return $this->attempt(function () use ($request, $payout, $data) {
+            PayoutService::pay($payout, $request->user(), isset($data['financial_account_id']) ? (int) $data['financial_account_id'] : null);
         }, 'Payout paid and posted.');
     }
 

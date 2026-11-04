@@ -4,8 +4,10 @@ namespace App\Http\Controllers;
 
 use App\Models\Document;
 use App\Models\ExitSettlement;
+use App\Models\FinancialAccount;
 use App\Models\Partner;
 use App\Models\Resolution;
+use App\Services\AccountingService;
 use App\Services\Audit;
 use App\Services\InvestmentService;
 use App\Services\Ledger;
@@ -15,6 +17,7 @@ use Carbon\CarbonImmutable;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 use Illuminate\View\View;
 use RuntimeException;
 
@@ -35,6 +38,7 @@ class ExitController extends Controller
             'exits' => ExitSettlement::with('partner')->latest('id')->get(),
             'documents' => Document::where('subject_type', 'exit')->get()->groupBy('subject_id'),
             'partners' => Partner::where('status', 'active')->orderBy('sort')->get(),
+            'accounts' => FinancialAccount::where('is_active', true)->orderByDesc('is_default')->orderBy('name')->get(),
         ]);
     }
 
@@ -127,7 +131,10 @@ class ExitController extends Controller
      */
     public function pay(Request $request, ExitSettlement $exit): RedirectResponse
     {
-        $data = $request->validate(['paid_on' => ['required', 'date'], 'payment_reference' => ['required', 'string', 'max:200']]);
+        $data = $request->validate([
+            'paid_on' => ['required', 'date'], 'payment_reference' => ['required', 'string', 'max:200'],
+            'financial_account_id' => ['nullable', Rule::exists('financial_accounts', 'id')->where('is_active', true)],
+        ]);
 
         return $this->attempt(function () use ($request, $exit, $data) {
             DB::transaction(function () use ($request, $exit, $data) {
@@ -143,10 +150,18 @@ class ExitController extends Controller
                 if ($documents->isEmpty() || $documents->contains(fn ($d) => $d->review_status !== 'approved')) {
                     throw new RuntimeException('Every supporting document must be approved by the Board before payment.');
                 }
+                // The payment date is typed in, so it is the one place a settlement could be back-dated into a closed month.
+                AccountingService::assertOpen($data['paid_on'], 'this exit settlement');
+                $accountId = AccountingService::requirePayingAccount(isset($data['financial_account_id']) ? (int) $data['financial_account_id'] : null);
+                Partner::whereKey($exit->partner_id)->lockForUpdate()->first();
                 $salaryDue = $this->salaryDue($exit->partner_id);
-                $payable = Ledger::creditBalance('partner.payable', $exit->partner_id);
+                $payable = Ledger::creditBalance('partner.payable', $exit->partner_id, lock: true);
                 if ($payable + $salaryDue !== (int) $exit->unpaid_entitlements) {
                     throw new RuntimeException('Partner entitlements changed after the settlement was approved; it needs a new calculation.');
+                }
+                if ($exit->net_settlement > 0) {
+                    // The chosen account must hold the money itself, not just the company as a whole; this also locks the account row.
+                    AccountingService::assertCanSpend($accountId, (int) $exit->net_settlement);
                 }
                 if ($exit->net_settlement > 0 && Ledger::debitBalance('cash') < $exit->net_settlement) {
                     throw new RuntimeException('Not enough cash recorded in the ledger.');
@@ -168,14 +183,14 @@ class ExitController extends Controller
 
                 $lines = [];
                 foreach ($signed as [$account, $partnerId, $amount]) {
-                    $lines[] = [$account, $partnerId, max($amount, 0), max(-$amount, 0)];
+                    $lines[] = $account === 'cash' ? [$account, $partnerId, max($amount, 0), max(-$amount, 0), $accountId] : [$account, $partnerId, max($amount, 0), max(-$amount, 0)];
                 }
                 $entry = Ledger::post($data['paid_on'], 'Exit settlement partner '.$exit->partner_id, 'exit', $exit->id, $lines, $user->id);
 
                 Resolution::where('partner_id', $exit->partner_id)->where('type', 'partner_salary')->where('status', 'approved')
                     ->update(['status' => 'paid', 'paid_by' => $user->id, 'paid_at' => now()]);
                 $exit->update(['payment_status' => 'paid', 'paid_on' => $data['paid_on'], 'payment_reference' => $data['payment_reference'],
-                    'paid_by' => $user->id, 'journal_entry_id' => $entry->id]);
+                    'paid_by' => $user->id, 'journal_entry_id' => $entry->id, 'financial_account_id' => $accountId]);
                 Audit::log('exit.paid', 'exit '.$exit->id, $data['payment_reference']);
             });
         }, 'Settlement payment recorded.');

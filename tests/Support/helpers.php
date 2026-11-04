@@ -6,6 +6,47 @@ use App\Models\PolicyVersion;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 
+if (! function_exists('disposableDatabaseProblem')) {
+    /**
+     * Why the configured database must NOT be wiped or rebuilt by a test, or null when it is a disposable test database. Destructive test
+     * commands (migrate:fresh, truncating every table) run only when ALL of these hold: the app is in the testing environment, the
+     * connection is MySQL/MariaDB on the loopback interface, the port is not the application's own server (3306), and the database name
+     * ends in "_test" (the approved name is sellbees_p1_test). Nothing here reads or trusts the application's .env database.
+     */
+    function disposableDatabaseProblem(): ?string
+    {
+        $default = config('database.default');
+        $db = config('database.connections.'.$default);
+        if (! app()->environment('testing')) {
+            return 'APP_ENV is not "testing"';
+        }
+        if ($default !== 'mysql') {
+            return 'the connection is "'.$default.'", not a local MySQL/MariaDB test server';
+        }
+        if (! in_array($db['host'] ?? '', ['127.0.0.1', 'localhost'], true)) {
+            return 'the database host "'.($db['host'] ?? '').'" is not the loopback interface';
+        }
+        if ((string) ($db['port'] ?? '3306') === '3306') {
+            return 'port 3306 is the application\'s own database server; use the disposable instance on another port';
+        }
+        if (! str_ends_with((string) ($db['database'] ?? ''), '_test')) {
+            return 'the database "'.($db['database'] ?? '').'" does not end in "_test" (approved name: sellbees_p1_test)';
+        }
+
+        return null;
+    }
+}
+
+if (! function_exists('assertDisposableDatabase')) {
+    /** Stop the calling test run before any destructive command when the database is not positively a disposable test database. */
+    function assertDisposableDatabase(): void
+    {
+        if ($problem = disposableDatabaseProblem()) {
+            throw new RuntimeException('Refusing to run destructive test commands: '.$problem.'.');
+        }
+    }
+}
+
 if (! function_exists('financeUser')) {
     /** A user holding one role, created once per test database. */
     function financeUser(string $role): User

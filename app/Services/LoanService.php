@@ -79,6 +79,7 @@ class LoanService
         $accountId = AccountingService::activeAccountId($entry->financial_account_id);
         $amount = (int) $entry->amount;
         $date = $entry->entry_date->toDateString();
+        AccountingService::assertOpen($date, 'this loan entry');
 
         if ($entry->kind === 'receipt') {
             Ledger::post($date, 'Loan received: '.$loan->lender, 'loan_entry', $entry->id, [
@@ -115,7 +116,7 @@ class LoanService
                 }
                 AccountingService::assertCanSpend($original->lines()->where('account', 'cash')->value('financial_account_id'), (int) $entry->amount);
             }
-            Ledger::reverse($original, $original->entry_date->toDateString(), 'Reversal of loan entry #'.$entry->id.': '.$reason, 'loan_entry_rev', $entry->id, $user->id);
+            Ledger::reverse($original, AccountingService::reversalDate($original->entry_date->toDateString()), 'Reversal of loan entry #'.$entry->id.': '.$reason, 'loan_entry_rev', $entry->id, $user->id);
             $entry->update(['status' => 'reversed']);
             Audit::log('loan.reversed', 'loan entry '.$entry->id, $reason);
         });

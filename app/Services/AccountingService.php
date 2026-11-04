@@ -55,6 +55,46 @@ class AccountingService
     }
 
     /**
+     * The account a partner payout or exit settlement is paid from. Once any financial account exists the payer must name one (never the
+     * default by accident, never an inactive one); only a company that has no accounts yet pays from the legacy unassigned cash.
+     */
+    public static function requirePayingAccount(?int $accountId): ?int
+    {
+        if (! FinancialAccount::query()->exists()) {
+            return null;
+        }
+        if ($accountId === null) {
+            throw new RuntimeException('Choose the financial account this is paid from.');
+        }
+        self::assertActive($accountId);
+
+        return $accountId;
+    }
+
+    /** A new posting may not be dated into a month that has been closed and frozen. */
+    public static function assertOpen(string $date, string $what = 'This entry'): void
+    {
+        if (self::isClosed($date)) {
+            throw new RuntimeException('The month of '.substr($date, 0, 7).' is already closed; '.$what.' cannot be dated in it. Use a date in an open month.');
+        }
+    }
+
+    /**
+     * The date a reversing entry is posted: the original date while its month is open, otherwise today, so that undoing something from a
+     * closed month never rewrites that month. (Today itself must be open.)
+     */
+    public static function reversalDate(string $originalDate): string
+    {
+        if (! self::isClosed($originalDate)) {
+            return $originalDate;
+        }
+        $today = today()->toDateString();
+        self::assertOpen($today, 'the reversal');
+
+        return $today;
+    }
+
+    /**
      * Balance of one account, or of the unassigned legacy cash when null. With $lock the read is a locking read, which always
      * sees the latest committed data (a plain read inside a MySQL transaction can see an older snapshot).
      */
@@ -146,6 +186,7 @@ class AccountingService
                         throw new RuntimeException('That account is not active.');
                     }
                 }
+                self::assertOpen($data['date'], 'a transfer');
                 self::assertCanSpend($from, $amount);
                 if ($from === null) {
                     FinancialAccount::lockForUpdate()->get(['id']); // legacy cash has no row of its own: lock them all
@@ -181,7 +222,7 @@ class AccountingService
             }
             self::assertCanSpend($transfer->to_account_id, $transfer->amount);
             $original = JournalEntry::where('source_type', 'transfer')->where('source_id', $transfer->id)->firstOrFail();
-            Ledger::reverse($original, $original->entry_date->toDateString(), 'Void of transfer #'.$transfer->id, 'transfer_reversal', $transfer->id, $user->id);
+            Ledger::reverse($original, self::reversalDate($original->entry_date->toDateString()), 'Void of transfer #'.$transfer->id, 'transfer_reversal', $transfer->id, $user->id);
             $transfer->update(['voided_at' => now(), 'voided_by' => $user->id]);
             Audit::log('account.transfer_voided', 'transfer '.$transfer->id);
         });

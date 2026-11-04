@@ -44,6 +44,7 @@ class InvestmentService
     {
         $accountId = AccountingService::activeAccountId($entry->financial_account_id);
         $amount = (int) $entry->amount;
+        AccountingService::assertOpen($entry->paid_on->toDateString(), 'this capital entry');
 
         if ($entry->kind === 'withdrawal') {
             // Serialise withdrawals of the same partner and read their capital with a locking read.
@@ -83,12 +84,15 @@ class InvestmentService
             }
             $original = JournalEntry::where('source_type', 'capital')->where('source_id', $entry->id)->firstOrFail();
             if ($entry->kind === 'contribution') {
-                if ($entry->amount > self::capitalBalance($entry->partner_id)) {
+                // The same lock a withdrawal takes (partner row first, then the account), so a reversal and a withdrawal of the same partner
+                // are serialised and cannot both be allowed against the one capital balance.
+                Partner::whereKey($entry->partner_id)->lockForUpdate()->first();
+                if ($entry->amount > self::capitalBalance($entry->partner_id, lock: true)) {
                     throw new RuntimeException('The partner no longer holds this much capital (losses or withdrawals were charged since).');
                 }
                 AccountingService::assertCanSpend($original->lines()->where('account', 'cash')->value('financial_account_id'), (int) $entry->amount);
             }
-            Ledger::reverse($original, $original->entry_date->toDateString(), 'Reversal of capital entry #'.$entry->id.': '.$reason, 'capital_reversal', $entry->id, $user->id);
+            Ledger::reverse($original, AccountingService::reversalDate($original->entry_date->toDateString()), 'Reversal of capital entry #'.$entry->id.': '.$reason, 'capital_reversal', $entry->id, $user->id);
             $entry->update(['status' => 'reversed']);
             Audit::log('capital.reversed', 'capital '.$entry->id, $reason);
         });

@@ -14,6 +14,7 @@ use App\Support\Money;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 use Illuminate\View\View;
 use RuntimeException;
 
@@ -45,7 +46,7 @@ class CapitalController extends Controller
             'amount' => ['required', 'regex:'.Money::AMOUNT_REGEX],
             'paid_on' => ['required', 'date'],
             'reference' => ['nullable', 'string', 'max:200'],
-            'financial_account_id' => ['nullable', 'exists:financial_accounts,id'],
+            'financial_account_id' => ['nullable', Rule::exists('financial_accounts', 'id')->where('is_active', true)],
             'method' => ['nullable', 'string', 'max:24'],
             'notes' => ['nullable', 'string', 'max:255'],
         ]);

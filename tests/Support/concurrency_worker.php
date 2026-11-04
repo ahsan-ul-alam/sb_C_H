@@ -1,9 +1,11 @@
 <?php
 
+use App\Models\CapitalEntry;
 use App\Models\Expense;
 use App\Models\LoanReceivable;
 use App\Models\LoanReceivableRepayment;
 use App\Models\Payment;
+use App\Models\Payout;
 use App\Models\Project;
 use App\Models\SourcingLot;
 use App\Models\User;
@@ -11,10 +13,13 @@ use App\Services\AccountingService;
 use App\Services\AdvanceSettlementService;
 use App\Services\CostRecognitionService;
 use App\Services\ExpenseService;
+use App\Services\InvestmentService;
 use App\Services\LoanReceivableService;
 use App\Services\PaymentRecorder;
+use App\Services\PayoutService;
 use App\Services\SourcingPayments;
 use Illuminate\Contracts\Console\Kernel;
+use Illuminate\Support\Facades\DB;
 
 /*
  | Test-only worker for ConcurrencyMysqlTest: performs ONE financial operation in its own PHP process so that several run at
@@ -26,9 +31,9 @@ require dirname(__DIR__, 2).'/vendor/autoload.php';
 $app = require dirname(__DIR__, 2).'/bootstrap/app.php';
 $app->make(Kernel::class)->bootstrap();
 
-$db = config('database.connections.'.config('database.default'));
-if (config('database.default') !== 'mysql' || ! in_array($db['host'], ['127.0.0.1', 'localhost'], true) || ! str_ends_with((string) $db['database'], '_test')) {
-    echo json_encode(['ok' => false, 'error' => 'refusing to run outside a local *_test MySQL database']);
+require_once __DIR__.'/helpers.php';
+if ($problem = disposableDatabaseProblem()) {
+    echo json_encode(['ok' => false, 'error' => 'refusing to run outside a disposable test database: '.$problem]);
     exit(1);
 }
 
@@ -46,6 +51,29 @@ try {
         'loan_repay' => LoanReceivableService::recordRepayment(LoanReceivable::findOrFail($args['loan']), ['amount' => $args['amount'], 'repaid_on' => $args['date'], 'idempotency_key' => $args['key']], auth()->user()) !== null,
         'adv_pay' => SourcingPayments::recordSupplierPayment(SourcingLot::findOrFail($args['lot']), ['supplier_id' => $args['supplier'], 'amount' => $args['amount'], 'paid_on' => $args['date'], 'purchase_order' => 'PO-1',
             'reference' => 'PAY-1', 'evidence_reference' => 'INV-1', 'idempotency_key' => $args['key']], auth()->user()) !== null,
+        'pay_payout' => (function () use ($args) {
+            PayoutService::pay(Payout::findOrFail($args['payout']), auth()->user(), $args['account']);
+
+            return true;
+        })(),
+        'capital_reverse' => (function () use ($args) {
+            InvestmentService::reverse(CapitalEntry::findOrFail($args['entry']), 'race', auth()->user());
+
+            return true;
+        })(),
+        // The same steps as CapitalController::decide when the Board verifies a pending capital entry.
+        'capital_verify' => (function () use ($args) {
+            DB::transaction(function () use ($args) {
+                $capital = CapitalEntry::lockForUpdate()->findOrFail($args['entry']);
+                if ($capital->status !== 'pending') {
+                    throw new RuntimeException('Entry already decided.');
+                }
+                $capital->update(['status' => 'verified', 'verified_by' => auth()->id(), 'verified_at' => now()]);
+                InvestmentService::post($capital, auth()->id());
+            });
+
+            return true;
+        })(),
         'adv_propose' => AdvanceSettlementService::propose(SourcingLot::findOrFail($args['lot']), $args['supplier'], auth()->user())->isNotEmpty(),
         'cost_propose' => CostRecognitionService::propose(SourcingLot::findOrFail($args['lot']), $args['date'], auth()->user()) !== null,
         'loan_repay_verify' => (function () use ($args) {

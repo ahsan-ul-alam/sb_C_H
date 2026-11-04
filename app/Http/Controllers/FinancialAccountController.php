@@ -97,7 +97,12 @@ class FinancialAccountController extends Controller
             if (! $active && AccountingService::balance($account->id) !== 0) {
                 throw new RuntimeException('Only an account with a zero balance can be deactivated. Transfer its money out first.');
             }
-            $default = $request->boolean('is_default') && $active;
+            // The default account is where every cash posting without an explicit account goes. It is handed over by making ANOTHER account the
+            // default; an edit that merely leaves the box unticked, or deactivates it, must never clear it and send those postings to "unassigned".
+            if (! $active && $account->is_default) {
+                throw new RuntimeException('This is the default account. Make another account the default before deactivating it.');
+            }
+            $default = $active && ($request->boolean('is_default') || $account->is_default);
             if ($default) {
                 FinancialAccount::where('id', '!=', $account->id)->update(['is_default' => false]);
             }

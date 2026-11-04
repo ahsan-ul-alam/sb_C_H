@@ -107,7 +107,7 @@ class ExpenseService
                 throw new RuntimeException('A reversal of this expense is awaiting verification; the Board must decide it before a payment is voided.');
             }
             $original = JournalEntry::where('source_type', 'expense_payment')->where('source_id', $payment->id)->firstOrFail();
-            Ledger::reverse($original, $original->entry_date->toDateString(), 'Void of expense payment #'.$payment->id, 'expense_payment_rev', $payment->id, $user->id);
+            Ledger::reverse($original, AccountingService::reversalDate($original->entry_date->toDateString()), 'Void of expense payment #'.$payment->id, 'expense_payment_rev', $payment->id, $user->id);
             $payment->update(['voided_at' => now(), 'voided_by' => $user->id]);
             self::refreshPaid($expense);
             Audit::log('expense.payment_voided', 'expense '.$expense->id, (string) $payment->amount);

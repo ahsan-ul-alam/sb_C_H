@@ -2,6 +2,7 @@
 
 use App\Models\AccountTransfer;
 use App\Models\AdvanceSettlement;
+use App\Models\CapitalEntry;
 use App\Models\CostRecognition;
 use App\Models\Expense;
 use App\Models\ExpensePayment;
@@ -10,10 +11,12 @@ use App\Models\JournalEntry;
 use App\Models\LoanReceivable;
 use App\Models\LoanReceivableRepayment;
 use App\Models\Payment;
+use App\Models\Payout;
 use App\Models\Supplier;
 use App\Models\SupplierPayment;
 use App\Services\AccountingService;
 use App\Services\AdvanceSettlementService;
+use App\Services\InvestmentService;
 use App\Services\Ledger;
 use App\Services\LoanReceivableService;
 use App\Services\Sourcing;
@@ -38,6 +41,8 @@ beforeEach(function () {
     if (config('database.default') !== 'mysql') {
         $this->markTestSkipped('Needs a local MySQL test database (DB_CONNECTION=mysql, database name ending _test).');
     }
+    // This file rebuilds and empties the whole database. Never let that happen to anything but a disposable test database.
+    assertDisposableDatabase();
     // The worker processes need COMMITTED rows, so this file builds a fresh schema itself (a rollback-based trait cannot: older
     // down() methods cannot run on MySQL) and wipes it again afterwards.
     ccWipe(fresh: ! ($GLOBALS['cc_schema_ready'] ?? false));
@@ -60,6 +65,7 @@ afterEach(function () {
 /** Build the schema once (migrate:fresh is slow on MySQL), then just empty every table between tests. */
 function ccWipe(bool $fresh): void
 {
+    assertDisposableDatabase(); // checked again here, immediately before the destructive commands
     if ($fresh) {
         Artisan::call('migrate:fresh', ['--force' => true]);
 
@@ -80,13 +86,14 @@ function ccWipe(bool $fresh): void
  * @param  callable(int): array<string, mixed>  $argsFor
  * @return list<array<string, mixed>>
  */
-function ccRun(string $operation, int $count, callable $argsFor): array
+function ccRun(string|array $operation, int $count, callable $argsFor): array
 {
     $start = microtime(true) + 4.0;
     $procs = [];
     for ($i = 0; $i < $count; $i++) {
         $args = json_encode(['user' => test()->co->users['finance']->id, ...$argsFor($i), 'start' => $start]);
-        $cmd = [PHP_BINARY, __DIR__.'/../Support/concurrency_worker.php', $operation, $args];
+        // One operation for every worker, or a list with one operation per worker to race different operations against each other.
+        $cmd = [PHP_BINARY, __DIR__.'/../Support/concurrency_worker.php', is_array($operation) ? $operation[$i] : $operation, $args];
         $procs[$i] = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes[$i], null, [...getenv(), 'FINANCE_REALTIME_FROM' => '2026-11-01',
             'FINANCE_SOURCING_BASIS' => 'accrual', 'FINANCE_SOURCING_ACCRUAL_FROM' => '2026-11-01', 'FINANCE_SOURCING_RECOGNITION' => 'lot_completed']);
     }
@@ -134,6 +141,52 @@ it('never pays more than an expense owes when payments race', function () {
     expect(collect($results)->where('ok', true)->where('recorded', true)->count())->toBe(1)
         ->and(ExpensePayment::count())->toBe(1)->and($expense->refresh()->paid_amount)->toBe(6_000_00)
         ->and(AccountingService::totalCash())->toBe(94_000_00);
+});
+
+it('never lets two payouts spend the same account at once', function () {
+    $partner = $this->co->partner('A');
+    Ledger::post('2026-11-07', 'Entitlement', 'test', 1, [['profit.pool', null, 120_000_00, 0], ['partner.payable', $partner->id, 0, 120_000_00]], null);
+    $payouts = collect([1, 2])->map(fn () => Payout::create(['partner_id' => $partner->id, 'amount' => 60_000_00, 'requested_by' => $this->co->users['finance']->id, 'status' => 'approved', 'approved_by' => $this->co->users['board']->id]));
+
+    // The company has 100,000 in Office Cash; two payouts of 60,000 race for it. Exactly one can win, and the loser is told the account is short.
+    $results = ccRun('pay_payout', 2, fn (int $i) => ['payout' => $payouts[$i]->id, 'account' => $this->cash->id]);
+
+    expect(collect($results)->where('ok', true)->count())->toBe(1)
+        ->and(collect($results)->where('ok', false)->every(fn ($r) => str_contains($r['error'], 'Insufficient balance')))->toBeTrue()
+        ->and(Payout::where('status', 'paid')->count())->toBe(1)->and(JournalEntry::where('source_type', 'payout')->count())->toBe(1)
+        ->and(AccountingService::balance($this->cash->id))->toBe(40_000_00)->and(dr('partner.payable', $partner->id))->toBe(-60_000_00)
+        ->and(ledgerAudit()['unbalanced'])->toBe(0)->and(ledgerAudit()['duplicates'])->toBe(0);
+});
+
+it('never pays a partner more than the entitlement when payouts race from different accounts', function () {
+    $partner = $this->co->partner('A');
+    AccountingService::transfer(['from' => $this->cash->id, 'to' => $this->bank->id, 'amount' => 50_000_00, 'date' => '2026-11-07', 'idempotency_key' => (string) Str::uuid()], $this->co->users['finance']);
+    Ledger::post('2026-11-07', 'Entitlement', 'test', 1, [['profit.pool', null, 60_000_00, 0], ['partner.payable', $partner->id, 0, 60_000_00]], null);
+    $payouts = collect([1, 2])->map(fn () => Payout::create(['partner_id' => $partner->id, 'amount' => 40_000_00, 'requested_by' => $this->co->users['finance']->id, 'status' => 'approved', 'approved_by' => $this->co->users['board']->id]));
+
+    // Each account can cover its own payout, but the partner is owed only 60,000: the second payout of 40,000 must be refused whichever account it uses.
+    $results = ccRun('pay_payout', 2, fn (int $i) => ['payout' => $payouts[$i]->id, 'account' => [$this->cash->id, $this->bank->id][$i]]);
+
+    expect(collect($results)->where('ok', true)->count())->toBe(1)
+        ->and(collect($results)->where('ok', false)->every(fn ($r) => str_contains($r['error'], 'entitlement is lower')))->toBeTrue()
+        ->and(dr('partner.payable', $partner->id))->toBe(-20_000_00)->and(AccountingService::totalCash())->toBe(60_000_00)
+        ->and(ledgerAudit()['unbalanced'])->toBe(0);
+});
+
+it('never lets a capital reversal and a withdrawal both rely on the same capital', function () {
+    $partner = $this->co->partner('A');
+    $contribution = CapitalEntry::where('partner_id', $partner->id)->where('kind', 'contribution')->firstOrFail(); // 100,000 of capital, verified
+    $withdrawal = CapitalEntry::create(['partner_id' => $partner->id, 'kind' => 'withdrawal', 'amount' => 60_000_00, 'paid_on' => '2026-11-08', 'reference' => 'WD-RACE',
+        'financial_account_id' => $this->cash->id, 'created_by' => $this->co->users['finance']->id, 'status' => 'pending']);
+    $board = $this->co->users['board']->id;
+
+    // Verifying a withdrawal of 60,000 and reversing the whole 100,000 contribution at the same moment: both cannot be true.
+    $results = ccRun(['capital_verify', 'capital_reverse'], 2, fn (int $i) => ['user' => $board, 'entry' => [$withdrawal->id, $contribution->id][$i]]);
+
+    expect(collect($results)->where('ok', true)->count())->toBe(1)
+        ->and(InvestmentService::capitalBalance($partner->id))->toBeIn([40_000_00, 0])
+        ->and(AccountingService::balance($this->cash->id))->toBeGreaterThanOrEqual(0)
+        ->and(ledgerAudit()['unbalanced'])->toBe(0)->and(ledgerAudit()['duplicates'])->toBe(0);
 });
 
 /** A verified loan of 8,000 lent on 2026-10-26 (the "Loan for Ahsan" correction), committed so the worker processes see it. */

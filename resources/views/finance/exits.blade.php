@@ -76,6 +76,7 @@
                     @can('exit.pay')
                         <form method="POST" action="{{ route('finance.exits.pay', $e) }}" style="display:flex; gap:.5rem; flex-wrap:wrap" data-confirm="Confirm the transfer has actually been made?">@csrf
                             <input type="date" name="paid_on" required><input name="payment_reference" placeholder="Bank/transfer reference" required>
+                            @if ($accounts->isNotEmpty())<select name="financial_account_id" required aria-label="Paid from"><option value="">Paid from…</option>@foreach ($accounts as $a)<option value="{{ $a->id }}">{{ $a->name }}</option>@endforeach</select>@endif
                             <button class="btn btn-sm btn-primary">Record payment made</button>
                         </form>
                     @endcan

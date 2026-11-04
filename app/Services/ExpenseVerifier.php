@@ -91,6 +91,8 @@ class ExpenseVerifier
 
     public static function post(Expense $e, ?int $userId): void
     {
+        // Recorded in an open month is not enough: by the time the Board verifies it, that month may have been closed.
+        AccountingService::assertOpen($e->spent_on->toDateString(), 'this expense');
         if ($e->reverses_id) {
             // What was true when the reversal was requested may not be now (a payment voided, a prepaid release made): decide on the facts
             // as they are at the moment of posting. Money coming back may only land in an active account; a credit note or the cancellation
