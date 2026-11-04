@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Payment;
 use App\Models\RevenueAdjustment;
+use App\Models\RevenueEvent;
 use Carbon\CarbonImmutable;
 
 /**
@@ -32,6 +33,26 @@ class RevenueRecognition
      * @return array{collected: int, advances: int, recognised: int, refund_revenue: int, refund_advance: int, income: int, pending: int}
      */
     public static function between(CarbonImmutable $start, CarbonImmutable $end): array
+    {
+        $cutover = AccrualRevenue::cutover();
+        if ($cutover !== null && $end->toDateString() >= $cutover) {
+            // From the cutover income is EARNED revenue, read from the events; before it the cash-basis figures stand. A range across the cutover is the sum of the two, each on its own basis.
+            $accrualStart = $start->toDateString() >= $cutover ? $start : CarbonImmutable::parse($cutover);
+            $legacy = $start->toDateString() < $cutover ? self::legacyBetween($start, CarbonImmutable::parse($cutover)->subDay()) : null;
+            $earned = (int) RevenueEvent::where('status', 'approved')->whereDate('effective_on', '>=', $accrualStart)->whereDate('effective_on', '<=', $end)->sum('revenue_delta');
+            $collected = (int) Payment::query()->whereHas('project', fn ($q) => $q->where('currency', config('finance.currency')))->whereDate('paid_on', '>=', $accrualStart)->whereDate('paid_on', '<=', $end)->sum('amount');
+            $pending = (int) RevenueEvent::where('status', 'pending')->whereDate('effective_on', '>=', $accrualStart)->whereDate('effective_on', '<=', $end)->count();
+            $base = $legacy ?? ['collected' => 0, 'advances' => 0, 'recognised' => 0, 'refund_revenue' => 0, 'refund_advance' => 0, 'income' => 0, 'pending' => 0];
+
+            return ['collected' => $base['collected'] + $collected, 'advances' => $base['advances'], 'recognised' => $base['recognised'] + $earned, 'refund_revenue' => $base['refund_revenue'], 'refund_advance' => $base['refund_advance'],
+                'income' => $base['income'] + $earned, 'pending' => $base['pending'] + $pending];
+        }
+
+        return self::legacyBetween($start, $end);
+    }
+
+    /** The cash-basis figures: a payment is revenue unless marked as an advance. Unchanged; used before the accrual cutover. */
+    private static function legacyBetween(CarbonImmutable $start, CarbonImmutable $end): array
     {
         $collected = (int) Payment::query()
             ->whereHas('project', fn ($q) => $q->where('currency', config('finance.currency')))

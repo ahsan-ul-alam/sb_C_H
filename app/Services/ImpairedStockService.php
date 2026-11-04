@@ -131,7 +131,7 @@ class ImpairedStockService
             AccountingService::assertOpen($date, 'this inventory event');
             $event->update(['posted_on' => $date]);
             $suffix = $closed ? ' (event dated '.$event->event_on->toDateString().' in a closed period; recorded in the open period, flagged for review)' : '';
-            $lossAccount = $case->classification === 'abnormal' ? 'inventory_loss' : 'cogs';
+            $lossAccount = InventoryLossService::lossAccount($case);
             $lossDelta = 0;
 
             if ($event->action === 'release') {

@@ -138,8 +138,8 @@ class InventoryLossService
                     if (! in_array($outcome, self::OUTCOMES, true)) {
                         throw new RuntimeException('State the outcome: repairable, impaired (recoverable at a lower value) or write-off.');
                     }
-                    if (! in_array($classification, ['normal', 'abnormal'], true)) {
-                        throw new RuntimeException('Classify the loss by its cause as normal or abnormal.');
+                    if (! in_array($classification, ['normal', 'normal_operational', 'abnormal'], true)) {
+                        throw new RuntimeException('Classify the loss by its cause as normal or abnormal (a normal loss is fulfilment-related, or other normal operational).');
                     }
                     if (($data['recoverable_value'] ?? null) !== null && ($data['recoverable_value'] ?? '') !== '') {
                         $recoverable = self::validRecoverable($outcome, (int) $data['recoverable_value'], (string) ($data['valuation_basis'] ?? ''));
@@ -319,7 +319,7 @@ class InventoryLossService
         [$date, $closed] = self::postingDate($case);
         $case->update(['posted_on' => $date]);
 
-        $lossAccount = $case->classification === 'abnormal' ? 'inventory_loss' : 'cogs';
+        $lossAccount = self::lossAccount($case);
         $lines = [];
         if ($recoverable > 0) {
             $lines[] = ['assets.inventory_impaired', null, $recoverable, 0];
@@ -333,7 +333,29 @@ class InventoryLossService
         self::moveUnits($case, $line, $user);
 
         return ['posted_on' => $date, 'prior_period' => $closed, 'journal_entry_id' => $entryId, 'carrying_value' => $carrying, 'loss_value' => $loss, 'cogs_reversed' => 0,
-            'treatment' => $case->outcome === 'write_off' ? ($case->classification === 'abnormal' ? 'inventory_loss_expense' : 'retained_in_cogs') : 'impaired_inventory'];
+            'treatment' => $case->outcome === 'write_off' ? self::writeOffTreatment($case) : 'impaired_inventory'];
+    }
+
+    /**
+     * Where a loss goes, by its cause. Abnormal damage, theft, negligence or unexplained loss: inventory_loss. A normal loss of fulfilment or handling: part of the cost of goods
+     * sold. Any other normal operational loss: its own operating expense. Never every normal loss to cost of goods sold.
+     */
+    public static function lossAccount(InventoryLossCase $case): string
+    {
+        return match ($case->classification) {
+            'abnormal' => 'inventory_loss',
+            'normal_operational' => 'operating_inventory_loss',
+            default => 'cogs',
+        };
+    }
+
+    private static function writeOffTreatment(InventoryLossCase $case): string
+    {
+        return match ($case->classification) {
+            'abnormal' => 'inventory_loss_expense',
+            'normal_operational' => 'operating_loss_expense',
+            default => 'retained_in_cogs',
+        };
     }
 
     /** @return array<string, mixed> */
@@ -363,14 +385,14 @@ class InventoryLossService
 
         // A valid sale reversal: the cost of goods sold of these units is reversed, the goods come back at their recoverable value, and the loss is recognised on its own.
         // A normal loss stays in cost of goods sold, so only what is recoverable is reversed.
-        $abnormal = $case->classification === 'abnormal';
+        $abnormal = $case->classification !== 'normal'; // a loss booked apart from cost of goods sold: the cost is reversed in full and the loss recognised on its own
         $reversed = $abnormal ? $carrying : $recoverable;
         $lines = [];
         if ($recoverable > 0) {
             $lines[] = ['assets.inventory_impaired', null, $recoverable, 0];
         }
         if ($abnormal && $loss > 0) {
-            $lines[] = ['inventory_loss', null, $loss, 0];
+            $lines[] = [self::lossAccount($case), null, $loss, 0];
         }
         if ($reversed > 0) {
             $lines[] = ['cogs', null, 0, $reversed];
@@ -379,7 +401,7 @@ class InventoryLossService
         self::moveUnits($case, $line, $user);
 
         return ['posted_on' => $date, 'prior_period' => $closed, 'journal_entry_id' => $entryId, 'carrying_value' => $carrying, 'loss_value' => $loss, 'cogs_reversed' => $reversed,
-            'treatment' => $case->outcome === 'write_off' ? ($abnormal ? 'inventory_loss_expense' : 'retained_in_cogs') : 'impaired_inventory'];
+            'treatment' => $case->outcome === 'write_off' ? self::writeOffTreatment($case) : 'impaired_inventory'];
     }
 
     /** @return array<string, mixed> */

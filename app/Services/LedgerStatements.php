@@ -31,7 +31,7 @@ use Illuminate\Support\Collection;
 class LedgerStatements
 {
     /** Accounts whose debit balance is a result of inventory events; none is read by the profit that partner allocation uses. */
-    public const INVENTORY_RESULT_ACCOUNTS = ['cogs' => 'Cost of goods sold (handed over to clients)', 'inventory_loss' => 'Inventory loss expense (abnormal losses)', 'inventory_writedown' => 'Inventory write-downs to net realisable value',
+    public const INVENTORY_RESULT_ACCOUNTS = ['cogs' => 'Cost of goods sold (handed over to clients)', 'inventory_loss' => 'Inventory loss expense (abnormal losses)', 'operating_inventory_loss' => 'Other normal operational inventory loss', 'inventory_writedown' => 'Inventory write-downs to net realisable value',
         'supplier_return_difference' => 'Cost of returned goods not recovered from suppliers'];
 
     /**
@@ -61,7 +61,7 @@ class LedgerStatements
      */
     public static function operationalProfit(string $from, string $to): array
     {
-        $income = -self::net('income', $from, $to);
+        $income = -self::net('income', $from, $to) - self::net('income.returns', $from, $to); // net of credit notes and returns
         $other = -self::net('income.other', $from, $to);
         $expense = self::net('expense', $from, $to);
         $inventory = [];
@@ -158,7 +158,7 @@ class LedgerStatements
         $asOf ??= today()->toDateString();
         $buckets = ['not_due' => 0, 'd1_30' => 0, 'd31_60' => 0, 'd61_90' => 0, 'over_90' => 0];
         $rows = [];
-        foreach (Invoice::query()->with('client')->get() as $invoice) {
+        foreach (Invoice::query()->with('project.client')->get() as $invoice) {
             $open = (int) $invoice->total - (int) $invoice->amount_paid;
             if ($open <= 0) {
                 continue;
@@ -167,7 +167,7 @@ class LedgerStatements
             $late = (int) Carbon::parse($due)->diffInDays($asOf, false);
             $bucket = $late <= 0 ? 'not_due' : ($late <= 30 ? 'd1_30' : ($late <= 60 ? 'd31_60' : ($late <= 90 ? 'd61_90' : 'over_90')));
             $buckets[$bucket] += $open;
-            $rows[] = ['invoice' => $invoice->number, 'invoice_id' => $invoice->id, 'client' => $invoice->client?->name, 'due_on' => $due, 'days_past_due' => max(0, $late), 'outstanding' => $open, 'bucket' => $bucket];
+            $rows[] = ['invoice' => $invoice->number, 'invoice_id' => $invoice->id, 'client' => $invoice->project?->client?->name, 'due_on' => $due, 'days_past_due' => max(0, $late), 'outstanding' => $open, 'bucket' => $bucket];
         }
 
         return ['rows' => $rows, 'buckets' => $buckets, 'total' => array_sum($buckets), 'as_of' => $asOf];
@@ -186,6 +186,8 @@ class LedgerStatements
                 $out[] = ['area' => $area, 'message' => $m];
             }
         };
+        $accrual = AccrualRevenue::reconcile();
+        $push('Customer revenue', $accrual['problems']);
         $tb = self::trialBalance();
         if (! $tb['balanced']) {
             $push('Ledger', ['The ledger does not balance: debits '.$tb['total_debit'].' and credits '.$tb['total_credit'].'.']);

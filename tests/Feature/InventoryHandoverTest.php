@@ -24,6 +24,7 @@ use App\Services\InventoryReconciliation;
 use App\Services\InventoryRevaluationService;
 use App\Services\InventoryValuation;
 use App\Services\Ledger;
+use App\Services\LedgerStatements;
 use App\Services\OrderFulfilment;
 use App\Services\Sourcing;
 use App\Services\SourcingArrival;
@@ -946,4 +947,21 @@ it('serves the impaired stock and revaluation screens with the same separation o
     $this->co->post('finance', 'sourcing.revaluations.decide', ['decision' => 'approve'], $r)->assertForbidden();
     $this->co->post('board', 'sourcing.revaluations.decide', ['decision' => 'approve'], $r)->assertSessionHasNoErrors()->assertSessionMissing('error');
     expect($r->refresh()->status)->toBe('approved')->and(dr('inventory_writedown'))->toBe(100_000);
+});
+
+it('maps a loss by its cause: fulfilment-related normal loss to cost of goods sold, other normal operational loss to its own expense, abnormal loss to inventory loss', function () {
+    [$lot, $line] = hoLot();
+    Inventory::adjust($line, '-10', 'Stock-take', $this->finance, asDamage: true);
+    $mk = fn (string $classification, string $q) => lossDecide(lossCase(['sourcing_lot_line_id' => $line->id, 'from_bucket' => 'damaged', 'quantity' => $q, 'classification' => $classification]));
+    $normal = $mk('normal', '2');
+    $operating = $mk('normal_operational', '3');
+    $abnormal = $mk('abnormal', '1');
+
+    expect(lossAccounts($normal))->toBe([['assets.inventory', 0, 110_000], ['cogs', 110_000, 0]])->and($normal->treatment)->toBe('retained_in_cogs')
+        ->and(lossAccounts($operating))->toBe([['assets.inventory', 0, 165_000], ['operating_inventory_loss', 165_000, 0]])->and($operating->treatment)->toBe('operating_loss_expense')
+        ->and(lossAccounts($abnormal))->toBe([['assets.inventory', 0, 55_000], ['inventory_loss', 55_000, 0]])
+        ->and(hoCogs())->toBe(110_000)->and(dr('operating_inventory_loss'))->toBe(165_000)->and(dr('inventory_loss'))->toBe(55_000)
+        ->and(InventoryReconciliation::losses()['ok'])->toBeTrue()->and(InventoryReconciliation::company()['ok'])->toBeTrue();
+    $profit = LedgerStatements::operationalProfit('2026-11-01', '2026-11-30');
+    expect($profit['inventory']['operating_inventory_loss'])->toBe(165_000)->and($profit['inventory']['cogs'])->toBe(110_000)->and($profit['inventory_total'])->toBe(110_000 + 165_000 + 55_000);
 });

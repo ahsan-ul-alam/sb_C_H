@@ -146,8 +146,15 @@ class LedgerPostingService
                 $version = max($version, $live ? $version : $version + 1);
                 Ledger::post($date, 'Customer payment #'.$payment->id, self::typeFor('payment', $version), $payment->id, [
                     ['cash', null, (int) $payment->amount, 0, $accountId],
-                    ['income', null, 0, (int) $payment->amount],
+                    // From the accrual cutover a customer's money is a liability until the revenue is earned (AccrualRevenue); before it, the cash-basis booking stands.
+                    [AccrualRevenue::covers($date) ? 'customer.advances' : 'income', null, 0, (int) $payment->amount],
                 ], $userId);
+                if (AccrualRevenue::covers($date)) {
+                    if (AccrualRevenue::balances($payment->project()->firstOrFail())['advances'] < 0) {
+                        throw new RuntimeException('This payment has already been applied to revenue earned: reverse that first, a payment cannot be reduced below what has been applied.');
+                    }
+                    AccrualRevenue::settle($payment->project()->firstOrFail(), $userId, $date, 'pay'.$payment->id.'v'.$version);
+                }
             }
             DB::table('payments')->where('id', $payment->id)->update(['posting_version' => $version]);
         });
@@ -161,6 +168,9 @@ class LedgerPostingService
             return;
         }
         $version = (int) $payment->posting_version;
+        if (AccrualRevenue::covers($live->entry_date->toDateString()) && AccrualRevenue::balances($payment->project()->firstOrFail())['advances'] - (int) $payment->amount < 0) {
+            throw new RuntimeException('This payment has already been applied to revenue earned: reverse that first, it cannot be voided.');
+        }
         Ledger::reverse($live, $live->entry_date->toDateString(), 'Void of payment #'.$payment->id, 'payment_rev'.$version, $payment->id, $userId);
         DB::table('payments')->where('id', $payment->id)->update(['posting_version' => $version + 1]);
     }
@@ -175,6 +185,9 @@ class LedgerPostingService
         $date = $adjustment->kind === 'advance' ? $payment->paid_on->toDateString() : $adjustment->effective_on->toDateString();
         if (! self::isRealtime($date)) {
             return;
+        }
+        if (AccrualRevenue::covers($date)) {
+            throw new RuntimeException('From the accrual cutover customer revenue is recognised through revenue events (earned, credit note, refund); an advance or recognition marking would count it twice.');
         }
         $amount = (int) $adjustment->amount;
         $accountId = AccountingService::resolveAccountId($adjustment->financial_account_id);

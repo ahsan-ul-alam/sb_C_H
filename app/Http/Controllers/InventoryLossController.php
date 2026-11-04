@@ -72,7 +72,7 @@ class InventoryLossController extends Controller
             'sourcing_lot_line_id' => ['nullable', 'integer'], 'from_bucket' => ['nullable', 'in:available,damaged'],
             'inventory_handover_return_id' => ['nullable', 'integer'], 'inventory_handover_id' => ['nullable', 'integer'],
             'quantity' => ['required', 'regex:/^\d{1,10}(\.\d{1,2})?$/'],
-            'outcome' => ['nullable', 'in:repairable,impaired,write_off'], 'classification' => ['nullable', 'in:normal,abnormal'],
+            'outcome' => ['nullable', 'in:repairable,impaired,write_off'], 'classification' => ['nullable', 'in:normal,normal_operational,abnormal'],
             'cause' => ['required', 'string', 'max:255'], 'evidence_reference' => ['required', 'string', 'min:5', 'max:255'], 'assessment_note' => ['nullable', 'string', 'max:255'],
             'recoverable_value' => ['nullable', 'regex:'.Money::AMOUNT_REGEX], 'valuation_basis' => ['nullable', 'string', 'max:255'],
             'event_on' => ['nullable', 'date', 'before_or_equal:today'], 'idempotency_key' => ['nullable', 'uuid'],

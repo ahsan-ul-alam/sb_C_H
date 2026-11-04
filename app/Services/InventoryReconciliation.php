@@ -317,6 +317,10 @@ class InventoryReconciliation
         }
         $impairedGl = Ledger::debitBalance('assets.inventory_impaired');
         $abnormalGl = Ledger::debitBalance('inventory_loss');
+        $operatingCases = (int) $approved->where('classification', 'normal_operational')->sum('loss_value') + (int) $posted->where('loss_account', 'operating_inventory_loss')->sum('loss_delta');
+        if (Ledger::debitBalance('operating_inventory_loss') !== $operatingCases) {
+            $problems[] = 'Operating inventory loss in the ledger ('.Ledger::debitBalance('operating_inventory_loss').') differs from the approved cases ('.$operatingCases.').';
+        }
         if ($impairedGl !== $impairedCases) {
             $problems[] = 'Impaired inventory in the ledger ('.$impairedGl.') differs from the approved cases ('.$impairedCases.').';
         }
