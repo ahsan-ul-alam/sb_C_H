@@ -13,6 +13,8 @@
                 <div class="field"><label>Type</label><select name="type"><option value="opening" @disabled($openingPosted)>Opening balance</option><option value="adjustment">Correction (adjustment)</option></select></div>
                 <div class="field"><label>As of</label><input type="date" name="as_of" value="{{ old('as_of') }}" required></div>
                 <div class="field"><label>Source / note</label><input name="note" value="{{ old('note') }}"></div>
+                <div class="field"><label>Correcting batch (corrections only)</label><select name="corrects_batch_id"><option value="">—</option>@foreach ($batches->where('status', 'posted') as $posted)<option value="{{ $posted->id }}">{{ ucfirst($posted->type) }} as of {{ $posted->as_of->format('j M Y') }}</option>@endforeach</select></div>
+                <div class="field"><label>Reason for the correction</label><input name="correction_reason" value="{{ old('correction_reason') }}" maxlength="255"></div>
             </div>
             <button class="btn btn-primary" style="margin-top:.9rem">Create draft</button>
         </form>
@@ -21,7 +23,7 @@
 
     @forelse ($batches as $b)
         <section class="panel">
-            <div class="panel-head"><div><h2>{{ ucfirst($b->type) }} as of {{ $b->as_of->format('j M Y') }}</h2><div class="sub">{{ $b->note }}</div></div>
+            <div class="panel-head"><div><h2>{{ ucfirst($b->type) }} as of {{ $b->as_of->format('j M Y') }}</h2><div class="sub">{{ $b->note }}@if ($b->corrects_batch_id) · corrects batch #{{ $b->corrects_batch_id }}: {{ $b->correction_reason }}@endif</div></div>
                 <span class="badge badge-{{ $b->status === 'posted' ? 'paid' : 'partial' }}"><x-status :value="$b->status" /></span></div>
             <div class="table-wrap"><table class="table">
                 <thead><tr><th>Item</th><th>Partner</th><th class="num">Amount</th><th>Note</th></tr></thead>

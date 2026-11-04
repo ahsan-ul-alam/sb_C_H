@@ -2,14 +2,17 @@
 
 namespace App\Services;
 
+use App\Models\FinancialAccount;
 use App\Models\Invoice;
 use App\Models\Payment;
 use App\Models\Project;
 use App\Models\Segment;
 use App\Support\Money;
 use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
+use RuntimeException;
 
 /**
  * Creates and updates payments so that each transaction is stored once and every
@@ -58,6 +61,13 @@ class PaymentRecorder
 
                 $this->validateAllocations($project, $allocations, $amount, $exceptId);
 
+                // A NEW payment, or an edit that changes the account, must name an active account. An edit that leaves the account as it was is
+                // never judged by today's accounts: the history it is already booked to is kept, whatever has happened to that account since.
+                $requested = array_key_exists('financial_account_id', $data) ? ($data['financial_account_id'] ?: null) : ($payment->exists ? $payment->financial_account_id : null);
+                if (! $payment->exists || (int) $requested !== (int) $payment->financial_account_id) {
+                    $this->assertPaymentAccount($project, $data['paid_on'], $requested !== null ? (int) $requested : null);
+                }
+
                 $payment->fill([
                     'amount' => $amount,
                     'paid_on' => $data['paid_on'],
@@ -90,6 +100,24 @@ class PaymentRecorder
             });
         } catch (UniqueConstraintViolationException) {
             return null;
+        }
+    }
+
+    /**
+     * Where a customer payment's money lands. An account that is named must be active. When accounts are in use and the payment is journaled in
+     * real time (so its cash line is attributed to an account), it must name one: the default account is never assumed. Payments dated before
+     * the real-time cutover are recognised at period close without an account, so they are not asked for one.
+     */
+    private function assertPaymentAccount(Project $project, string $paidOn, ?int $accountId): void
+    {
+        try {
+            AccountingService::assertActive($accountId);
+        } catch (RuntimeException $e) {
+            throw ValidationException::withMessages(['financial_account_id' => $e->getMessage()]);
+        }
+        if ($accountId === null && FinancialAccount::query()->exists() && $project->currency === config('finance.currency')
+            && LedgerPostingService::isRealtime(Carbon::parse($paidOn)->toDateString())) {
+            throw ValidationException::withMessages(['financial_account_id' => 'Choose the account the money was received in.']);
         }
     }
 

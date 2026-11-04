@@ -123,10 +123,15 @@ class LedgerPostingService
             $payment = Payment::whereKey($payment->id)->lockForUpdate()->firstOrFail();
             $date = $payment->paid_on->toDateString();
             $wanted = self::isRealtime($date);
-            $accountId = AccountingService::resolveAccountId($payment->financial_account_id);
             $live = self::livePosting($payment);
             $version = (int) $payment->posting_version;
             $postedAccount = $live?->lines()->where('account', 'cash')->value('financial_account_id');
+            // A payment with no account of its own keeps the account its live entry was posted to. It is never moved to whatever account is the
+            // default today (that would silently redirect historical money when the default changes, or an account is retired). Only a payment that has
+            // never been journaled falls back to the default, as before.
+            $accountId = $payment->financial_account_id
+                ? (int) $payment->financial_account_id
+                : ($live ? ($postedAccount === null ? null : (int) $postedAccount) : AccountingService::resolveAccountId(null));
 
             if ($live && $wanted && (int) $live->lines()->sum('debit') === (int) $payment->amount
                 && $live->entry_date->toDateString() === $date

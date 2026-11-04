@@ -187,7 +187,7 @@ class PaymentController extends Controller
             'reference' => ['nullable', 'string', 'max:255'],
             'notes' => ['nullable', 'string', 'max:5000'],
             'idempotency_key' => ['nullable', 'uuid'],
-            'financial_account_id' => ['nullable', 'exists:financial_accounts,id'],
+            'financial_account_id' => ['nullable', Rule::exists('financial_accounts', 'id')->where('is_active', true)],
             'allocations' => ['nullable', 'array'],
             'allocations.*' => ['nullable', 'regex:'.Money::AMOUNT_REGEX],
         ], [

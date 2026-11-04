@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\CapitalEntry;
 use App\Models\OpeningBatch;
 use App\Models\Partner;
+use App\Services\AccountingService;
 use App\Services\Audit;
 use App\Services\Ledger;
 use App\Support\Money;
@@ -45,7 +46,10 @@ class OpeningController extends Controller
 
     public function store(Request $request): RedirectResponse
     {
-        $data = $request->validate(['type' => ['required', 'in:opening,adjustment'], 'as_of' => ['required', 'date'], 'note' => ['nullable', 'string', 'max:200']]);
+        $data = $request->validate([
+            'type' => ['required', 'in:opening,adjustment'], 'as_of' => ['required', 'date'], 'note' => ['nullable', 'string', 'max:200'],
+            'corrects_batch_id' => ['nullable', 'exists:opening_batches,id'], 'correction_reason' => ['nullable', 'string', 'max:255'],
+        ]);
 
         return $this->attempt(function () use ($request, $data) {
             if ($data['type'] === 'opening' && OpeningBatch::where('type', 'opening')->whereIn('status', ['draft', 'approved', 'posted'])->exists()) {
@@ -54,8 +58,24 @@ class OpeningController extends Controller
             if ($data['type'] === 'adjustment' && ! OpeningBatch::where('type', 'opening')->where('status', 'posted')->exists()) {
                 throw new RuntimeException('Post the opening balance before making adjustments.');
             }
+            // Nothing is posted into a month that has been closed and frozen. A correction to an earlier balance is a NEW batch dated in an
+            // open month: it names the posted batch it corrects and why, the original entry is never touched, and it follows the same
+            // prepare / approve / post path as any batch.
+            AccountingService::assertOpen($data['as_of'], $data['type'] === 'opening' ? 'an opening balance' : 'a correction');
+            if ($data['type'] === 'adjustment') {
+                $original = OpeningBatch::whereKey($data['corrects_batch_id'] ?? 0)->where('status', 'posted')->first();
+                if (! $original) {
+                    throw new RuntimeException('Name the posted batch this correction is for.');
+                }
+                if (mb_strlen(trim((string) ($data['correction_reason'] ?? ''))) < 10) {
+                    throw new RuntimeException('Give the reason for the correction (at least a short sentence); it is kept with the audit trail.');
+                }
+            } else {
+                $data['corrects_batch_id'] = null;
+                $data['correction_reason'] = null;
+            }
             $batch = OpeningBatch::create([...$data, 'prepared_by' => $request->user()->id]);
-            Audit::log('opening.created', 'batch '.$batch->id);
+            Audit::log('opening.created', 'batch '.$batch->id.($batch->corrects_batch_id ? ' corrects batch '.$batch->corrects_batch_id.': '.$batch->correction_reason : ''));
         }, 'Draft batch created; add its lines.');
     }
 
@@ -109,6 +129,8 @@ class OpeningController extends Controller
                 if ($batch->status !== 'approved') {
                     throw new RuntimeException('Only an approved batch can be posted.');
                 }
+                // The month may have been closed since the batch was prepared.
+                AccountingService::assertOpen($batch->as_of->toDateString(), 'this batch');
                 $lines = [];
                 $net = 0; // debits minus credits of the real lines
                 foreach ($batch->lines as $l) {
@@ -121,7 +143,7 @@ class OpeningController extends Controller
                 }
                 $entry = Ledger::post($batch->as_of->toDateString(), ucfirst($batch->type).' balances', 'opening', $batch->id, $lines, $request->user()->id);
                 $batch->update(['status' => 'posted', 'posted_by' => $request->user()->id, 'posted_at' => now(), 'journal_entry_id' => $entry->id]);
-                Audit::log('opening.posted', 'batch '.$batch->id);
+                Audit::log('opening.posted', 'batch '.$batch->id.($batch->corrects_batch_id ? ' (corrects batch '.$batch->corrects_batch_id.': '.$batch->correction_reason.')' : ''));
             });
         }, 'Opening balances posted to the ledger.');
     }

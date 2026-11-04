@@ -73,6 +73,8 @@ function cpProject(string $contract = '100000'): array
 
 function cpPay(Segment $segment, string $amount, string $date, ?int $accountId = null): Payment
 {
+    // Once accounts exist a customer payment names one (the default account unless the test chooses another).
+    $accountId ??= FinancialAccount::where('is_default', true)->value('id');
     test()->co->post('finance', 'segments.payments.store', ['amount' => $amount, 'paid_on' => $date, 'method' => 'cash', 'idempotency_key' => (string) Str::uuid(),
         ...($accountId ? ['financial_account_id' => $accountId] : [])], $segment)->assertSessionHasNoErrors();
 
@@ -94,6 +96,10 @@ function cpExpense(array $data, string $by = 'finance'): Expense
 function cpAdjust(Payment $payment, array $data): RevenueAdjustment
 {
     $co = test()->co;
+    // A refund pays money out of a named account once accounts exist.
+    if (($data['kind'] ?? null) === 'refund' && ! isset($data['financial_account_id']) && ($default = FinancialAccount::where('is_default', true)->value('id'))) {
+        $data['financial_account_id'] = $default;
+    }
     $co->post('finance', 'finance.revenue.store', $data, $payment)->assertSessionHasNoErrors();
     $adjustment = RevenueAdjustment::latest('id')->firstOrFail();
     $co->post('board', 'finance.revenue.decide', ['decision' => 'verify'], $adjustment)->assertSessionHasNoErrors();

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\AccountingPeriod;
+use App\Models\FinancialAccount;
 use App\Models\Payment;
 use App\Models\RevenueAdjustment;
 use App\Services\Audit;
@@ -11,6 +12,7 @@ use App\Support\Money;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 use Illuminate\View\View;
 use RuntimeException;
 
@@ -41,7 +43,7 @@ class RevenueController extends Controller
             'amount' => ['nullable', 'regex:'.Money::AMOUNT_REGEX],
             'effective_on' => ['nullable', 'date'],
             'reason' => ['nullable', 'string', 'max:200'],
-            'financial_account_id' => ['nullable', 'exists:financial_accounts,id'],
+            'financial_account_id' => ['nullable', Rule::exists('financial_accounts', 'id')->where('is_active', true)],
         ]);
 
         return $this->attempt(function () use ($request, $payment, $data) {
@@ -89,6 +91,12 @@ class RevenueController extends Controller
                     if ($amount > $limit) {
                         throw new RuntimeException('Refund exceeds the refundable '.$against.' of '.Money::format($limit).'.');
                     }
+                }
+
+                // A refund pays money out of a named account: with accounts in use and the refund journaled in real time, it must say which,
+                // so it never falls back to the default account unnoticed.
+                if ($kind === 'refund' && empty($data['financial_account_id']) && FinancialAccount::query()->exists() && LedgerPostingService::isRealtime($date)) {
+                    throw new RuntimeException('Choose the account the refund is paid from.');
                 }
 
                 $adjustment = RevenueAdjustment::create(['payment_id' => $payment->id, 'kind' => $kind, 'against' => $against,

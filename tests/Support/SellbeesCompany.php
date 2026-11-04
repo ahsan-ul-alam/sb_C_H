@@ -5,6 +5,7 @@ namespace Tests\Support;
 use App\Models\CapitalEntry;
 use App\Models\Client;
 use App\Models\Expense;
+use App\Models\FinancialAccount;
 use App\Models\Invoice;
 use App\Models\Partner;
 use App\Models\PolicyVersion;
@@ -143,14 +144,27 @@ class SellbeesCompany
         return $project->segments()->where('name', $name)->firstOrFail();
     }
 
+    /**
+     * A real user must name the account a customer payment is received in once financial accounts exist, so the helpers do too: the default
+     * account when there is one (nothing is sent when no account exists, which is how a company without accounts records payments).
+     *
+     * @return array{financial_account_id?: int}
+     */
+    private function receivingAccount(): array
+    {
+        $id = FinancialAccount::where('is_default', true)->where('is_active', true)->value('id') ?? FinancialAccount::where('is_active', true)->value('id');
+
+        return $id ? ['financial_account_id' => $id] : [];
+    }
+
     public function payInvoice(Invoice $invoice, string $amount, string $date): TestResponse
     {
-        return $this->post('finance', 'invoices.payments.store', ['amount' => $amount, 'paid_on' => $date, 'method' => 'cash', 'idempotency_key' => (string) Str::uuid()], $invoice);
+        return $this->post('finance', 'invoices.payments.store', ['amount' => $amount, 'paid_on' => $date, 'method' => 'cash', 'idempotency_key' => (string) Str::uuid(), ...$this->receivingAccount()], $invoice);
     }
 
     public function paySegment(Segment $segment, string $amount, string $date, ?string $key = null): TestResponse
     {
-        return $this->post('finance', 'segments.payments.store', ['amount' => $amount, 'paid_on' => $date, 'method' => 'cash', 'idempotency_key' => $key ?? (string) Str::uuid()], $segment);
+        return $this->post('finance', 'segments.payments.store', ['amount' => $amount, 'paid_on' => $date, 'method' => 'cash', 'idempotency_key' => $key ?? (string) Str::uuid(), ...$this->receivingAccount()], $segment);
     }
 
     /** @param list<array{segment_id?: int|null, description: string, quantity: string, unit_price: string}> $items */
