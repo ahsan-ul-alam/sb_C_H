@@ -205,6 +205,7 @@ Route::middleware('auth')->group(function () {
         Route::post('supplier-returns/{supplierReturn}/accept', [SupplierReturnController::class, 'accept'])->name('supplier-returns.accept')->middleware('can:supplier.return.review');
         Route::post('supplier-returns/{supplierReturn}/verify', [SupplierReturnController::class, 'verify'])->name('supplier-returns.verify')->middleware('can:supplier.return.review');
         Route::post('supplier-returns/{supplierReturn}/decide', [SupplierReturnController::class, 'decide'])->name('supplier-returns.decide')->middleware('can:supplier.return.approve');
+        Route::post('supplier-returns/{supplierReturn}/link', [SupplierReturnController::class, 'link'])->name('supplier-returns.link')->middleware('can:supplier.return.review');
         Route::post('supplier-returns/{supplierReturn}/settle', [SupplierReturnController::class, 'settle'])->name('supplier-returns.settle')->middleware('can:supplier.return.review');
         Route::post('supplier-return-settlements/{settlement}/decide', [SupplierReturnController::class, 'decideSettlement'])->name('supplier-returns.settlements.decide')->middleware('can:supplier.return.approve');
     });

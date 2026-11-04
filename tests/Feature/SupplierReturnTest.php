@@ -1,6 +1,8 @@
 <?php
 
 use App\Models\AccountingPeriod;
+use App\Models\AdvanceSettlement;
+use App\Models\Expense;
 use App\Models\FinancialAccount;
 use App\Models\InventoryValueMovement;
 use App\Models\JournalEntry;
@@ -101,12 +103,12 @@ function srPropose($line, string $quantity = '20', array $over = []): SupplierRe
 }
 
 /** Request, accept, verify and approve a return with the given allocation. */
-function srApprove($line, string $quantity = '20', int $p = 0, int $k = 0, int $r = 0, ?string $reason = null, ?int $accepted = null, array $over = []): SupplierReturn
+function srApprove($line, string $quantity = '20', int $p = 0, int $k = 0, int $r = 0, ?string $reason = null, ?int $accepted = null, array $over = [], ?string $class = null): SupplierReturn
 {
     $return = srPropose($line, $quantity, $over);
     $accepted ??= $p + $k + $r;
     SupplierReturnService::recordAcceptance($return, test()->finance, $accepted >= (int) $return->claimed_amount ? 'accepted' : 'partial', $accepted, 'CN-'.Str::random(5), 'Supplier written acceptance');
-    SupplierReturnService::verify($return->refresh(), test()->co->users['multi'], 'Evidence, acceptance and allocation checked', $p, $k, $r, $reason);
+    SupplierReturnService::verify($return->refresh(), test()->co->users['multi'], 'Evidence, acceptance and allocation checked', $p, $k, $r, $reason, $class ?? ($reason ? 'recovery_shortfall' : null));
     SupplierReturnService::decide($return->refresh(), true, test()->board);
 
     return $return->refresh();
@@ -123,7 +125,7 @@ it('returns goods before payable settlement: the payable falls by the recovery, 
 
     $return = srPropose($line);
     expect($return->status)->toBe('requested')->and(dr('assets.inventory'))->toBe(5_500_000);   // a request posts nothing
-    $return = srApprove($line, p: 1_000_000, reason: 'Freight on the returned goods is not refundable', over: ['return_reference' => 'RTN-A1']);
+    $return = srApprove($line, p: 1_000_000, reason: 'Freight on the returned goods is not refundable', over: ['return_reference' => 'RTN-A1'], class: 'nonrefundable_freight');
 
     expect(srAccounts($return))->toBe([['assets.inventory', 0, 1_100_000], ['liabilities', 1_000_000, 0], ['supplier_return_difference', 100_000, 0]])
         ->and($return->purchase_value)->toBe(1_000_000)->and($return->landed_value)->toBe(100_000)->and($return->difference_value)->toBe(100_000)
@@ -253,7 +255,7 @@ it('prevents a credit, a return document or the same physical units from being r
 
     expect(fn () => srPropose($line, '5', ['return_reference' => 'RTN-DUP']))->toThrow(RuntimeException::class, 'one physical return is recorded once');
     $other = srPropose($line, '5', ['claimed_amount' => 275_000]);
-    expect(fn () => SupplierReturnService::recordAcceptance($other, $this->finance, 'accepted', 275_000, $doc))->toThrow(RuntimeException::class, 'a credit is recognised once');
+    expect(fn () => SupplierReturnService::recordAcceptance($other, $this->finance, 'accepted', 275_000, $doc))->toThrow(RuntimeException::class, 'recognised and collected once');
     // Units already returned are not there to return again, and open requests count against the same units.
     expect(fn () => srPropose($line, '81'))->toThrow(RuntimeException::class, 'Only 75.00')
         ->and(fn () => srPropose($line, '76'))->toThrow(RuntimeException::class, 'Only 75.00');
@@ -373,7 +375,7 @@ it('keeps suppliers and lots apart: a return reduces only its own lot\'s payable
     SupplierReturnService::decide($big, true, $this->board);
     $more = srPropose($lineA, '20');
     SupplierReturnService::recordAcceptance($more, $this->finance, 'accepted', 1_100_000, 'CN-ISO-2');
-    expect(fn () => SupplierReturnService::verify($more->refresh(), $this->co->users['multi'], 'Checked', 700_000, 0, 0, 'Freight is not refundable'))->toThrow(RuntimeException::class, 'still owed to this supplier')
+    expect(fn () => SupplierReturnService::verify($more->refresh(), $this->co->users['multi'], 'Checked', 700_000, 0, 0, 'Supplier agreed a lower recovery', 'recovery_shortfall'))->toThrow(RuntimeException::class, 'still owed to this supplier')
         ->and(AdvanceSettlementService::payableOutstanding($lotB, $this->supplier->id))->toBe(5_000_000);
     $rows = collect(InventoryReconciliation::supplierReturns()['rows']);
     expect($rows->pluck('lot_id')->unique()->all())->toBe([$lotA->id])->and($rows->every(fn ($r) => $r['remaining_supplier_obligation'] === 600_000))->toBeTrue();
@@ -431,4 +433,173 @@ it('serves the supplier return screens with the same separation of duties, and k
     expect(dr('assets.supplier_receivable'))->toBe(175_000);
     $detail = $this->co->as('board')->get(route('sourcing.supplier-returns.show', $return))->assertOk()->getContent();
     expect($detail)->toContain('Source journal entry')->and($detail)->toContain('Recovery, by category')->and($detail)->toContain('supplier_return_difference' === 'x' ? '' : 'assets.supplier_receivable');
+});
+
+/*
+| Phase 2D-3A: one supplier recovery is recognised and collected once, whichever workflow it is recorded through.
+*/
+
+function srCorrection($lot, string $type, int $amount, string $reference): Expense
+{
+    $payment = $lot->payments()->firstOrFail();
+    SourcingPayments::voidSupplierPayment($payment->refresh(), 'Supplier short-delivered', test()->finance, $type, $amount, $reference);
+
+    return Expense::where('reverses_id', $payment->expense_id)->latest('id')->firstOrFail();
+}
+
+/** An approved claim for goods rejected at arrival (never inventory): [return]. */
+function srRejectedClaim($line, string $quantity, int $amount, string $document): SupplierReturn
+{
+    $claim = srPropose($line, $quantity, ['kind' => 'unaccepted', 'claimed_amount' => $amount, 'expected_method' => 'refund']);
+    SupplierReturnService::recordAcceptance($claim, test()->finance, 'accepted', $amount, $document, 'Supplier agrees');
+    SupplierReturnService::verify($claim->refresh(), test()->co->users['multi'], 'Checked, recovered on the supplier payment');
+    SupplierReturnService::decide($claim->refresh(), true, test()->board);
+
+    return $claim->refresh();
+}
+
+it('keeps an advance refund and a supplier return apart: the refund recovers only the advance still held, the return only the goods that were settled', function () {
+    [$lot, $line] = srLot(prepay: true, received: '100', accepted: '90');          // advance 5,000,000: 4,500,000 settled into the 90 accepted units, 500,000 still held for the 10 rejected
+    $payment = $lot->payments()->firstOrFail();
+    expect(AdvanceSettlementService::held($payment->load('corrections')))->toBe(500_000);
+
+    // Money for the settled goods can only come back through the goods; the advance refund cannot reach it.
+    expect(fn () => SourcingPayments::voidSupplierPayment($payment->refresh(), 'Refund everything', $this->finance, 'refund_received', 5_000_000, 'BANK-ADV-0'))->toThrow(RuntimeException::class, 'must be between');
+    $refund = srCorrection($lot, 'refund_received', 500_000, 'BANK-ADV-1');
+    srVerify($refund);
+    $claim = srRejectedClaim($line, '10', 500_000, 'CN-ADV-1');
+    SupplierReturnService::linkPaymentRecovery($claim, $refund, $this->finance);
+    SupplierReturnService::linkPaymentRecovery($claim, $refund, $this->finance);                                // the same link twice is one link
+
+    // The claim for the rejected goods was recovered by exactly that refund. The same receipt cannot also be collected as the return's refund.
+    $goods = srApprove($line, '20', r: 1_000_000, reason: 'Supplier restocking charge', class: 'unrecoverable_cost');
+    expect(fn () => SupplierReturnService::proposeSettlement($goods, $this->finance, 'cash_refund', 1_000_000, 'bank adv 1', '2026-11-10', FinancialAccount::firstOrFail()->id, (string) Str::uuid()))
+        ->toThrow(RuntimeException::class, 'already registered');
+    expect(dr('assets.supplier_receivable'))->toBe(1_000_000)->and($claim->refresh()->status)->toBe('approved')->and(JournalEntry::where('source_type', 'supplier_return')->count())->toBe(1);
+    // A refund of the same correction cannot be linked to a second claim, nor above what the supplier accepted.
+    expect(fn () => SupplierReturnService::linkPaymentRecovery($goods, $refund, $this->finance))->toThrow(RuntimeException::class, 'goods rejected at arrival');
+    $report = InventoryReconciliation::supplierReturns();
+    expect($report['ok'])->toBeTrue()->and($report['difference_by_class'])->toBe(['unrecoverable_cost' => $goods->difference_value])->and(InventoryReconciliation::company()['ok'])->toBeTrue();
+});
+
+it('registers every credit note and receipt once across workflows: a payment correction and a return cannot both recognise the same one', function () {
+    [$lotA, $lineA] = srLot(prepay: true, received: '100', accepted: '90');
+    srCorrection($lotA, 'credit_note', 400_000, 'CN-2026-14');                                                   // the credit note is booked through the advance
+    $claim = srPropose($lineA, '10', ['kind' => 'unaccepted', 'claimed_amount' => 500_000]);
+    expect(fn () => SupplierReturnService::recordAcceptance($claim, $this->finance, 'accepted', 500_000, 'CN 2026 14'))->toThrow(RuntimeException::class, 'already registered');
+
+    [$lotB, $lineB] = srLot(prepay: true, received: '100', accepted: '90');
+    $other = srPropose($lineB, '10', ['kind' => 'unaccepted', 'claimed_amount' => 500_000]);
+    SupplierReturnService::recordAcceptance($other, $this->finance, 'accepted', 500_000, 'CN-B-1');             // the credit note is booked through the return
+    expect(fn () => srCorrection($lotB, 'credit_note', 400_000, 'cn b 1'))->toThrow(RuntimeException::class, 'already registered');
+    // Cancelling the return frees the document for the event that really happened.
+    SupplierReturnService::cancel($other, $this->ops, 'Raised against the wrong lot');
+    $correction = srCorrection($lotB, 'credit_note', 400_000, 'cn b 1');
+    expect($correction->correction_type)->toBe('credit_note');
+    // A rejected correction frees its receipt as well.
+    [$lotC] = srLot(prepay: true, received: '100', accepted: '90');
+    $rejected = srCorrection($lotC, 'refund_received', 100_000, 'BANK-REJ-1');
+    $this->co->post('board', 'finance.expenses.decide', ['decision' => 'reject', 'reason' => 'Not received'], $rejected)->assertSessionHasNoErrors();
+    expect(fn () => srCorrection($lotC, 'refund_received', 100_000, 'BANK-REJ-1'))->not->toThrow(RuntimeException::class);
+});
+
+it('treats a partly applied advance correctly: the refund is capped at what is held and the returned goods recover separately, never above what was paid', function () {
+    [$lot, $line] = srLot(prepay: true, received: '100', accepted: '60');          // 3,000,000 settled, 2,000,000 still held
+    $payment = $lot->payments()->firstOrFail();
+    expect(fn () => srCorrection($lot, 'refund_received', 2_500_000, 'BANK-PA-1'))->toThrow(RuntimeException::class, 'must be between');
+    $refund = srCorrection($lot, 'refund_received', 2_000_000, 'BANK-PA-2');
+    srVerify($refund);
+    $goods = srApprove($line, '10', r: 500_000, reason: 'Restocking charge', class: 'recovery_shortfall', over: ['claimed_amount' => 500_000]);
+
+    expect(AdvanceSettlementService::held($payment->refresh()->load('corrections')))->toBe(0)
+        ->and($goods->carrying_value)->toBe(583_333)->and($goods->difference_value)->toBe(83_333)
+        ->and(2_000_000 + $goods->receivable_amount + $goods->difference_value + 3_000_000 - 583_333 + 500_000 - 500_000)->toBeLessThanOrEqual(5_500_000)
+        ->and(InventoryReconciliation::supplierReturns()['ok'])->toBeTrue()->and(ledgerAudit()['unbalanced'])->toBe(0);
+    // The advance cannot be re-opened to claim it again after the goods went back.
+    $settlement = AdvanceSettlement::where('kind', 'advance')->where('status', 'verified')->firstOrFail();
+    expect(fn () => AdvanceSettlementService::reverse($settlement, 'Undo', $this->board))->toThrow(RuntimeException::class);
+});
+
+it('refuses a second refund request for the same receipt, repeats nothing for the same submission, and frees the receipt when a request is rejected', function () {
+    [$lot, $line] = srLot();
+    $return = srApprove($line, r: 1_100_000);
+    $account = FinancialAccount::firstOrFail();
+    $key = (string) Str::uuid();
+    $first = SupplierReturnService::proposeSettlement($return, $this->finance, 'cash_refund', 300_000, 'Bank statement line 50', '2026-11-10', $account->id, $key);
+
+    expect(SupplierReturnService::proposeSettlement($return, $this->finance, 'cash_refund', 300_000, 'Bank statement line 50', '2026-11-10', $account->id, $key)->id)->toBe($first->id)
+        ->and(fn () => SupplierReturnService::proposeSettlement($return, $this->finance, 'cash_refund', 300_000, 'BANK STATEMENT LINE 50', '2026-11-10', $account->id, (string) Str::uuid()))->toThrow(RuntimeException::class, 'already registered')
+        ->and(SupplierReturnSettlement::count())->toBe(1);
+    SupplierReturnService::decideSettlement($first, false, $this->board, 'Not on the statement');
+    $again = SupplierReturnService::proposeSettlement($return, $this->finance, 'cash_refund', 300_000, 'Bank statement line 50', '2026-11-10', $account->id, (string) Str::uuid());
+    SupplierReturnService::decideSettlement($again, true, $this->board);
+    expect(dr('assets.supplier_receivable'))->toBe(800_000)
+        ->and(fn () => SupplierReturnService::proposeSettlement($return, $this->finance, 'cash_refund', 100_000, 'Bank statement line 50', '2026-11-10', $account->id, (string) Str::uuid()))->toThrow(RuntimeException::class, 'already registered');
+});
+
+it('catches a pending credit application that a later posting made impossible: the Board cannot approve it above what is still owed', function () {
+    [$lot, $line] = srLot();
+    $credit = srApprove($line, '60', k: 3_300_000, over: ['claimed_amount' => 3_300_000]);
+    $pending = SupplierReturnService::proposeSettlement($credit, $this->finance, 'credit_applied', 3_300_000, 'Invoice INV-3001', '2026-11-10', null, (string) Str::uuid());
+    $payable = srApprove($line->refresh(), '40', p: 2_200_000, over: ['claimed_amount' => 2_200_000]);      // reduces what is owed to 2,800,000 first
+
+    expect(AdvanceSettlementService::payableOutstanding($lot->refresh(), $this->supplier->id))->toBe(2_800_000)
+        ->and(fn () => SupplierReturnService::decideSettlement($pending, true, $this->board))->toThrow(RuntimeException::class, 'owed to this supplier')
+        ->and($pending->refresh()->status)->toBe('pending');
+    SupplierReturnService::decideSettlement($pending, false, $this->board, 'Owed amount changed');
+    $fits = SupplierReturnService::proposeSettlement($credit, $this->finance, 'credit_applied', 2_800_000, 'Invoice INV-3001', '2026-11-10', null, (string) Str::uuid());
+    SupplierReturnService::decideSettlement($fits, true, $this->board);
+    $raw = AdvanceSettlementService::payableOutstanding($lot, $this->supplier->id, clamp: false);
+    expect($raw)->toBe(0)->and(InventoryReconciliation::supplierReturns()['ok'])->toBeTrue()->and($payable->payable_reduction)->toBe(2_200_000);
+});
+
+it('classifies the cost that is not recovered and keeps freight within the landed cost; the class lands in the reconciliation, not in profit', function () {
+    [$lot, $line] = srLot();
+    $return = srPropose($line);
+    SupplierReturnService::recordAcceptance($return, $this->finance, 'accepted', 400_000, 'CN-CLS-1', null);
+    expect(fn () => SupplierReturnService::verify($return->refresh(), $this->co->users['multi'], 'Checked', 0, 400_000, 0, 'Supplier recovers less'))->toThrow(RuntimeException::class, 'Classify the part')
+        ->and(fn () => SupplierReturnService::verify($return->refresh(), $this->co->users['multi'], 'Checked', 0, 400_000, 0, 'Freight', 'nonrefundable_freight'))->toThrow(RuntimeException::class, 'cannot exceed the landed cost')
+        ->and(fn () => SupplierReturnService::verify($return->refresh(), $this->co->users['multi'], 'Checked', 0, 400_000, 0, 'Supplier recovers less', 'made_up'))->toThrow(RuntimeException::class, 'Classify the part');
+    SupplierReturnService::verify($return->refresh(), $this->co->users['multi'], 'Checked', 0, 400_000, 0, 'Restocking fee and freight', 'unrecoverable_cost');
+    SupplierReturnService::decide($return, true, $this->board);
+
+    $freight = srApprove($line, '10', k: 500_000, reason: 'Freight on these goods is not refundable', class: 'nonrefundable_freight', over: ['claimed_amount' => 500_000]);
+    $report = InventoryReconciliation::supplierReturns();
+    expect($freight->difference_value)->toBe(50_000)->and($freight->difference_class)->toBe('nonrefundable_freight')
+        ->and($report['difference_by_class'])->toBe(['unrecoverable_cost' => 700_000, 'nonrefundable_freight' => 50_000])->and($report['difference_gl'])->toBe(750_000)->and($report['ok'])->toBeTrue()
+        ->and(collect(SupplierReturnService::DIFFERENCE_CLASSES)->every(fn ($c) => $c['proposed_2e'] !== ''))->toBeTrue();
+    // Nothing reached a profit line: the unrecovered cost sits in its own account, which no profit report reads.
+    expect(dr('expense'))->toBe(0);
+});
+
+it('posts a supplier refund received after the month closed in the open period, with the original return journal untouched', function () {
+    [$lot, $line] = srLot();
+    $return = srApprove($line, r: 1_100_000);
+    $original = JournalEntry::where('source_type', 'supplier_return')->where('source_id', $return->id)->firstOrFail();
+    $snapshot = $original->lines->map(fn ($l) => [$l->account, $l->debit, $l->credit])->all();
+    AccountingPeriod::create(['month' => '2026-10', 'income' => 0, 'expenses' => 0, 'net_profit' => 0, 'closed_by' => $this->finance->id]);
+
+    $refund = SupplierReturnService::proposeSettlement($return, $this->finance, 'cash_refund', 1_100_000, 'Bank statement line 61', '2026-10-30', FinancialAccount::firstOrFail()->id, (string) Str::uuid());
+    SupplierReturnService::decideSettlement($refund, true, $this->board);
+    $entry = JournalEntry::where('source_type', 'supplier_return_settlement')->where('source_id', $refund->id)->firstOrFail();
+
+    expect($entry->entry_date->toDateString())->toBe('2026-11-10')->and($entry->memo)->toContain('closed period')->and($refund->refresh()->settled_on->toDateString())->toBe('2026-10-30')
+        ->and($original->fresh()->lines->map(fn ($l) => [$l->account, $l->debit, $l->credit])->all())->toBe($snapshot)->and(dr('assets.supplier_receivable'))->toBe(0)
+        ->and(InventoryReconciliation::supplierReturns()['ok'])->toBeTrue();
+});
+
+it('reconciles every approved return across workflows to the ledger: recovery, classification, advance refunds and payable', function () {
+    [$lot, $line] = srLot(prepay: true, received: '100', accepted: '90');
+    $refund = srCorrection($lot, 'refund_received', 500_000, 'BANK-FIN-1');
+    srVerify($refund);
+    $claim = srRejectedClaim($line, '10', 500_000, 'CN-FIN-1');
+    SupplierReturnService::linkPaymentRecovery($claim, $refund, $this->finance);
+    $goods = srApprove($line, '9', k: 300_000, r: 200_000, reason: 'Restocking charge', class: 'recovery_shortfall', over: ['claimed_amount' => 500_000]);
+    $cash = SupplierReturnService::proposeSettlement($goods, $this->finance, 'cash_refund', 200_000, 'Bank statement line 99', '2026-11-10', FinancialAccount::firstOrFail()->id, (string) Str::uuid());
+    SupplierReturnService::decideSettlement($cash, true, $this->board);
+
+    $r = InventoryReconciliation::supplierReturns();
+    expect($r['ok'])->toBeTrue()->and($r['problems'])->toBe([])->and($r['receivable_gl'])->toBe(0)->and($r['credit_gl'])->toBe(300_000)->and($r['difference_gl'])->toBe($goods->difference_value)
+        ->and(collect($r['rows'])->firstWhere('kind', 'unaccepted')['issues'])->toBe([])
+        ->and(InventoryReconciliation::company()['ok'])->toBeTrue()->and(ledgerAudit()['unbalanced'])->toBe(0)->and(ledgerAudit()['duplicates'])->toBe(0);
 });

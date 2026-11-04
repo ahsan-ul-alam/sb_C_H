@@ -2,11 +2,14 @@
 
 namespace App\Services;
 
+use App\Models\Expense;
 use App\Models\FinancialAccount;
 use App\Models\InventoryLossCase;
 use App\Models\JournalEntry;
 use App\Models\SourcingLot;
 use App\Models\SourcingLotLine;
+use App\Models\SupplierPayment;
+use App\Models\SupplierRecoveryDocument;
 use App\Models\SupplierReturn;
 use App\Models\SupplierReturnSettlement;
 use App\Models\User;
@@ -39,6 +42,19 @@ use RuntimeException;
 class SupplierReturnService
 {
     private const EVIDENCE_MIN = 5;
+
+    /**
+     * Why cost that was removed from inventory was not recovered from the supplier, and where each class is proposed to land in the operational P&L (Phase 2E).
+     * Today every class is posted to the one account supplier_return_difference, which no profit report reads, so frozen distributable profit does not move;
+     * the class is stored on the return so the later mapping needs no guesswork and no reclassification of history.
+     */
+    public const DIFFERENCE_CLASSES = [
+        'nonrefundable_freight' => ['label' => 'Non-refundable freight or handling', 'limit' => 'landed', 'proposed_2e' => 'Operating expense: inbound freight and handling not recovered (cost of sourcing)'],
+        'unrecoverable_cost' => ['label' => 'Unrecoverable inventory cost', 'limit' => null, 'proposed_2e' => 'Cost of goods sold: returned goods the supplier will not pay for (restocking charge, goods not accepted back)'],
+        'recovery_shortfall' => ['label' => 'Supplier recovery shortfall', 'limit' => null, 'proposed_2e' => 'Other operating expense: supplier agreed to a lower recovery than the cost carried'],
+        'disputed_claim' => ['label' => 'Disputed or pending claim', 'limit' => null, 'proposed_2e' => 'Receivable under dispute once recognition criteria are met; until then an expense, reversed (not re-posted) if the claim is later won'],
+        'accounting_correction' => ['label' => 'Accounting correction', 'limit' => null, 'proposed_2e' => 'Prior-period or correction line reviewed by Finance and the Board; never an ordinary expense'],
+    ];
 
     // ── Reading ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -183,6 +199,7 @@ class SupplierReturnService
                 throw new RuntimeException('Give a reason for cancelling.');
             }
             $return->update(['status' => 'cancelled', 'decision_note' => trim($reason)]);
+            SupplierRecoveryRegistry::release('supplier_return', $return->id);
             Audit::log('supplier_return.cancelled', 'return '.$return->id, trim($reason));
         });
     }
@@ -211,8 +228,10 @@ class SupplierReturnService
             if ($amount > 0 && mb_strlen($document) < 4) {
                 throw new RuntimeException('An accepted recovery needs the supplier\'s credit note number or written acceptance.');
             }
-            if ($document !== '' && SupplierReturn::where('supplier_id', $return->supplier_id)->where('supplier_document', $document)->whereKeyNot($return->id)->whereNotIn('status', ['rejected', 'cancelled'])->exists()) {
-                throw new RuntimeException('That credit note or acceptance document is already registered against another return of this supplier: a credit is recognised once.');
+            // One register for every workflow: the same credit note, acceptance or receipt of this supplier is recognised once, wherever it was first used.
+            SupplierRecoveryRegistry::release('supplier_return', $return->id, ['acceptance', 'credit_note']);
+            if ($document !== '') {
+                SupplierRecoveryRegistry::claim((int) $return->supplier_id, $amount > 0 ? 'credit_note' : 'acceptance', $document, 'supplier_return', $return->id, $amount, $user->id);
             }
             $return->update(['acceptance' => $acceptance, 'accepted_amount' => $amount, 'supplier_document' => $document ?: null, 'acceptance_note' => $note, 'acceptance_by' => $user->id, 'acceptance_at' => now()]);
             Audit::log('supplier_return.acceptance', 'return '.$return->id, $acceptance.' '.$amount.' '.$document);
@@ -223,9 +242,9 @@ class SupplierReturnService
      * Finance checks the return and fixes how the accepted recovery is allocated. The allocation is checked against the value the goods really carry and against what
      * is really owed; whatever is not recovered is stated with its reason, never hidden inside the inventory cost.
      */
-    public static function verify(SupplierReturn $return, User $user, string $note, int $payableReduction = 0, int $creditNote = 0, int $receivable = 0, ?string $differenceReason = null): void
+    public static function verify(SupplierReturn $return, User $user, string $note, int $payableReduction = 0, int $creditNote = 0, int $receivable = 0, ?string $differenceReason = null, ?string $differenceClass = null): void
     {
-        DB::transaction(function () use ($return, $user, $note, $payableReduction, $creditNote, $receivable, $differenceReason) {
+        DB::transaction(function () use ($return, $user, $note, $payableReduction, $creditNote, $receivable, $differenceReason, $differenceClass) {
             $lot = SourcingLot::whereKey($return->sourcing_lot_id)->lockForUpdate()->firstOrFail();
             $return = SupplierReturn::whereKey($return->id)->lockForUpdate()->firstOrFail();
             if ($return->status !== 'requested') {
@@ -259,31 +278,50 @@ class SupplierReturnService
             if ($allocated > (int) $return->accepted_amount) {
                 throw new RuntimeException('The allocation ('.Money::format($allocated).') is more than the supplier accepted ('.Money::format((int) $return->accepted_amount).').');
             }
-            $carrying = self::carrying($lot, $return);
+            $cost = self::carrying($lot, $return);
+            $carrying = $cost['purchase'] + $cost['landed'];
             if ($allocated > $carrying) {
                 throw new RuntimeException('The recovery ('.Money::format($allocated).') is above the carrying value of these goods ('.Money::format($carrying).'). There is no supported treatment for a gain on return: reduce the allocation or resolve it with Finance first.');
             }
             if ($carrying > $allocated && mb_strlen(trim((string) $differenceReason)) < self::EVIDENCE_MIN) {
                 throw new RuntimeException('Carrying value '.Money::format($carrying).' is not fully recovered: state why '.Money::format($carrying - $allocated).' is not (non-refundable freight, restocking charge, disputed amount).');
             }
+            self::assertDifferenceClass($carrying - $allocated, $differenceClass, $cost['landed']);
             if ($payableReduction > AdvanceSettlementService::payableOutstanding($lot, (int) $return->supplier_id, includePending: true)) {
                 throw new RuntimeException('Only '.Money::format(AdvanceSettlementService::payableOutstanding($lot, (int) $return->supplier_id, includePending: true)).' is still owed to this supplier on this lot: a return cannot reduce a payable that is already paid or does not exist. Use a credit note or a receivable.');
             }
             $return->update(['payable_reduction' => $payableReduction, 'credit_note_amount' => $creditNote, 'receivable_amount' => $receivable, 'difference_reason' => $differenceReason ? trim($differenceReason) : null,
-                'status' => 'verified', 'verified_by' => $user->id, 'verified_at' => now(), 'verify_note' => trim($note)]);
+                'difference_class' => $carrying > $allocated ? $differenceClass : null, 'status' => 'verified', 'verified_by' => $user->id, 'verified_at' => now(), 'verify_note' => trim($note)]);
             Audit::log('supplier_return.verified', 'return '.$return->id, trim($note).' P '.$payableReduction.' K '.$creditNote.' R '.$receivable);
         });
     }
 
-    /** The value these goods carry in the lot line's cost layers now (purchase and landed together), or a refusal. */
-    private static function carrying(SourcingLot $lot, SupplierReturn $return): int
+    /** A cost that is not recovered is classified, and freight can only be as much as the landed cost the goods carry (never a way to expense purchase cost unexplained). */
+    private static function assertDifferenceClass(int $difference, ?string $class, int $landed): void
+    {
+        if ($difference <= 0) {
+            return;
+        }
+        if (! array_key_exists((string) $class, self::DIFFERENCE_CLASSES)) {
+            throw new RuntimeException('Classify the part of the cost that is not recovered ('.Money::format($difference).'): '.collect(self::DIFFERENCE_CLASSES)->pluck('label')->implode(', ').'.');
+        }
+        if ($class === 'nonrefundable_freight' && $difference > $landed) {
+            throw new RuntimeException('Non-refundable freight or handling cannot exceed the landed cost these goods carry ('.Money::format($landed).'); classify the rest separately.');
+        }
+    }
+
+    /**
+     * The value these goods carry in the lot line's cost layers now, or a refusal.
+     *
+     * @return array{purchase: int, landed: int}
+     */
+    private static function carrying(SourcingLot $lot, SupplierReturn $return): array
     {
         self::assertSellbeesStock($lot);
         $line = $lot->lines()->findOrFail($return->sourcing_lot_line_id);
         InventoryValuation::assertIssuable($line);
-        $cost = InventoryValuation::issueCost($line, (string) $return->quantity);
 
-        return $cost['purchase'] + $cost['landed'];
+        return InventoryValuation::issueCost($line, (string) $return->quantity);
     }
 
     public static function decide(SupplierReturn $return, bool $approve, User $user, ?string $note = null): void
@@ -305,6 +343,7 @@ class SupplierReturnService
                     throw new RuntimeException('Give a reason for rejecting.');
                 }
                 $return->update(['status' => 'rejected', 'approved_by' => $user->id, 'approved_at' => now(), 'decision_note' => trim($note)]);
+                SupplierRecoveryRegistry::release('supplier_return', $return->id);
                 Audit::log('supplier_return.rejected', 'return '.$return->id, trim($note));
 
                 return;
@@ -344,6 +383,7 @@ class SupplierReturnService
             if ($difference > 0 && mb_strlen(trim((string) $return->difference_reason)) < self::EVIDENCE_MIN) {
                 throw new RuntimeException('The part of the cost that is not recovered has no stated reason, so the treatment cannot be established.');
             }
+            self::assertDifferenceClass($difference, $return->difference_class, $cost['landed']);
             $event = $return->physical_returned_on->toDateString();
             $closed = AccountingService::isClosed($event);
             $date = $closed ? today()->toDateString() : $event;
@@ -404,6 +444,10 @@ class SupplierReturnService
                 }
                 $settlement = SupplierReturnSettlement::create(['supplier_return_id' => $return->id, 'method' => $method, 'amount' => $amount, 'reference' => trim($reference), 'financial_account_id' => $accountId,
                     'settled_on' => $settledOn, 'prepared_by' => $user->id, 'idempotency_key' => $key]);
+                if ($method === 'cash_refund') {
+                    // The same bank receipt cannot be collected twice, here or as a supplier payment refund.
+                    SupplierRecoveryRegistry::claim((int) $return->supplier_id, 'bank_receipt', $reference, 'supplier_return_settlement', $settlement->id, $amount, $user->id);
+                }
                 Audit::log('supplier_return.settlement_proposed', 'return '.$return->id, $method.' '.$amount.' ref '.trim($reference));
 
                 return $settlement->refresh();
@@ -458,6 +502,7 @@ class SupplierReturnService
                     throw new RuntimeException('Give a reason for rejecting.');
                 }
                 $settlement->update(['status' => 'rejected', 'approved_by' => $user->id, 'approved_at' => now(), 'decision_note' => trim($note)]);
+                SupplierRecoveryRegistry::release('supplier_return_settlement', $settlement->id); // the receipt is free for the event that really happened
 
                 return;
             }
@@ -482,6 +527,43 @@ class SupplierReturnService
             }
             $settlement->update(['status' => 'posted', 'approved_by' => $user->id, 'approved_at' => now(), 'decision_note' => trim((string) $note) ?: null, 'journal_entry_id' => $entry->id]);
             Audit::log('supplier_return.settlement_posted', 'return '.$return->id, $settlement->method.' '.$amount);
+        });
+    }
+
+    // ── Claims for goods that never entered inventory, recovered through the supplier payment ───────────────────────────────────
+
+    /**
+     * Rejected goods never entered inventory, so the supplier's money back for them is the existing advance refund or credit-note correction of the supplier payment. This
+     * links that correction to the claim, once, so the claim is shown recovered by exactly the money that came back and no more: a correction can satisfy only one claim, the
+     * correction must belong to the same supplier and lot, and the linked corrections cannot exceed what the supplier accepted. Nothing is posted here.
+     */
+    public static function linkPaymentRecovery(SupplierReturn $return, Expense $correction, User $user): void
+    {
+        DB::transaction(function () use ($return, $correction, $user) {
+            $return = SupplierReturn::whereKey($return->id)->lockForUpdate()->firstOrFail();
+            $correction = Expense::whereKey($correction->id)->firstOrFail();
+            if (! $user->can('supplier.return.review')) {
+                throw new RuntimeException('Only Finance can link a refund or credit note to a claim.');
+            }
+            if ($return->kind !== 'unaccepted' || $return->status !== 'approved') {
+                throw new RuntimeException('Only an approved claim for goods rejected at arrival is recovered through the supplier payment; goods from inventory are settled on the return itself.');
+            }
+            $payment = $correction->reverses_id ? SupplierPayment::where('expense_id', $correction->reverses_id)->first() : null;
+            if (! $payment || ! in_array($correction->correction_type, ['refund_received', 'credit_note'], true) || ! in_array($correction->status, ['pending', 'verified'], true)) {
+                throw new RuntimeException('Choose a refund or credit-note correction of a supplier payment that is pending or verified.');
+            }
+            if ((int) $payment->supplier_id !== (int) $return->supplier_id || (int) $payment->sourcing_lot_id !== (int) $return->sourcing_lot_id) {
+                throw new RuntimeException('That correction belongs to another supplier or lot.');
+            }
+            if (SupplierRecoveryDocument::where('document_key', SupplierRecoveryRegistry::key('expense-'.$correction->id))->where('source_type', 'supplier_return')->where('source_id', $return->id)->where('active', 1)->exists()) {
+                return; // already linked: the same request twice is one link
+            }
+            $linked = SupplierRecoveryRegistry::total('supplier_return', $return->id, 'payment_correction');
+            if ($linked + (int) $correction->amount > (int) $return->accepted_amount) {
+                throw new RuntimeException('The corrections linked ('.Money::format($linked + (int) $correction->amount).') would exceed what the supplier accepted for these goods ('.Money::format((int) $return->accepted_amount).').');
+            }
+            SupplierRecoveryRegistry::claim((int) $return->supplier_id, 'payment_correction', 'expense-'.$correction->id, 'supplier_return', $return->id, (int) $correction->amount, $user->id);
+            Audit::log('supplier_return.recovery_linked', 'return '.$return->id, 'correction expense '.$correction->id.' '.$correction->amount);
         });
     }
 }

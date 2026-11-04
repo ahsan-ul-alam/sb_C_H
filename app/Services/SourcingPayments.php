@@ -154,6 +154,10 @@ class SourcingPayments
                     // refund of an advance (an asset) is not read as a cost reduction; a cash-basis payment keeps its cash-basis treatment.
                     ['reverses_id' => $expense->id, 'correction_type' => $type, 'classification' => $expense->classification, 'is_asset' => $expense->is_asset,
                         'financial_account_id' => $type === 'credit_note' ? $expense->financial_account_id : ($refundAccountId ?? $expense->financial_account_id)]);
+                if (in_array($type, ['refund_received', 'credit_note'], true)) {
+                    // The receipt or credit note is registered with every other supplier recovery: it cannot also be recognised as a supplier return's credit or refund.
+                    SupplierRecoveryRegistry::claim((int) $payment->supplier_id, $type === 'credit_note' ? 'credit_note' : 'bank_receipt', (string) $reference, 'supplier_payment_correction', $reversal->id, $amount, $user->id);
+                }
                 $payment->update(['reversal_expense_id' => $reversal->id, 'void_reason' => $reason]);
                 Audit::log('sourcing.supplier_payment.correction_requested', 'lot '.optional($payment->lot)->number, $type.' '.$amount.': '.$reason);
 
@@ -176,6 +180,10 @@ class SourcingPayments
         $payment = SupplierPayment::where('expense_id', $expense->reverses_id)->first();
         if (! $payment) {
             return;
+        }
+        if (! $approved) {
+            SupplierRecoveryRegistry::release('supplier_payment_correction', $expense->id); // a rejected correction frees its receipt or credit note
+            SupplierRecoveryRegistry::releaseReference('expense-'.$expense->id); // and no longer recovers a claim it was linked to
         }
         if ($payment->reversal_expense_id === $expense->id) {
             $payment->update(['reversal_expense_id' => null]);

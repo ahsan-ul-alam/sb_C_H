@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\InventoryHandover;
 use App\Models\InventoryHandoverReturn;
+use App\Models\InventoryLossCase;
 use App\Models\JournalEntry;
 use App\Models\SourcingAllocation;
 use App\Models\SourcingLot;
@@ -270,13 +271,10 @@ class InventoryHandoverService
                 return;
             }
 
-            // Resalable goods come back at the ORIGINAL cost. The restored value is the difference of two cumulative shares of the handover's recorded value, so
-            // partial returns add up to exactly the value released and a full return restores all of it.
-            $before = (string) $handover->returned_quantity;
-            $after = bcadd($before, (string) $return->quantity, 2);
-            $share = fn (int $value, string $units): int => bccomp($units, (string) $handover->quantity, 2) === 0 ? $value : (int) bcadd(bcdiv(bcmul((string) $value, $units, 2), (string) $handover->quantity, 6), '0.5', 0);
-            $purchase = $share((int) $handover->purchase_value, $after) - $share((int) $handover->purchase_value, $before);
-            $landed = $share((int) $handover->landed_value, $after) - $share((int) $handover->landed_value, $before);
+            // Resalable goods come back at the ORIGINAL cost: the difference of two cumulative shares of the handover's recorded value, counted over ALL units already
+            // costed (resalable returns and classified damaged returns alike), so any sequence of partial returns adds up to exactly the value released.
+            $after = bcadd((string) $handover->returned_quantity, (string) $return->quantity, 2);
+            ['purchase' => $purchase, 'landed' => $landed] = self::returnCost($handover, (string) $return->quantity);
             $restored = $purchase + $landed;
             if ($restored <= 0) {
                 throw new RuntimeException('There is no cost to restore for this quantity.');
@@ -295,6 +293,31 @@ class InventoryHandoverService
                 'purchase_value' => $purchase, 'landed_value' => $landed, 'restored_value' => $restored, 'journal_entry_id' => $entry->id]);
             Audit::log('inventory.return_approved', 'handover '.$handover->id, $return->quantity.' resalable, cost restored '.$restored);
         });
+    }
+
+    /** Units of the handover whose original cost has already been given back: resalable returns plus damaged returns classified by an approved loss case. */
+    public static function costedUnits(InventoryHandover $handover): string
+    {
+        return bcadd((string) $handover->returned_quantity, (string) InventoryLossCase::where('inventory_handover_id', $handover->id)->where('scope', 'return')->where('status', 'approved')->sum('quantity'), 2);
+    }
+
+    /**
+     * The exact original cost (purchase and landed, integer paisa) of the next $quantity units coming back: the difference of two cumulative shares, rounded half up,
+     * with the share of ALL the units equal to the whole recorded value. Every route that gives original cost back (a resalable return, a classified damaged return)
+     * uses this one function over the same unit counter, so partial returns in any order or mix add up to the value released, with no cumulative rounding drift.
+     *
+     * @return array{purchase: int, landed: int}
+     */
+    public static function returnCost(InventoryHandover $handover, string $quantity): array
+    {
+        $before = self::costedUnits($handover);
+        $after = bcadd($before, $quantity, 2);
+        if (bccomp($after, (string) $handover->quantity, 2) > 0) {
+            throw new RuntimeException('More units would be costed than were handed over.');
+        }
+        $share = fn (int $value, string $units): int => bccomp($units, (string) $handover->quantity, 2) === 0 ? $value : (int) bcadd(bcdiv(bcmul((string) $value, $units, 2), (string) $handover->quantity, 6), '0.5', 0);
+
+        return ['purchase' => $share((int) $handover->purchase_value, $after) - $share((int) $handover->purchase_value, $before), 'landed' => $share((int) $handover->landed_value, $after) - $share((int) $handover->landed_value, $before)];
     }
 
     private static function assertOwnership(SourcingLot $lot): void

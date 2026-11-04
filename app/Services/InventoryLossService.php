@@ -350,14 +350,9 @@ class InventoryLossService
         if (bccomp($quantity, Inventory::sliceBalances($line, null)['damaged'], 2) > 0) {
             throw new RuntimeException('Those units are no longer in Sellbees\' damaged stock.');
         }
-        $costed = InventoryLossCase::where('inventory_handover_id', $handover->id)->where('scope', 'return')->where('status', 'approved');
-        $restored = (int) $handover->returns()->where('status', 'approved')->where('condition', 'resalable')->sum('restored_value') + (int) (clone $costed)->sum('carrying_value');
-        $remaining = (int) $handover->cogs_value - $restored;
-        $unitsLeft = bcsub(bcsub((string) $handover->quantity, (string) $handover->returned_quantity, 2), (string) (clone $costed)->sum('quantity'), 2);
-        // Original cost of these units: its share of the handover's recorded cost, and the last units take whatever remains so that nothing is restored twice or left behind.
-        $carrying = bccomp($quantity, $unitsLeft, 2) === 0
-            ? $remaining
-            : min($remaining, (int) bcadd(bcdiv(bcmul((string) $handover->cogs_value, $quantity, 2), (string) $handover->quantity, 6), '0.5', 0));
+        // Original cost of these units: the same exact cumulative-share function the resalable returns use, over the same counter of units already costed.
+        $cost = InventoryHandoverService::returnCost($handover, $quantity);
+        $carrying = $cost['purchase'] + $cost['landed'];
         if ($carrying <= 0) {
             throw new RuntimeException('There is no original cost left to reverse for these units.');
         }

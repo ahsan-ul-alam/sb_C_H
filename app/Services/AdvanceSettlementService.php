@@ -75,7 +75,7 @@ class AdvanceSettlementService
      * Accepted goods the supplier has not been paid for yet (a payable): verified "payable" settlements minus verified payments that settle
      * them (supplier payments classified supplier_payable).
      */
-    public static function payableOutstanding(SourcingLot $lot, int $supplierId, bool $includePending = false): int
+    public static function payableOutstanding(SourcingLot $lot, int $supplierId, bool $includePending = false, bool $clamp = true): int
     {
         $owed = (int) AdvanceSettlement::where('sourcing_lot_id', $lot->id)->where('supplier_id', $supplierId)->where('kind', 'payable')->where('status', 'verified')->sum('amount');
         $counted = $includePending ? ['verified', 'pending'] : ['verified'];
@@ -84,7 +84,9 @@ class AdvanceSettlementService
             ->sum(fn (SupplierPayment $p) => $p->effectiveAmount());
 
         // What a supplier return or an applied credit note has already taken off the payable is no longer owed.
-        return max(0, $owed - $paid - SupplierReturnService::payableReduced($lot, $supplierId));
+        $left = $owed - $paid - SupplierReturnService::payableReduced($lot, $supplierId);
+
+        return $clamp ? max(0, $left) : $left; // unclamped, a negative figure shows a payable reduced or paid beyond what was owed
     }
 
     /**

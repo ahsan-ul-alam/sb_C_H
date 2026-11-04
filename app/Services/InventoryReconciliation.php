@@ -13,6 +13,7 @@ use App\Models\JournalEntry;
 use App\Models\JournalLine;
 use App\Models\SourcingLot;
 use App\Models\SourcingLotLine;
+use App\Models\SupplierRecoveryDocument;
 use App\Models\SupplierReturn;
 
 /**
@@ -322,7 +323,7 @@ class InventoryReconciliation
      * Each row shows the quantities and the value that left inventory, how the recovery was allocated, what is still open as credit or receivable, what the supplier
      * has not accepted, and what is still owed to the supplier. A difference is reported with the return it comes from and is never corrected here.
      *
-     * @return array{rows: list<array<string, mixed>>, receivable_gl: int, receivable_open: int, credit_gl: int, credit_open: int, difference_gl: int, difference_cases: int, problems: list<string>, ok: bool}
+     * @return array{rows: list<array<string, mixed>>, receivable_gl: int, receivable_open: int, credit_gl: int, credit_open: int, difference_gl: int, difference_cases: int, difference_by_class: array<string, int>, unregistered_historical_corrections: int, problems: list<string>, ok: bool}
      */
     public static function supplierReturns(): array
     {
@@ -375,6 +376,31 @@ class InventoryReconciliation
             $problems = [...$problems, ...$issues];
             $rows[] = $row;
         }
+        // Source-level checks across workflows: classified differences, claims for rejected goods against the corrections that recovered them, and payables never reduced below zero.
+        $byClass = [];
+        foreach ($approved->where('kind', 'accepted') as $r) {
+            if ((int) $r->difference_value > 0) {
+                if (! array_key_exists((string) $r->difference_class, SupplierReturnService::DIFFERENCE_CLASSES)) {
+                    $problems[] = 'Return #'.$r->id.' has cost not recovered ('.$r->difference_value.') with no difference class.';
+                } else {
+                    $byClass[$r->difference_class] = ($byClass[$r->difference_class] ?? 0) + (int) $r->difference_value;
+                }
+            }
+        }
+        foreach ($approved->where('kind', 'unaccepted') as $r) {
+            $linked = SupplierRecoveryRegistry::total('supplier_return', $r->id, 'payment_correction');
+            if ($linked > (int) $r->accepted_amount) {
+                $problems[] = 'Claim #'.$r->id.' for rejected goods is recovered through payment corrections ('.$linked.') above what the supplier accepted ('.$r->accepted_amount.').';
+            }
+        }
+        foreach ($approved->where('kind', 'accepted')->unique(fn (SupplierReturn $r) => $r->sourcing_lot_id.'-'.$r->supplier_id) as $r) {
+            $raw = AdvanceSettlementService::payableOutstanding($r->lot, (int) $r->supplier_id, clamp: false);
+            if ($raw < 0) {
+                $problems[] = 'Lot '.$r->lot->number.', supplier '.$r->supplier_id.': the payable is '.$raw.' after returns and payments (reduced or paid beyond what was owed).';
+            }
+        }
+        $unregistered = Expense::whereNotNull('reverses_id')->where('status', 'verified')->whereIn('correction_type', ['refund_received', 'credit_note'])->count()
+            - SupplierRecoveryDocument::where('source_type', 'supplier_payment_correction')->count();
         foreach (SupplierReturn::selectRaw('supplier_id, supplier_document, COUNT(*) n')->whereNotNull('supplier_document')->whereNotIn('status', ['rejected', 'cancelled'])->groupBy('supplier_id', 'supplier_document')->havingRaw('COUNT(*) > 1')->get() as $d) {
             $problems[] = 'Credit note or acceptance document "'.$d->supplier_document.'" of supplier '.$d->supplier_id.' is registered on '.$d->n.' returns (a credit is recognised once).';
         }
@@ -394,7 +420,7 @@ class InventoryReconciliation
         }
 
         return ['rows' => $rows, 'receivable_gl' => $receivableGl, 'receivable_open' => $receivableOpen, 'credit_gl' => $creditGl, 'credit_open' => $creditOpen, 'difference_gl' => $differenceGl,
-            'difference_cases' => $differenceCases, 'problems' => $problems, 'ok' => $problems === []];
+            'difference_cases' => $differenceCases, 'difference_by_class' => $byClass, 'unregistered_historical_corrections' => max(0, $unregistered), 'problems' => $problems, 'ok' => $problems === []];
     }
 
     /** Inventory value of one lot as its own journal entries state it (settlements, capitalised costs, transport, whole-lot release, and their reversals). */

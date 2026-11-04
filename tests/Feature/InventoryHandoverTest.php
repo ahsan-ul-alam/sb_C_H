@@ -773,3 +773,46 @@ it('serves the damage and write-off screens with the same separation of duties: 
     $detail = $this->co->as('board')->get(route('sourcing.losses.show', $case))->assertOk()->getContent();
     expect($detail)->toContain('Source journal entry')->and($detail)->toContain('inventory_loss')->and($detail)->toContain('Inventory value movements');
 });
+
+it('conserves the exact cost over partial returns in any sequence and mix: every unit counted once, no rounding drift, no over-return', function () {
+    $sequences = [['resalable', 'damaged', 'resalable'], ['damaged', 'resalable', 'resalable'], ['resalable', 'resalable', 'damaged'], ['damaged', 'damaged', 'resalable']];
+    foreach ($sequences as $sequence) {
+        [$lot, $line, $allocation] = hoLot('3', 33_334, 100);                                     // 100,002 purchase + 100 landed = 100,102 over three indivisible units
+        $handover = hoApprove(hoPropose($allocation, '3'));
+        $costs = [];
+        foreach ($sequence as $i => $condition) {
+            $return = InventoryHandoverService::proposeReturn($handover->refresh(), '1', $condition, '2026-11-10', 'Return note RT-'.$i.' signed', 'Order cancelled', (string) Str::uuid(), $this->finance);
+            InventoryHandoverService::decideReturn($return, true, $this->board);
+            if ($condition === 'resalable') {
+                $costs[] = $return->refresh()->restored_value;
+            } else {
+                $case = lossDecide(lossCase(['scope' => 'return', 'inventory_handover_return_id' => $return->id, 'quantity' => '1']));
+                $costs[] = $case->carrying_value;
+            }
+        }
+        // Each unit's share is within one paisa of the exact third, and together they are exactly what the handover released.
+        expect(array_sum($costs))->toBe(100_102)->and(collect($costs)->every(fn ($c) => abs($c - 33_367.33) <= 1))->toBeTrue()
+            ->and(InventoryHandoverService::costedUnits($handover->refresh()))->toBe('3.00')->and(fn () => InventoryHandoverService::returnCost($handover, '1'))->toThrow(RuntimeException::class, 'More units')
+            ->and(InventoryReconciliation::handovers()['ok'])->toBeTrue();
+    }
+    // Four handovers, each fully returned in a different mix: cost of goods sold is exactly what the survivors' losses leave, and nothing is left over.
+    expect(hoCogs())->toBe(0)->and(InventoryReconciliation::company()['ok'])->toBeTrue()->and(ledgerAudit()['unbalanced'])->toBe(0);
+});
+
+it('never lets partial returns of one handover take cost from another: each handover keeps its own recorded value', function () {
+    $product = custodyProduct();
+    [$lot, $line, $first] = hoLot(allocate: '40', product: $product);
+    $other = $this->co->project($this->client, 'Second project');
+    $second = Sourcing::allocate($lot->refresh(), ['project_id' => $other->id, 'line_id' => $line->id, 'kind' => 'sale', 'quantity' => '60'], $this->finance);
+    $a = hoApprove(hoPropose($first, '40'));
+    $b = hoApprove(hoPropose($second, '60'));
+    $ra = InventoryHandoverService::proposeReturn($a, '7', 'resalable', '2026-11-10', 'Return note RT-A signed', 'Wrong item', (string) Str::uuid(), $this->finance);
+    InventoryHandoverService::decideReturn($ra, true, $this->board);
+    $rb = InventoryHandoverService::proposeReturn($b, '13', 'resalable', '2026-11-10', 'Return note RT-B signed', 'Wrong item', (string) Str::uuid(), $this->finance);
+    InventoryHandoverService::decideReturn($rb, true, $this->board);
+
+    // 55,000 paisa a unit: 7 units of A and 13 units of B, each from its own handover's value.
+    expect($ra->refresh()->restored_value)->toBe(385_000)->and($rb->refresh()->restored_value)->toBe(715_000)
+        ->and(InventoryHandoverService::costedUnits($a->refresh()))->toBe('7.00')->and(InventoryHandoverService::costedUnits($b->refresh()))->toBe('13.00')
+        ->and(hoCogs())->toBe(5_500_000 - 385_000 - 715_000)->and(InventoryReconciliation::handovers()['ok'])->toBeTrue();
+});

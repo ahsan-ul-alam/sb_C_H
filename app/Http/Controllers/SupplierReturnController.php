@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Expense;
 use App\Models\FinancialAccount;
 use App\Models\InventoryValueMovement;
 use App\Models\SourcingLot;
@@ -80,10 +81,10 @@ class SupplierReturnController extends Controller
     public function verify(Request $request, SupplierReturn $supplierReturn): RedirectResponse
     {
         $data = $request->validate(['verify_note' => ['required', 'string', 'max:255'], 'payable_reduction' => ['nullable', 'regex:'.Money::AMOUNT_REGEX], 'credit_note_amount' => ['nullable', 'regex:'.Money::AMOUNT_REGEX],
-            'receivable_amount' => ['nullable', 'regex:'.Money::AMOUNT_REGEX], 'difference_reason' => ['nullable', 'string', 'max:255']]);
+            'receivable_amount' => ['nullable', 'regex:'.Money::AMOUNT_REGEX], 'difference_reason' => ['nullable', 'string', 'max:255'], 'difference_class' => ['nullable', 'in:'.implode(',', array_keys(SupplierReturnService::DIFFERENCE_CLASSES))]]);
 
         return $this->attempt(fn () => SupplierReturnService::verify($supplierReturn, $request->user(), $data['verify_note'], Money::toMinor($data['payable_reduction'] ?? 0), Money::toMinor($data['credit_note_amount'] ?? 0),
-            Money::toMinor($data['receivable_amount'] ?? 0), $data['difference_reason'] ?? null), 'Verified. A Board member can now decide it.');
+            Money::toMinor($data['receivable_amount'] ?? 0), $data['difference_reason'] ?? null, $data['difference_class'] ?? null), 'Verified. A Board member can now decide it.');
     }
 
     public function decide(Request $request, SupplierReturn $supplierReturn): RedirectResponse
@@ -91,6 +92,13 @@ class SupplierReturnController extends Controller
         $approve = $request->input('decision') === 'approve';
 
         return $this->attempt(fn () => SupplierReturnService::decide($supplierReturn, $approve, $request->user(), $request->input('reason')), $approve ? 'Approved and posted.' : 'Rejected.');
+    }
+
+    public function link(Request $request, SupplierReturn $supplierReturn): RedirectResponse
+    {
+        $data = $request->validate(['expense_id' => ['required', 'exists:expenses,id']]);
+
+        return $this->attempt(fn () => SupplierReturnService::linkPaymentRecovery($supplierReturn, Expense::findOrFail($data['expense_id']), $request->user()), 'Linked: the claim is recovered by that refund or credit note.');
     }
 
     public function cancel(Request $request, SupplierReturn $supplierReturn): RedirectResponse

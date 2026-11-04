@@ -15,7 +15,7 @@
             <dt>Decision</dt><dd>{{ $return->approver ? ucfirst($return->status).' by '.$return->approver->name.' on '.$return->approved_at->format('j M Y').($return->decision_note ? ' · '.$return->decision_note : '') : ($return->decision_note ?: 'Not decided') }}</dd>
             @if ($return->status === 'approved' && $return->kind === 'accepted')
                 <dt>Cost removed</dt><dd>{{ Money::format($return->carrying_value) }} (purchase {{ Money::format($return->purchase_value) }} + landed {{ Money::format($return->landed_value) }}) · posted {{ $return->posted_on->format('j M Y') }}@if ($return->prior_period) <strong>· physical return in a closed period, recorded in the open period: flagged for Finance review</strong>@endif</dd>
-                <dt>Not recovered</dt><dd>{{ Money::format($return->difference_value) }}@if ($return->difference_reason) · {{ $return->difference_reason }}@endif</dd>
+                <dt>Not recovered</dt><dd>{{ Money::format($return->difference_value) }}@if ($return->difference_class) · {{ \App\Services\SupplierReturnService::DIFFERENCE_CLASSES[$return->difference_class]['label'] }}@endif @if ($return->difference_reason) · {{ $return->difference_reason }}@endif</dd>
             @endif
         </dl>
     </div></section>
@@ -43,6 +43,13 @@
     </section>
     @elseif ($return->status === 'approved')
     <section class="panel"><div class="panel-body muted">No journal entry: these goods never entered inventory, so there is no inventory to reverse. Any refund or credit for them is handled on the supplier payment.</div></section>
+    @endif
+
+    @if ($return->kind === 'unaccepted' && $return->status === 'approved')
+    <section class="panel"><div class="panel-head"><h2>Recovery of this claim</h2></div><div class="panel-body">
+        <p class="muted">These goods never entered inventory, so nothing is posted here. The supplier's money for them comes back as a refund or credit note on the supplier payment; link it once so the claim shows what recovered it.</p>
+        @can('supplier.return.review')<form method="POST" action="{{ route('sourcing.supplier-returns.link', $return) }}" style="display:inline-flex; gap:.4rem">@csrf<input name="expense_id" placeholder="Correction expense no." inputmode="numeric" required><button class="btn btn-sm">Link</button></form>@endcan
+    </div></section>
     @endif
 
     @if ($return->settlements->isNotEmpty())
