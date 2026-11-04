@@ -197,6 +197,6 @@ it('serves the earned revenue screens with the same separation of duties', funct
 it('charges storage only with a contract, a measured area and a rate, and lists everything else as configuration required without ever charging it', function () {
     expect(StorageBilling::configurationExceptions())->toBe([]);                                  // no units on hand: nothing to bill or to report
     expect(StorageBilling::contractInForce($this->client, '2026-11-10'))->toBeFalse();
-    $this->co->post('clients', 'finance.storage-contract', ['storage_contract_reference' => 'Warehouse agreement WA-2026-3', 'storage_contract_from' => '2026-10-01'], $this->client)->assertSessionHasNoErrors();
+    $this->co->post('finance', 'finance.storage-contract', ['storage_contract_reference' => 'Warehouse agreement WA-2026-3', 'storage_contract_from' => '2026-10-01'], $this->client)->assertSessionHasNoErrors();
     expect(StorageBilling::contractInForce($this->client->refresh(), '2026-11-10'))->toBeTrue()->and(StorageBilling::contractInForce($this->client, '2026-09-30'))->toBeFalse();
 });
