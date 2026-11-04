@@ -37,6 +37,7 @@
             ['Investment Overview', 'finance.investment', 'finance.view', 'chart', ['finance.investment']],
             ['Financial Position', 'finance.position', 'finance.view', 'layers', ['finance.position']],
             ['Profit & Loss', 'finance.pnl', 'finance.view', 'chart', ['finance.pnl']],
+            ['Ledger Reports', 'finance.ledger-reports', 'finance.view', 'chart', ['finance.ledger-reports']],
             ['Finance Automation', 'finance.automation', 'finance.view', 'check-circle', ['finance.automation*']],
             ['Order Commission', 'finance.orders', 'commission.view', 'invoice', ['finance.orders*']],
             ['Investments', 'finance.capital', 'finance.view', 'cash', ['finance.capital*']],

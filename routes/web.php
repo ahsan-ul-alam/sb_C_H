@@ -21,6 +21,7 @@ use App\Http\Controllers\HomeController;
 use App\Http\Controllers\InventoryHandoverController;
 use App\Http\Controllers\InventoryLossController;
 use App\Http\Controllers\InvoiceController;
+use App\Http\Controllers\LedgerReportController;
 use App\Http\Controllers\LoanController;
 use App\Http\Controllers\LoanReceivableController;
 use App\Http\Controllers\NotificationController;
@@ -282,6 +283,7 @@ Route::middleware('auth')->group(function () {
             Route::get('investment', [FinancialStatementsController::class, 'investment'])->name('investment');
             Route::get('position', [FinancialStatementsController::class, 'position'])->name('position');
             Route::get('profit-loss', [FinancialStatementsController::class, 'profitLoss'])->name('pnl');
+            Route::get('ledger-reports', [LedgerReportController::class, 'index'])->name('ledger-reports');
             Route::get('automation', [AutomationController::class, 'index'])->name('automation');
             Route::get('overview', [FinancialOverviewController::class, 'index'])->name('overview');
             Route::get('accounts', [FinancialAccountController::class, 'index'])->name('accounts');

@@ -25,9 +25,11 @@ class Money
         }
 
         $value = str_replace(',', '', $value);
-        [$whole, $fraction] = array_pad(explode('.', $value, 2), 2, '');
+        $negative = str_starts_with($value, '-');
+        [$whole, $fraction] = array_pad(explode('.', ltrim($value, '-'), 2), 2, '');
+        $minor = ((int) $whole) * 100 + (int) str_pad(substr($fraction, 0, 2), 2, '0');
 
-        return ((int) $whole) * 100 + (int) str_pad(substr($fraction, 0, 2), 2, '0');
+        return $negative ? -$minor : $minor;
     }
 
     /**
@@ -35,7 +37,10 @@ class Money
      */
     public static function toDecimal(int $minor): string
     {
-        return intdiv($minor, 100).'.'.str_pad((string) ($minor % 100), 2, '0', STR_PAD_LEFT);
+        $sign = $minor < 0 ? '-' : '';
+        $minor = abs($minor);
+
+        return $sign.intdiv($minor, 100).'.'.str_pad((string) ($minor % 100), 2, '0', STR_PAD_LEFT);
     }
 
     /**

@@ -16,10 +16,12 @@ use App\Services\InventoryEngine;
 use App\Services\InventoryHandoverService;
 use App\Services\InventoryReconciliation;
 use App\Services\InventoryValuation;
+use App\Services\LedgerStatements;
 use App\Services\Sourcing;
 use App\Services\SourcingArrival;
 use App\Services\SourcingPayments;
 use App\Services\SupplierReturnService;
+use App\Support\Money;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
@@ -602,4 +604,40 @@ it('reconciles every approved return across workflows to the ledger: recovery, c
     expect($r['ok'])->toBeTrue()->and($r['problems'])->toBe([])->and($r['receivable_gl'])->toBe(0)->and($r['credit_gl'])->toBe(300_000)->and($r['difference_gl'])->toBe($goods->difference_value)
         ->and(collect($r['rows'])->firstWhere('kind', 'unaccepted')['issues'])->toBe([])
         ->and(InventoryReconciliation::company()['ok'])->toBeTrue()->and(ledgerAudit()['unbalanced'])->toBe(0)->and(ledgerAudit()['duplicates'])->toBe(0);
+});
+
+it('formats negative decimals correctly for inputs and exports', function () {
+    expect(Money::toDecimal(150))->toBe('1.50')->and(Money::toDecimal(-150))->toBe('-1.50')->and(Money::toDecimal(-5))->toBe('-0.05')->and(Money::toDecimal(0))->toBe('0.00')
+        ->and(Money::toMinor(Money::toDecimal(-123_456)))->toBe(-123_456);
+});
+
+it('reads the trial balance, operational profit, cash flow, aging and exceptions from the ledger, with the bridge to the profit allocation reads', function () {
+    [$lot, $line] = srLot();
+    $return = srApprove($line, p: 1_000_000, reason: 'Freight is not refundable', class: 'nonrefundable_freight');
+    $S = LedgerStatements::class;
+
+    $tb = $S::trialBalance();
+    expect($tb['balanced'])->toBeTrue()->and($tb['total_debit'])->toBe($tb['total_credit'])->and(collect($tb['rows'])->pluck('account'))->toContain('supplier_return_difference');
+
+    $profit = $S::operationalProfit('2026-11-01', '2026-11-30');
+    expect($profit['inventory']['supplier_return_difference'])->toBe(100_000)->and($profit['inventory_total'])->toBe(100_000)->and($profit['operational_profit'])->toBe($profit['ledger_profit'] - 100_000)
+        ->and($profit['inventory']['cogs'])->toBe(0);
+
+    $cash = $S::cashFlow('2026-11-01', '2026-11-30');
+    expect($cash['agrees'])->toBeTrue()->and($cash['sections']['financing']['in'])->toBe(1_000_000_00)->and($cash['closing'])->toBe($cash['ledger_closing'])
+        ->and($cash['sections']['operating']['out'])->toBeGreaterThan(0)->and($cash['opening'])->toBe(0);
+    expect($S::cashFlow('2026-11-05', '2026-11-30')['opening'])->toBe(1_000_000_00);          // opening is the ledger's cash before the period
+
+    // Supplier payable by age: 4,000,000 still owed (5,000,000 less the 1,000,000 the return took), recognised on 2026-11-08.
+    $aging = $S::supplierAging('2026-11-10');
+    expect($aging['total'])->toBe(4_000_000)->and($aging['buckets']['current'])->toBe(4_000_000)->and($aging['rows'][0]['lot_id'])->toBe($lot->id);
+    $later = $S::supplierAging('2027-03-01');
+    expect($later['buckets']['over_90'])->toBe(4_000_000)->and($later['buckets']['current'])->toBe(0);
+
+    expect($S::exceptions())->toBe([]);
+    srPropose($line, '5', ['claimed_amount' => 275_000]);
+    expect(collect($S::exceptions())->pluck('message')->implode(' '))->toContain('Supplier returns awaiting a decision: 1');
+
+    $page = $this->co->as('finance')->get(route('finance.ledger-reports'))->assertOk()->getContent();
+    expect($page)->toContain('Operational profit (ledger)')->and($page)->toContain('Balanced')->and($page)->toContain('Cost of returned goods not recovered from suppliers');
 });
