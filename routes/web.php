@@ -286,6 +286,7 @@ Route::middleware('auth')->group(function () {
             Route::get('profit-loss', [FinancialStatementsController::class, 'profitLoss'])->name('pnl');
             Route::get('ledger-reports', [LedgerReportController::class, 'index'])->name('ledger-reports');
             Route::post('storage-contract/{client}', [LedgerReportController::class, 'storageContract'])->name('storage-contract')->middleware('can:commission.manage');
+            Route::get('project-profit', [LedgerReportController::class, 'projects'])->name('project-profit');
             Route::get('revenue-events', [RevenueEventController::class, 'index'])->name('revenue-events');
             Route::post('revenue-events', [RevenueEventController::class, 'store'])->name('revenue-events.store')->middleware('can:revenue.event.propose');
             Route::post('revenue-events/{event}/decide', [RevenueEventController::class, 'decide'])->name('revenue-events.decide')->middleware('can:revenue.event.approve');

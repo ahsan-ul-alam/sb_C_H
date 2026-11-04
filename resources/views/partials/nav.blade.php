@@ -37,6 +37,7 @@
             ['Investment Overview', 'finance.investment', 'finance.view', 'chart', ['finance.investment']],
             ['Financial Position', 'finance.position', 'finance.view', 'layers', ['finance.position']],
             ['Profit & Loss', 'finance.pnl', 'finance.view', 'chart', ['finance.pnl']],
+            ['Project Profit', 'finance.project-profit', 'finance.view', 'chart', ['finance.project-profit']],
             ['Earned Revenue', 'finance.revenue-events', 'finance.view', 'chart', ['finance.revenue-events*']],
             ['Ledger Reports', 'finance.ledger-reports', 'finance.view', 'chart', ['finance.ledger-reports']],
             ['Finance Automation', 'finance.automation', 'finance.view', 'check-circle', ['finance.automation*']],

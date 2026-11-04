@@ -13,6 +13,7 @@ use App\Models\JournalEntry;
 use App\Models\StockMovement;
 use App\Models\Supplier;
 use App\Models\SupplierProduct;
+use App\Services\AccrualRevenue;
 use App\Services\AdvanceSettlementService;
 use App\Services\ImpairedStockService;
 use App\Services\Inventory;
@@ -26,6 +27,7 @@ use App\Services\InventoryValuation;
 use App\Services\Ledger;
 use App\Services\LedgerStatements;
 use App\Services\OrderFulfilment;
+use App\Services\ProjectAccounting;
 use App\Services\Sourcing;
 use App\Services\SourcingArrival;
 use App\Services\SourcingPayments;
@@ -964,4 +966,30 @@ it('maps a loss by its cause: fulfilment-related normal loss to cost of goods so
         ->and(InventoryReconciliation::losses()['ok'])->toBeTrue()->and(InventoryReconciliation::company()['ok'])->toBeTrue();
     $profit = LedgerStatements::operationalProfit('2026-11-01', '2026-11-30');
     expect($profit['inventory']['operating_inventory_loss'])->toBe(165_000)->and($profit['inventory']['cogs'])->toBe(110_000)->and($profit['inventory_total'])->toBe(110_000 + 165_000 + 55_000);
+});
+
+it('reports each project from the journal and reconciles the projects to the company: unattributed items and overhead stay at company level', function () {
+    config(['finance.accrual_revenue_from' => '2026-11-01']);
+    [$lot, $line, $allocation] = hoLot(product: custodyProduct());
+    $this->co->segment($this->project, 'Build', '10000');
+    $handover = hoApprove(hoPropose($allocation, '40'));                                          // cost of goods sold 2,200,000, the project's
+    AccrualRevenue::setArrangement($this->project, 'principal', 'Contract clause 4: Sellbees controls the goods and bears delivery risk', $this->finance);
+    $sale = AccrualRevenue::propose($this->finance, $this->project, 'recognition', ['amount' => 900_000, 'effective_on' => '2026-11-10', 'basis' => 'sale', 'inventory_handover_id' => $handover->id, 'evidence_reference' => 'Signed receiving note RN-1'], (string) Str::uuid());
+    AccrualRevenue::decide($sale, true, $this->board);
+    // A damaged return of 5 units classified as an abnormal loss (the project's), and owned stock written off (the company's, no project).
+    $return = InventoryHandoverService::proposeReturn($handover->refresh(), '5', 'damaged', '2026-11-10', 'Return note RT-77 signed', 'Crushed', (string) Str::uuid(), $this->finance);
+    InventoryHandoverService::decideReturn($return, true, $this->board);
+    lossDecide(lossCase(['scope' => 'return', 'inventory_handover_return_id' => $return->id, 'quantity' => '5']));
+    Inventory::adjust($line, '-3', 'Stock-take', $this->finance, asDamage: true);
+    lossDecide(lossCase(['sourcing_lot_line_id' => $line->id, 'from_bucket' => 'damaged', 'quantity' => '3']));
+
+    $report = ProjectAccounting::report('2026-11-01', '2026-11-30');
+    $row = collect($report['rows'])->firstWhere('project_id', $this->project->id);
+    // Revenue 900,000; cost of goods sold 2,200,000 less the 275,000 of the returned units reclassified into the abnormal loss; the loss itself 275,000.
+    expect($row['revenue'])->toBe(900_000)->and($row['cogs'])->toBe(1_925_000)->and($row['inventory_losses'])->toBe(275_000)->and($row['gross_profit'])->toBe(900_000 - 1_925_000)
+        ->and($row['contribution'])->toBe(900_000 - 1_925_000 - 275_000)->and($row['budget'])->toBeNull()->and($row['custody_units'])->toBe('35.00')
+        ->and($report['bridge']['unattributed_inventory_results'])->toBe(-165_000)                // the owned stock written off belongs to no project
+        ->and($report['reconciles'])->toBeTrue();
+    $page = $this->co->as('finance')->get(route('finance.project-profit'))->assertOk()->getContent();
+    expect($page)->toContain('Company reconciliation')->and($page)->toContain('not configured')->and($page)->toContain('Reconciles');
 });

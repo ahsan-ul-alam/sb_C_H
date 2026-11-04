@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Client;
 use App\Services\Audit;
 use App\Services\LedgerStatements;
+use App\Services\ProjectAccounting;
 use App\Services\StorageBilling;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -23,6 +24,15 @@ class LedgerReportController extends Controller
         Audit::log('storage.contract', 'client '.$client->id, $data['storage_contract_reference'].' from '.$data['storage_contract_from']);
 
         return back()->with('success', 'Storage contract recorded.');
+    }
+
+    public function projects(Request $request): View
+    {
+        $data = $request->validate(['from' => ['nullable', 'date'], 'to' => ['nullable', 'date', 'after_or_equal:from']]);
+        $to = $data['to'] ?? today()->toDateString();
+        $from = $data['from'] ?? substr($to, 0, 8).'01';
+
+        return view('finance.project-profit', ['report' => ProjectAccounting::report($from, $to)]);
     }
 
     public function index(Request $request): View
