@@ -18,6 +18,7 @@ use App\Http\Controllers\FinancialCompletenessController;
 use App\Http\Controllers\FinancialOverviewController;
 use App\Http\Controllers\FinancialStatementsController;
 use App\Http\Controllers\HomeController;
+use App\Http\Controllers\InventoryHandoverController;
 use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\LoanController;
 use App\Http\Controllers\LoanReceivableController;
@@ -173,6 +174,17 @@ Route::middleware('auth')->group(function () {
         Route::post('fund/{fundRequest}/utilise', [EmergencyFundController::class, 'utilise'])->name('fund.utilise')->middleware('can:sourcing.fund.utilize');
         Route::post('fund/{fundRequest}/reverse', [EmergencyFundController::class, 'reverse'])->name('fund.reverse')->middleware('can:sourcing.fund.utilize');
         Route::post('fund/{fundRequest}/cancel', [EmergencyFundController::class, 'cancel'])->name('fund.cancel')->middleware('can:sourcing.fund.request');
+
+        // Client handover (transfer of control): the event that turns Sellbees-owned inventory into cost of goods sold. Reading needs inventory.view, a request
+        // inventory.handover.propose, and a decision the Board's inventory.handover.approve (never the person who made the request).
+        Route::get('handovers', [InventoryHandoverController::class, 'index'])->name('handovers')->middleware('can:inventory.view');
+        Route::get('handovers/{handover}', [InventoryHandoverController::class, 'show'])->name('handovers.show')->middleware('can:inventory.view')->whereNumber('handover');
+        Route::post('handovers', [InventoryHandoverController::class, 'store'])->name('handovers.store')->middleware('can:inventory.handover.propose');
+        Route::post('handovers/{handover}/cancel', [InventoryHandoverController::class, 'cancel'])->name('handovers.cancel')->middleware('can:inventory.handover.propose');
+        Route::post('handovers/{handover}/decide', [InventoryHandoverController::class, 'decide'])->name('handovers.decide')->middleware('can:inventory.handover.approve');
+        Route::post('handovers/{handover}/returns', [InventoryHandoverController::class, 'storeReturn'])->name('handovers.returns.store')->middleware('can:inventory.handover.propose');
+        Route::post('handover-returns/{handoverReturn}/cancel', [InventoryHandoverController::class, 'cancelReturn'])->name('handovers.returns.cancel')->middleware('can:inventory.handover.propose');
+        Route::post('handover-returns/{handoverReturn}/decide', [InventoryHandoverController::class, 'decideReturn'])->name('handovers.returns.decide')->middleware('can:inventory.handover.approve');
     });
 
     // Product operations: inventory, orders & delivery, client settlements. Reads need inventory.view / settlement.view; each write has its own permission.

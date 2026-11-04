@@ -5,6 +5,8 @@ namespace App\Services;
 use App\Models\AdvanceSettlement;
 use App\Models\Expense;
 use App\Models\InventoryEngineEnrolment;
+use App\Models\InventoryHandover;
+use App\Models\InventoryHandoverReturn;
 use App\Models\InventoryValueMovement;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
@@ -64,12 +66,18 @@ class InventoryValuation
 
     // ── Reading the subledger ────────────────────────────────────────────────────────────────────────────────────────────────────
 
-    /** @return array{purchase: int, landed: int, quantity: string} */
+    /**
+     * What a line holds now (net of issues and returns) and what has been valued at all: "purchase_valued" is the purchase value recognised from settlements,
+     * before any stock was handed over, which is what the accepted goods are measured against.
+     *
+     * @return array{purchase: int, landed: int, quantity: string, purchase_valued: int}
+     */
     public static function lineFigures(SourcingLotLine $line): array
     {
         $rows = InventoryValueMovement::where('sourcing_lot_line_id', $line->id)->selectRaw('component, COALESCE(SUM(value_delta),0) v, COALESCE(SUM(quantity_delta),0) q')->groupBy('component')->get()->keyBy('component');
+        $valued = (int) InventoryValueMovement::where('sourcing_lot_line_id', $line->id)->where('component', 'purchase')->whereNotIn('type', ['issue', 'issue_return'])->sum('value_delta');
 
-        return ['purchase' => (int) ($rows['purchase']->v ?? 0), 'landed' => (int) ($rows['landed']->v ?? 0), 'quantity' => bcadd((string) ($rows['quantity']->q ?? 0), '0', 2)];
+        return ['purchase' => (int) ($rows['purchase']->v ?? 0), 'landed' => (int) ($rows['landed']->v ?? 0), 'quantity' => bcadd((string) ($rows['quantity']->q ?? 0), '0', 2), 'purchase_valued' => $valued];
     }
 
     /** Value of the line's stock in the subledger, integer minor units. */
@@ -115,7 +123,7 @@ class InventoryValuation
         $quantity = [];
         foreach ($lines as $id => $line) {
             $f = self::lineFigures($line);
-            $purchase[$id] = $f['purchase'];
+            $purchase[$id] = $f['purchase_valued']; // valued against the accepted goods, before any hand-over
             $quantity[$id] = $f['quantity'];
         }
 
@@ -286,7 +294,8 @@ class InventoryValuation
     {
         foreach ($lines as $line) {
             $accepted = self::acceptedValue($line);
-            $target = $accepted > 0 && $state['purchase'][$line->id] >= $accepted ? bcadd((string) $line->usable_quantity, '0', 2) : '0.00';
+            // Valued goods are the accepted quantity less what has been handed over; nothing is counted until the purchase is fully valued.
+            $target = $accepted > 0 && $state['purchase'][$line->id] >= $accepted ? bcsub((string) $line->usable_quantity, self::issuedQuantity($line), 2) : '0.00';
             $delta = bcsub($target, $state['quantity'][$line->id], 2);
             if (bccomp($delta, '0', 2) === 0) {
                 continue;
@@ -384,16 +393,69 @@ class InventoryValuation
         foreach ($removed as $lineId => $value) {
             $line = SourcingLotLine::find($lineId);
             $f = self::lineFigures($line);
-            if ($f['landed'] > 0 && self::acceptedValue($line) > $f['purchase'] - $value) {
+            if (self::hasIssued(SourcingLot::findOrFail($settlement->sourcing_lot_id))) {
+                throw new RuntimeException('Stock of this lot has already been handed over to clients, so this settlement can no longer be reversed. Reverse the handover first.');
+            }
+            if ($f['landed'] > 0 && self::acceptedValue($line) > $f['purchase_valued'] - $value) {
                 throw new RuntimeException('Capitalised costs ('.Money::format($f['landed']).') still sit on "'.$line->description.'". Reverse, reallocate or write off those costs first, so no value is left on stock that is no longer valued.');
             }
         }
     }
 
-    /** Refuse to issue stock whose value is not fully recognised (used by the handover step in a later phase). */
+    /**
+     * The exact integer value of $quantity leaving a line's cost layers, share by share. Purchase and landed value are each issued in proportion to the
+     * valued quantity held, rounded half up, and the issue of everything that is left takes the whole remainder, so what is issued over time always adds
+     * up to exactly what was valued: no cumulative rounding drift.
+     *
+     * @return array{purchase: int, landed: int}
+     */
+    public static function issueCost(SourcingLotLine $line, string $quantity): array
+    {
+        $f = self::lineFigures($line);
+        if (bccomp($quantity, '0', 2) <= 0 || bccomp($quantity, $f['quantity'], 2) > 0) {
+            throw new RuntimeException('Only '.$f['quantity'].' of this line is valued and available to hand over.');
+        }
+        $share = fn (int $value): int => bccomp($quantity, $f['quantity'], 2) === 0 ? $value : (int) bcadd(bcdiv(bcmul((string) $value, $quantity, 2), $f['quantity'], 6), '0.5', 0);
+
+        return ['purchase' => $share($f['purchase']), 'landed' => $share($f['landed'])];
+    }
+
+    /** Remove the valued quantity and its exact value from the line's layers for an approved handover. The journal entry already carries the cost of goods sold. */
+    public static function recordIssue(InventoryHandover $handover, SourcingLotLine $line, int $purchase, int $landed, int $journalId, User $approver): void
+    {
+        $lot = SourcingLot::findOrFail($handover->sourcing_lot_id);
+        $enrolment = InventoryEngineEnrolment::where('sourcing_lot_id', $lot->id)->where('status', 'approved')->where('ownership', 'company')->firstOrFail();
+        $common = ['type' => 'issue', 'project_id' => $handover->project_id, 'valuation_status' => 'valued', 'source_type' => 'inventory_handover', 'source_id' => $handover->id, 'journal_entry_id' => $journalId,
+            'effective_on' => self::effectiveOn($handover->transferred_on->toDateString(), $enrolment), 'verified_by' => $approver->id, 'verified_at' => now(), 'created_by' => $handover->prepared_by,
+            'reason' => 'Control transferred to the client (handover #'.$handover->id.')'];
+        foreach (['purchase' => $purchase, 'landed' => $landed] as $component => $value) {
+            if ($value !== 0) {
+                self::record($lot, $line, $enrolment, $common + ['component' => $component, 'value_delta' => -$value, 'move_key' => 'hov:'.$handover->id.':'.$component]);
+            }
+        }
+        self::record($lot, $line, $enrolment, $common + ['component' => 'quantity', 'quantity_delta' => bcmul((string) $handover->quantity, '-1', 2), 'move_key' => 'hov:'.$handover->id.':quantity']);
+    }
+
+    /** Put returned resalable goods back at their original cost (no quantity effect for a damaged return, which is recorded on the return only). */
+    public static function recordReturn(InventoryHandoverReturn $return, InventoryHandover $handover, SourcingLotLine $line, int $purchase, int $landed, int $journalId, string $date, User $approver): void
+    {
+        $lot = SourcingLot::findOrFail($handover->sourcing_lot_id);
+        $enrolment = InventoryEngineEnrolment::where('sourcing_lot_id', $lot->id)->where('status', 'approved')->where('ownership', 'company')->firstOrFail();
+        $common = ['type' => 'issue_return', 'project_id' => $handover->project_id, 'valuation_status' => 'valued', 'source_type' => 'inventory_handover_return', 'source_id' => $return->id, 'journal_entry_id' => $journalId,
+            'effective_on' => self::effectiveOn($date, $enrolment), 'verified_by' => $approver->id, 'verified_at' => now(), 'created_by' => $return->prepared_by,
+            'reason' => 'Resalable goods returned (handover #'.$handover->id.')'];
+        foreach (['purchase' => $purchase, 'landed' => $landed] as $component => $value) {
+            if ($value !== 0) {
+                self::record($lot, $line, $enrolment, $common + ['component' => $component, 'value_delta' => $value, 'move_key' => 'hovr:'.$return->id.':'.$component]);
+            }
+        }
+        self::record($lot, $line, $enrolment, $common + ['component' => 'quantity', 'quantity_delta' => (string) $return->quantity, 'move_key' => 'hovr:'.$return->id.':quantity']);
+    }
+
+    /** Refuse to issue stock whose value is not fully recognised. */
     public static function assertIssuable(SourcingLotLine $line): void
     {
-        $status = self::status(self::acceptedValue($line), self::lineFigures($line)['purchase']);
+        $status = self::status(self::acceptedValue($line), self::lineFigures($line)['purchase_valued']);
         if ($status !== 'valued') {
             throw new RuntimeException('This stock is not fully valued yet ('.$status.'): settle the accepted goods before issuing them.');
         }

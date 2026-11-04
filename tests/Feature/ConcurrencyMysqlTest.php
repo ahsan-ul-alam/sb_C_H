@@ -16,6 +16,9 @@ use App\Models\Supplier;
 use App\Models\SupplierPayment;
 use App\Services\AccountingService;
 use App\Services\AdvanceSettlementService;
+use App\Services\InventoryEngine;
+use App\Services\InventoryHandoverService;
+use App\Services\InventoryValuation;
 use App\Services\InvestmentService;
 use App\Services\Ledger;
 use App\Services\LoanReceivableService;
@@ -302,6 +305,59 @@ it('never books a payable payment as a new advance when it races the Board verif
         ->and(AdvanceSettlement::where('status', 'verified')->count())->toBe(2)
         ->and(AdvanceSettlementService::payableOutstanding($lot->refresh(), $supplier->id, includePending: true))->toBeGreaterThanOrEqual(0)
         ->and(ledgerAudit()['unbalanced'])->toBe(0)->and(ledgerAudit()['duplicates'])->toBe(0);
+});
+
+/** A Sellbees-owned, enrolled, accepted and settled lot of 100 units (BDT 55,000 with transport), committed so the worker processes see it; two allocations (60 and 40). */
+function ccHandoverLot(): array
+{
+    config(['finance.sourcing_basis' => 'accrual', 'finance.sourcing_accrual_from' => '2026-11-01', 'finance.inventory_engine_from' => '2026-11-01']);
+    $finance = test()->co->users['finance'];
+    $board = test()->co->users['board'];
+    $supplier = Supplier::create(['name' => 'Race Supplier']);
+    $lot = Sourcing::createLot(['title' => 'Race lot'], $finance);
+    $line = Sourcing::addLine($lot, ['supplier_id' => $supplier->id, 'description' => 'Goods', 'quantity' => '100', 'unit_price' => 50_000], $finance);
+    $cost = Sourcing::addCost($lot, ['category' => 'Transportation', 'amount' => 500_000, 'kind' => 'actual', 'incurred_on' => '2026-11-04'], $finance);
+    Sourcing::advance($lot, $finance);
+    Sourcing::savePricing($lot, 'fixed', 10_000, [], $finance);
+    Sourcing::advance($lot, $finance);
+    Sourcing::approvePricing($lot, $board);
+    InventoryEngine::decide(InventoryEngine::propose($lot->refresh(), 'company', 'Board resolution 2026/11', '2026-11-01', $finance), true, $board);
+    $payment = SourcingPayments::recordSupplierPayment($lot, ['supplier_id' => $supplier->id, 'amount' => 5_000_000, 'paid_on' => '2026-11-03', 'purchase_order' => 'PO', 'reference' => 'R', 'evidence_reference' => 'E'], $finance);
+    test()->co->post('board', 'finance.expenses.decide', ['decision' => 'verify'], $payment->expense)->assertSessionHasNoErrors();
+    SourcingArrival::record($line->refresh(), '100', '100', '2026-11-08', $finance, 'DN-1');
+    SourcingPayments::payCost($cost->refresh(), '2026-11-09', $finance);
+    test()->co->post('board', 'finance.expenses.decide', ['decision' => 'verify'], $cost->refresh()->expense)->assertSessionHasNoErrors();
+    foreach (AdvanceSettlementService::propose($lot->refresh(), $supplier->id, $finance) as $settlement) {
+        AdvanceSettlementService::decide($settlement, true, $board);
+    }
+    $client = test()->co->client('Race Client');
+    $one = Sourcing::allocate($lot->refresh(), ['project_id' => test()->co->project($client, 'Project one')->id, 'line_id' => $line->id, 'kind' => 'sale', 'quantity' => '60'], $finance);
+    $two = Sourcing::allocate($lot->refresh(), ['project_id' => test()->co->project($client, 'Project two')->id, 'line_id' => $line->id, 'kind' => 'sale', 'quantity' => '40'], $finance);
+
+    return [$lot->refresh(), $line->refresh(), $one, $two];
+}
+
+it('posts cost of goods sold once when two Board members approve the same handover at the same moment', function () {
+    [$lot, $line, $one] = ccHandoverLot();
+    $handover = InventoryHandoverService::propose($one, '60', '2026-11-09', '2026-11-09', 'Signed receiving note RN-1', null, (string) Str::uuid(), $this->co->users['finance']);
+
+    $results = ccRun('handover_decide', 2, fn (int $i) => ['user' => [$this->co->users['board']->id, $this->co->users['board2']->id][$i], 'handover' => $handover->id]);
+
+    expect(collect($results)->where('ok', true)->count())->toBe(1)->and(collect($results)->where('ok', false)->every(fn ($r) => str_contains($r['error'], 'Already decided')))->toBeTrue()
+        ->and(JournalEntry::where('source_type', 'inventory_handover')->count())->toBe(1)->and(dr('cogs'))->toBe(3_300_000)->and(ledgerAudit()['duplicates'])->toBe(0);
+});
+
+it('never lets two handovers of one valued line take more than it holds, and releases exactly its whole cost between them', function () {
+    [$lot, $line, $one, $two] = ccHandoverLot();
+    $finance = $this->co->users['finance'];
+    $a = InventoryHandoverService::propose($one, '60', '2026-11-09', '2026-11-09', 'Signed receiving note RN-1', null, (string) Str::uuid(), $finance);
+    $b = InventoryHandoverService::propose($two, '40', '2026-11-09', '2026-11-09', 'Signed receiving note RN-2', null, (string) Str::uuid(), $finance);
+
+    $results = ccRun('handover_decide', 2, fn (int $i) => ['user' => $this->co->users['board']->id, 'handover' => [$a->id, $b->id][$i]]);
+
+    // Whichever is decided first, together they release exactly what the line held, and the inventory and the valued quantity are exactly empty.
+    expect(collect($results)->where('ok', true)->count())->toBe(2)->and(dr('cogs'))->toBe(5_500_000)->and(dr('assets.inventory'))->toBe(0)
+        ->and(InventoryValuation::lineFigures($line->refresh())['quantity'])->toBe('0.00')->and(InventoryValuation::lineValue($line))->toBe(0)->and(ledgerAudit()['unbalanced'])->toBe(0);
 });
 
 it('records a customer payment submitted four times at once exactly once', function () {

@@ -115,7 +115,7 @@ function ivPayTransport($cost, bool $asPayable = false): Expense
 
 function ivFigures($line): array
 {
-    return InventoryValuation::lineFigures($line->refresh());
+    return array_diff_key(InventoryValuation::lineFigures($line->refresh()), ['purchase_valued' => 0]);
 }
 
 it('values fully accepted goods at purchase plus landed cost: BDT 55,000 for 100 units, BDT 550 each', function () {

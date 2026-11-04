@@ -6,7 +6,10 @@ use App\Models\AdvanceSettlement;
 use App\Models\CostRecognition;
 use App\Models\Expense;
 use App\Models\InventoryEngineEnrolment;
+use App\Models\InventoryHandover;
 use App\Models\InventoryValueMovement;
+use App\Models\JournalEntry;
+use App\Models\JournalLine;
 use App\Models\SourcingLot;
 use App\Models\SourcingLotLine;
 
@@ -50,11 +53,11 @@ class InventoryReconciliation
             $purchaseAll += $f['purchase'];
             $landedAll += $f['landed'];
             $acceptedAll += $accepted;
-            $row['unvalued_accepted'] += max(0, $accepted - $f['purchase']);
-            $row['over_valued'] += max(0, $f['purchase'] - $accepted);
+            $row['unvalued_accepted'] += max(0, $accepted - $f['purchase_valued']);
+            $row['over_valued'] += max(0, $f['purchase_valued'] - $accepted);
             $row['lines'][] = ['line_id' => $line->id, 'description' => $line->description, 'accepted_quantity' => (string) $line->usable_quantity, 'valued_quantity' => $f['quantity'],
                 'accepted_value' => $accepted, 'purchase_value' => $f['purchase'], 'landed_value' => $f['landed'], 'value' => $value,
-                'unit_cost' => InventoryValuation::unitCost($line), 'status' => InventoryValuation::status($accepted, $f['purchase'])];
+                'unit_cost' => InventoryValuation::unitCost($line), 'status' => InventoryValuation::status($accepted, $f['purchase_valued'])];
             if ($value < 0) {
                 $row['exceptions'][] = 'Line '.$line->id.' has a negative value.';
             }
@@ -128,7 +131,8 @@ class InventoryReconciliation
             'lots' => $rows, 'gl_inventory' => $gl, 'journal_by_lot' => $byLot, 'unattributed' => $gl - $byLot,
             'engine_subledger' => (int) $engine->sum('subledger_value'), 'engine_journal' => (int) $engine->sum('journal_value'), 'engine_unvalued' => (int) $engine->sum('unvalued_accepted'),
             'duplicates' => $duplicates, 'negative_lines' => $negative,
-            'ok' => $gl === $byLot && $duplicates === 0 && $negative === 0 && $engine->every(fn ($r) => $r['ok']),
+            'handovers' => $handovers = self::handovers(),
+            'ok' => $gl === $byLot && $duplicates === 0 && $negative === 0 && $engine->every(fn ($r) => $r['ok']) && $handovers['ok'],
         ];
     }
 
@@ -167,13 +171,15 @@ class InventoryReconciliation
                 $differences[] = 'The physical stock buckets do not add up to what was received and adjusted.';
             }
             if ($class === 'company_valued') {
-                $status = InventoryValuation::status(InventoryValuation::acceptedValue($line), $figures['purchase']);
+                $status = InventoryValuation::status(InventoryValuation::acceptedValue($line), $figures['purchase_valued']);
                 $expected = $status === 'valued' ? bcsub($accepted, $issued, 2) : '0.00';
                 if (bccomp($figures['quantity'], $expected, 2) !== 0) {
                     $differences[] = 'Valued quantity ('.$figures['quantity'].') differs from what the settled, accepted goods imply ('.$expected.').';
                 }
-                if ($status === 'valued' && bccomp($issued, '0', 2) === 0 && bccomp($held, $figures['quantity'], 2) !== 0) {
-                    $differences[] = 'The physical count held ('.$held.') differs from the valued quantity ('.$figures['quantity'].'): this needs an approved stock adjustment; nothing is corrected automatically.';
+                // Goods handed over to a client stay in our warehouse as the client's custody stock, so the physical count is the valued quantity plus what was handed over.
+                $expectedHeld = bcadd($figures['quantity'], $issued, 2);
+                if ($status === 'valued' && bccomp($held, $expectedHeld, 2) !== 0) {
+                    $differences[] = 'The physical count held ('.$held.') differs from the valued quantity ('.$figures['quantity'].') plus goods handed over ('.$issued.'): this needs an approved stock adjustment; nothing is corrected automatically.';
                 }
             }
             $rows[] = ['line_id' => $line->id, 'lot' => $lot->number, 'description' => $line->description, 'classification' => $class, 'ordered' => (string) $line->quantity, 'accepted' => $accepted,
@@ -183,6 +189,62 @@ class InventoryReconciliation
         }
 
         return $rows;
+    }
+
+    /**
+     * Cost of goods sold from handovers, traced from each approved handover to its journal entry and its value movements, and totalled by project and in the
+     * ledger. Nothing is posted to close a gap: a difference is reported with the handover it comes from.
+     *
+     * @return array{rows: list<array<string, mixed>>, by_project: array<int, int>, gl_cogs: int, handover_net_cogs: int, difference: int, problems: list<string>, damaged_awaiting_classification: int, ok: bool}
+     */
+    public static function handovers(): array
+    {
+        $rows = [];
+        $problems = [];
+        $byProject = [];
+        $net = 0;
+        $damaged = 0;
+        foreach (InventoryHandover::with('lot')->where('status', 'approved')->orderBy('id')->get() as $h) {
+            $entryIds = JournalEntry::where('source_type', 'inventory_handover')->where('source_id', $h->id)->pluck('id');
+            $journal = (int) JournalLine::whereIn('journal_entry_id', $entryIds)->where('account', 'cogs')->sum('debit');
+            $moved = -(int) InventoryValueMovement::where('source_type', 'inventory_handover')->where('source_id', $h->id)->whereIn('component', ['purchase', 'landed'])->sum('value_delta');
+            $restoredJournal = 0;
+            $restoredMoved = 0;
+            foreach ($h->returns()->where('status', 'approved')->where('condition', 'resalable')->get() as $r) {
+                $ids = JournalEntry::where('source_type', 'inventory_handover_return')->where('source_id', $r->id)->pluck('id');
+                $restoredJournal += (int) JournalLine::whereIn('journal_entry_id', $ids)->where('account', 'cogs')->sum('credit');
+                $restoredMoved += (int) InventoryValueMovement::where('source_type', 'inventory_handover_return')->where('source_id', $r->id)->whereIn('component', ['purchase', 'landed'])->sum('value_delta');
+            }
+            $netCogs = (int) $h->cogs_value - $restoredJournal;
+            $row = ['handover' => $h->id, 'project_id' => $h->project_id, 'lot' => $h->lot->number, 'quantity' => (string) $h->quantity, 'cogs_value' => (int) $h->cogs_value, 'journal_cogs' => $journal, 'movement_value' => $moved,
+                'restored_journal' => $restoredJournal, 'restored_movements' => $restoredMoved, 'net_cogs' => $netCogs, 'issues' => []];
+            if ((int) $h->cogs_value !== $journal || $journal !== $moved) {
+                $row['issues'][] = 'Handover #'.$h->id.': recorded '.$h->cogs_value.', journal '.$journal.', value movements '.$moved.' do not agree.';
+            }
+            if ($restoredJournal !== $restoredMoved) {
+                $row['issues'][] = 'Handover #'.$h->id.': restored cost in the journal ('.$restoredJournal.') and in the value movements ('.$restoredMoved.') differ.';
+            }
+            if ($netCogs < 0 || bccomp($h->netQuantity(), '0', 2) < 0) {
+                $row['issues'][] = 'Handover #'.$h->id.' has returned more than was handed over.';
+            }
+            if ($h->lot->ownership !== 'company' || ! InventoryEngine::isValued($h->lot)) {
+                $row['issues'][] = 'Handover #'.$h->id.' is on a lot that is not Sellbees-owned and valued by the engine.';
+            }
+            if (CostRecognition::where('sourcing_lot_id', $h->sourcing_lot_id)->exists()) {
+                $row['issues'][] = 'Handover #'.$h->id.' is on a lot whose cost was already released as a whole lot (recognised twice).';
+            }
+            $problems = [...$problems, ...$row['issues']];
+            $byProject[$h->project_id] = ($byProject[$h->project_id] ?? 0) + $netCogs;
+            $net += $netCogs;
+            $damaged += bccomp((string) $h->damaged_returned_quantity, '0', 2) > 0 ? 1 : 0;
+            $rows[] = $row;
+        }
+        $gl = Ledger::debitBalance('cogs');
+        if ($gl !== $net) {
+            $problems[] = 'Cost of goods sold in the ledger ('.$gl.') differs from the handovers ('.$net.').';
+        }
+
+        return ['rows' => $rows, 'by_project' => $byProject, 'gl_cogs' => $gl, 'handover_net_cogs' => $net, 'difference' => $gl - $net, 'problems' => $problems, 'damaged_awaiting_classification' => $damaged, 'ok' => $problems === []];
     }
 
     /** Inventory value of one lot as its own journal entries state it (settlements, capitalised costs, transport, whole-lot release, and their reversals). */
@@ -200,6 +262,12 @@ class InventoryReconciliation
         }
         foreach (CostRecognition::where('sourcing_lot_id', $lot->id)->pluck('id') as $id) {
             $total += InventoryValuation::inventoryNet('cost_recognition', $id) + InventoryValuation::inventoryNet('cost_recognition_rev', $id);
+        }
+        foreach (InventoryHandover::where('sourcing_lot_id', $lot->id)->get() as $handover) {
+            $total += InventoryValuation::inventoryNet('inventory_handover', $handover->id);
+            foreach ($handover->returns()->pluck('id') as $returnId) {
+                $total += InventoryValuation::inventoryNet('inventory_handover_return', $returnId);
+            }
         }
 
         return $total;

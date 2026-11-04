@@ -114,7 +114,7 @@ function hdPayCost($cost, bool $prepaid = false): Expense
 
 function hdFigures($line): array
 {
-    return InventoryValuation::lineFigures($line->refresh());
+    return array_diff_key(InventoryValuation::lineFigures($line->refresh()), ['purchase_valued' => 0]);
 }
 
 /** Refund a verified, paid expense and have the Board verify it. */

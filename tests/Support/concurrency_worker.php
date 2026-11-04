@@ -3,6 +3,7 @@
 use App\Models\AdvanceSettlement;
 use App\Models\CapitalEntry;
 use App\Models\Expense;
+use App\Models\InventoryHandover;
 use App\Models\LoanReceivable;
 use App\Models\LoanReceivableRepayment;
 use App\Models\Payment;
@@ -14,6 +15,7 @@ use App\Services\AccountingService;
 use App\Services\AdvanceSettlementService;
 use App\Services\CostRecognitionService;
 use App\Services\ExpenseService;
+use App\Services\InventoryHandoverService;
 use App\Services\InvestmentService;
 use App\Services\LoanReceivableService;
 use App\Services\PaymentRecorder;
@@ -72,6 +74,11 @@ try {
                 $capital->update(['status' => 'verified', 'verified_by' => auth()->id(), 'verified_at' => now()]);
                 InvestmentService::post($capital, auth()->id());
             });
+
+            return true;
+        })(),
+        'handover_decide' => (function () use ($args) {
+            InventoryHandoverService::decide(InventoryHandover::findOrFail($args['handover']), true, auth()->user());
 
             return true;
         })(),
