@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\AdvanceSettlement;
 use App\Models\CapitalEntry;
 use App\Models\Expense;
 use App\Models\LoanReceivable;
@@ -71,6 +72,11 @@ try {
                 $capital->update(['status' => 'verified', 'verified_by' => auth()->id(), 'verified_at' => now()]);
                 InvestmentService::post($capital, auth()->id());
             });
+
+            return true;
+        })(),
+        'adv_decide' => (function () use ($args) {
+            AdvanceSettlementService::decide(AdvanceSettlement::findOrFail($args['settlement']), true, auth()->user());
 
             return true;
         })(),

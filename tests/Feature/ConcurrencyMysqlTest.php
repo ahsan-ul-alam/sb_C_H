@@ -279,6 +279,31 @@ it('proposes one set of advance settlements and one cost release however many pe
     expect(ledgerAudit()['unbalanced'])->toBe(0)->and(ledgerAudit()['duplicates'])->toBe(0);
 });
 
+it('never books a payable payment as a new advance when it races the Board verifying the settlement', function () {
+    [$lot, $line, $supplier] = ccAdvanceLot();
+    $finance = $this->co->users['finance'];
+    $board = $this->co->users['board'];
+    $advance = SourcingPayments::recordSupplierPayment($lot, ['supplier_id' => $supplier->id, 'amount' => 2_500_000, 'paid_on' => '2026-11-03', 'purchase_order' => 'PO', 'reference' => 'R', 'evidence_reference' => 'E'], $finance);
+    $this->co->post('board', 'finance.expenses.decide', ['decision' => 'verify'], $advance->expense)->assertSessionHasNoErrors();
+    SourcingArrival::record($line->refresh(), '10', '10', '2026-11-08', $finance, 'DN-1');
+    $settlements = AdvanceSettlementService::propose($lot->refresh(), $supplier->id, $finance); // 25,000 from the advance and a 15,000 payable
+    AdvanceSettlementService::decide($settlements->firstWhere('kind', 'advance'), true, $board);
+    $payable = $settlements->firstWhere('kind', 'payable');
+
+    // The Board verifies the payable settlement at the very moment a payment of 10,000 is recorded for the same supplier and lot.
+    $results = ccRun(['adv_decide', 'adv_pay'], 2, fn (int $i) => $i === 0
+        ? ['user' => $board->id, 'settlement' => $payable->id]
+        : ['lot' => $lot->id, 'supplier' => $supplier->id, 'amount' => 1_000_000, 'date' => '2026-11-03', 'key' => (string) Str::uuid()]);
+
+    // Either the payment waited for the settlement (refused) or the settlement came first and the payment paid the payable. Never a second advance.
+    expect(collect($results)->firstWhere('ok', true))->not->toBeNull()
+        ->and(Expense::where('classification', 'supplier_advance')->count())->toBe(1)
+        ->and(Expense::where('classification', 'supplier_payable')->count())->toBeLessThanOrEqual(1)
+        ->and(AdvanceSettlement::where('status', 'verified')->count())->toBe(2)
+        ->and(AdvanceSettlementService::payableOutstanding($lot->refresh(), $supplier->id, includePending: true))->toBeGreaterThanOrEqual(0)
+        ->and(ledgerAudit()['unbalanced'])->toBe(0)->and(ledgerAudit()['duplicates'])->toBe(0);
+});
+
 it('records a customer payment submitted four times at once exactly once', function () {
     [$project] = [$this->co->project($this->co->client('Race Client'))];
     $this->co->segment($project, 'Build', '50000');
