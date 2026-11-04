@@ -10,6 +10,8 @@ use App\Models\Payment;
 use App\Models\Payout;
 use App\Models\Project;
 use App\Models\SourcingLot;
+use App\Models\SupplierReturn;
+use App\Models\SupplierReturnSettlement;
 use App\Models\User;
 use App\Services\AccountingService;
 use App\Services\AdvanceSettlementService;
@@ -21,6 +23,7 @@ use App\Services\LoanReceivableService;
 use App\Services\PaymentRecorder;
 use App\Services\PayoutService;
 use App\Services\SourcingPayments;
+use App\Services\SupplierReturnService;
 use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Support\Facades\DB;
 
@@ -79,6 +82,16 @@ try {
         })(),
         'handover_decide' => (function () use ($args) {
             InventoryHandoverService::decide(InventoryHandover::findOrFail($args['handover']), true, auth()->user());
+
+            return true;
+        })(),
+        'sret_decide' => (function () use ($args) {
+            SupplierReturnService::decide(SupplierReturn::findOrFail($args['return']), true, auth()->user());
+
+            return true;
+        })(),
+        'sret_settle_decide' => (function () use ($args) {
+            SupplierReturnService::decideSettlement(SupplierReturnSettlement::findOrFail($args['settlement']), true, auth()->user());
 
             return true;
         })(),

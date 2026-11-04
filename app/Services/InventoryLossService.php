@@ -8,6 +8,7 @@ use App\Models\InventoryLossCase;
 use App\Models\JournalEntry;
 use App\Models\SourcingLot;
 use App\Models\SourcingLotLine;
+use App\Models\SupplierReturn;
 use App\Models\User;
 use App\Support\Money;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -90,6 +91,9 @@ class InventoryLossService
                     }
                     $event = (string) ($data['event_on'] ?? '');
                     $room = bcsub(Inventory::sliceBalances($line, null)[$fromBucket], self::committed(['sourcing_lot_line_id' => $line->id, 'scope' => ['owned', 'return'], 'from_bucket' => $fromBucket]), 2);
+                    if ($fromBucket === 'available') {
+                        $room = bcsub($room, (string) SupplierReturn::where('sourcing_lot_line_id', $line->id)->where('kind', 'accepted')->whereIn('status', SupplierReturn::ACTIVE)->sum('quantity'), 2);
+                    }
                 } elseif ($scope === 'return') {
                     $return = InventoryHandoverReturn::whereKey($data['inventory_handover_return_id'] ?? 0)->lockForUpdate()->firstOrFail();
                     $handover = InventoryHandover::whereKey($return->inventory_handover_id)->lockForUpdate()->firstOrFail();

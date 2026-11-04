@@ -143,7 +143,7 @@ class InventoryHandoverService
             if (bccomp($own['reserved'], '0', 2) > 0) {
                 throw new RuntimeException('Stock of this line is reserved for an order; release the reservation before handing it over.');
             }
-            if (bccomp((string) $handover->quantity, $own['available'], 2) > 0) {
+            if (bccomp((string) $handover->quantity, bcsub($own['available'], SupplierReturnService::committedUnits($line), 2), 2) > 0) {
                 throw new RuntimeException('Only '.$own['available'].' of this line is physically available in the warehouse as Sellbees stock; nothing can be handed over that is not there.');
             }
             $date = $handover->transferred_on->toDateString();

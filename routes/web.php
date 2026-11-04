@@ -47,6 +47,7 @@ use App\Http\Controllers\StatementController;
 use App\Http\Controllers\SupplierAdvanceController;
 use App\Http\Controllers\SupplierController;
 use App\Http\Controllers\SupplierProductController;
+use App\Http\Controllers\SupplierReturnController;
 use App\Http\Controllers\UserController;
 use Illuminate\Support\Facades\Route;
 
@@ -194,6 +195,18 @@ Route::middleware('auth')->group(function () {
         Route::post('losses/{case}/cancel', [InventoryLossController::class, 'cancel'])->name('losses.cancel')->middleware('can:inventory.loss.propose');
         Route::post('losses/{case}/review', [InventoryLossController::class, 'review'])->name('losses.review')->middleware('can:inventory.loss.review');
         Route::post('losses/{case}/decide', [InventoryLossController::class, 'decide'])->name('losses.decide')->middleware('can:inventory.loss.approve');
+
+        // Supplier returns: Operations requests (supplier.return.propose), Finance records the supplier's answer, verifies and records settlements (supplier.return.review),
+        // the Board approves (supplier.return.approve, never the requester or verifier).
+        Route::get('supplier-returns', [SupplierReturnController::class, 'index'])->name('supplier-returns')->middleware('can:inventory.view');
+        Route::get('supplier-returns/{supplierReturn}', [SupplierReturnController::class, 'show'])->name('supplier-returns.show')->middleware('can:inventory.view')->whereNumber('supplierReturn');
+        Route::post('supplier-returns', [SupplierReturnController::class, 'store'])->name('supplier-returns.store')->middleware('can:supplier.return.propose');
+        Route::post('supplier-returns/{supplierReturn}/cancel', [SupplierReturnController::class, 'cancel'])->name('supplier-returns.cancel')->middleware('can:supplier.return.propose');
+        Route::post('supplier-returns/{supplierReturn}/accept', [SupplierReturnController::class, 'accept'])->name('supplier-returns.accept')->middleware('can:supplier.return.review');
+        Route::post('supplier-returns/{supplierReturn}/verify', [SupplierReturnController::class, 'verify'])->name('supplier-returns.verify')->middleware('can:supplier.return.review');
+        Route::post('supplier-returns/{supplierReturn}/decide', [SupplierReturnController::class, 'decide'])->name('supplier-returns.decide')->middleware('can:supplier.return.approve');
+        Route::post('supplier-returns/{supplierReturn}/settle', [SupplierReturnController::class, 'settle'])->name('supplier-returns.settle')->middleware('can:supplier.return.review');
+        Route::post('supplier-return-settlements/{settlement}/decide', [SupplierReturnController::class, 'decideSettlement'])->name('supplier-returns.settlements.decide')->middleware('can:supplier.return.approve');
     });
 
     // Product operations: inventory, orders & delivery, client settlements. Reads need inventory.view / settlement.view; each write has its own permission.

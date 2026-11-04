@@ -14,6 +14,7 @@ use App\Models\Payment;
 use App\Models\Payout;
 use App\Models\Supplier;
 use App\Models\SupplierPayment;
+use App\Models\SupplierReturn;
 use App\Services\AccountingService;
 use App\Services\AdvanceSettlementService;
 use App\Services\InventoryEngine;
@@ -25,6 +26,7 @@ use App\Services\LoanReceivableService;
 use App\Services\Sourcing;
 use App\Services\SourcingArrival;
 use App\Services\SourcingPayments;
+use App\Services\SupplierReturnService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
@@ -371,4 +373,49 @@ it('records a customer payment submitted four times at once exactly once', funct
         ->and(collect($results)->where('ok', true)->where('recorded', true)->count())->toBe(1)
         ->and(AccountingService::totalCash())->toBe(120_000_00);
     expect(ledgerAudit()['unbalanced'])->toBe(0)->and(ledgerAudit()['duplicates'])->toBe(0);
+});
+
+/** A verified supplier return of $quantity units, ready for the Board, with the whole carrying value allocated to a receivable. */
+function ccSupplierReturn($line, string $quantity, int $value, string $reference): SupplierReturn
+{
+    $finance = test()->co->users['finance'];
+    $return = SupplierReturnService::propose(test()->co->users['clients'], $line, ['kind' => 'accepted', 'quantity' => $quantity, 'reason' => 'Wrong size', 'return_reference' => $reference,
+        'physical_returned_on' => '2026-11-10', 'evidence_reference' => 'Carrier receipt CR-1', 'claimed_amount' => $value], (string) Str::uuid());
+    SupplierReturnService::recordAcceptance($return, $finance, 'accepted', $value, 'CN-'.$reference);
+    SupplierReturnService::verify($return->refresh(), test()->co->users['multi'], 'Checked', 0, 0, $value);
+
+    return $return->refresh();
+}
+
+it('posts a supplier return once when two Board members approve it at the same moment', function () {
+    [$lot, $line] = ccHandoverLot();
+    $return = ccSupplierReturn($line, '20', 1_100_000, 'RTN-RACE-1');
+
+    $results = ccRun('sret_decide', 2, fn (int $i) => ['user' => [$this->co->users['board']->id, $this->co->users['board2']->id][$i], 'return' => $return->id]);
+
+    expect(collect($results)->where('ok', true)->count())->toBe(1)->and(collect($results)->where('ok', false)->every(fn ($r) => str_contains($r['error'], 'Already decided')))->toBeTrue()
+        ->and(JournalEntry::where('source_type', 'supplier_return')->count())->toBe(1)->and(dr('assets.supplier_receivable'))->toBe(1_100_000)->and(ledgerAudit()['duplicates'])->toBe(0);
+});
+
+it('never lets two supplier returns take more units than the line holds, and cost removed equals value recognised', function () {
+    [$lot, $line] = ccHandoverLot();
+    $a = ccSupplierReturn($line, '60', 3_300_000, 'RTN-RACE-2');
+    $b = ccSupplierReturn($line->refresh(), '40', 2_200_000, 'RTN-RACE-3');
+
+    $results = ccRun('sret_decide', 2, fn (int $i) => ['user' => $this->co->users['board']->id, 'return' => [$a->id, $b->id][$i]]);
+
+    // Both fit exactly (60 + 40): together they take the whole line and its whole value, and nothing is left behind.
+    expect(collect($results)->where('ok', true)->count())->toBe(2)->and(dr('assets.inventory'))->toBe(0)->and(dr('assets.supplier_receivable'))->toBe(5_500_000)
+        ->and(InventoryValuation::lineFigures($line->refresh())['quantity'])->toBe('0.00')->and(InventoryValuation::lineValue($line))->toBe(0)->and(ledgerAudit()['unbalanced'])->toBe(0);
+});
+
+it('collects a supplier refund once when two Board members approve the same settlement at the same moment', function () {
+    [$lot, $line] = ccHandoverLot();
+    $return = ccSupplierReturn($line, '20', 1_100_000, 'RTN-RACE-4');
+    SupplierReturnService::decide($return, true, $this->co->users['board']);
+    $settlement = SupplierReturnService::proposeSettlement($return->refresh(), $this->co->users['finance'], 'cash_refund', 1_100_000, 'Bank statement line 1', '2026-11-10', FinancialAccount::first()?->id, (string) Str::uuid());
+
+    $results = ccRun('sret_settle_decide', 2, fn (int $i) => ['user' => [$this->co->users['board']->id, $this->co->users['board2']->id][$i], 'settlement' => $settlement->id]);
+
+    expect(collect($results)->where('ok', true)->count())->toBe(1)->and(JournalEntry::where('source_type', 'supplier_return_settlement')->count())->toBe(1)->and(dr('assets.supplier_receivable'))->toBe(0)->and(ledgerAudit()['duplicates'])->toBe(0);
 });

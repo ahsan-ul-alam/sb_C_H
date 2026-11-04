@@ -15,6 +15,7 @@ use App\Models\LandedCostReallocation;
 use App\Models\SourcingLot;
 use App\Models\SourcingLotCost;
 use App\Models\SourcingLotLine;
+use App\Models\SupplierReturn;
 use App\Models\User;
 use App\Support\Costing;
 use App\Support\Money;
@@ -76,7 +77,7 @@ class InventoryValuation
     public static function lineFigures(SourcingLotLine $line): array
     {
         $rows = InventoryValueMovement::where('sourcing_lot_line_id', $line->id)->selectRaw('component, COALESCE(SUM(value_delta),0) v, COALESCE(SUM(quantity_delta),0) q')->groupBy('component')->get()->keyBy('component');
-        $valued = (int) InventoryValueMovement::where('sourcing_lot_line_id', $line->id)->where('component', 'purchase')->whereNotIn('type', ['issue', 'issue_return', 'writeoff', 'quarantine'])->sum('value_delta');
+        $valued = (int) InventoryValueMovement::where('sourcing_lot_line_id', $line->id)->where('component', 'purchase')->whereNotIn('type', ['issue', 'issue_return', 'writeoff', 'quarantine', 'supplier_return'])->sum('value_delta');
 
         return ['purchase' => (int) ($rows['purchase']->v ?? 0), 'landed' => (int) ($rows['landed']->v ?? 0), 'quantity' => bcadd((string) ($rows['quantity']->q ?? 0), '0', 2), 'purchase_valued' => $valued];
     }
@@ -326,7 +327,7 @@ class InventoryValuation
     /** Quantity taken out of the line's valuation by approved write-offs and quarantines (units written off, or held apart at a recoverable value). */
     public static function lossQuantity(SourcingLotLine $line): string
     {
-        $sum = InventoryValueMovement::where('sourcing_lot_line_id', $line->id)->where('component', 'quantity')->whereIn('type', ['writeoff', 'quarantine'])->sum('quantity_delta');
+        $sum = InventoryValueMovement::where('sourcing_lot_line_id', $line->id)->where('component', 'quantity')->whereIn('type', ['writeoff', 'quarantine', 'supplier_return'])->sum('quantity_delta');
 
         return bcmul(bcadd((string) $sum, '0', 2), '-1', 2);
     }
@@ -387,7 +388,23 @@ class InventoryValuation
     /** True once any stock of the lot has been issued (handed over): from then a cost's value is partly consumed and may no longer be moved. */
     public static function hasIssued(SourcingLot $lot): bool
     {
-        return InventoryValueMovement::where('sourcing_lot_id', $lot->id)->where('type', 'issue')->exists();
+        return InventoryValueMovement::where('sourcing_lot_id', $lot->id)->whereIn('type', ['issue', 'supplier_return'])->exists();
+    }
+
+    /** Take the returned quantity and its exact purchase and landed value out of the line's cost layers for an approved supplier return. The journal entry carries the recovery. */
+    public static function recordSupplierReturn(SupplierReturn $return, SourcingLotLine $line, int $purchase, int $landed, int $journalId, User $approver): void
+    {
+        $lot = SourcingLot::findOrFail($return->sourcing_lot_id);
+        $enrolment = InventoryEngineEnrolment::where('sourcing_lot_id', $lot->id)->where('status', 'approved')->where('ownership', 'company')->firstOrFail();
+        $common = ['type' => 'supplier_return', 'project_id' => null, 'valuation_status' => 'valued', 'source_type' => 'supplier_return', 'source_id' => $return->id, 'journal_entry_id' => $journalId,
+            'effective_on' => self::effectiveOn($return->posted_on->toDateString(), $enrolment), 'verified_by' => $approver->id, 'verified_at' => now(), 'created_by' => $return->prepared_by,
+            'reason' => 'Returned to the supplier (return #'.$return->id.', ref '.$return->return_reference.')'];
+        foreach (['purchase' => $purchase, 'landed' => $landed] as $component => $value) {
+            if ($value !== 0) {
+                self::record($lot, $line, $enrolment, $common + ['component' => $component, 'value_delta' => -$value, 'move_key' => 'sret:'.$return->id.':'.$component]);
+            }
+        }
+        self::record($lot, $line, $enrolment, $common + ['component' => 'quantity', 'quantity_delta' => bcmul((string) $return->quantity, '-1', 2), 'move_key' => 'sret:'.$return->id.':quantity']);
     }
 
     /**

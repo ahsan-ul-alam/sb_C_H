@@ -83,7 +83,8 @@ class AdvanceSettlementService
             ->filter(fn (SupplierPayment $p) => $p->supplier_id === $supplierId && ! $p->isVoided() && $p->expense?->classification === 'supplier_payable' && in_array($p->expense->status, $counted, true))
             ->sum(fn (SupplierPayment $p) => $p->effectiveAmount());
 
-        return max(0, $owed - $paid);
+        // What a supplier return or an applied credit note has already taken off the payable is no longer owed.
+        return max(0, $owed - $paid - SupplierReturnService::payableReduced($lot, $supplierId));
     }
 
     /**

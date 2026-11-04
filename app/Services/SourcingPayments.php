@@ -67,7 +67,7 @@ class SourcingPayments
                     throw new RuntimeException('Amount must be greater than zero.');
                 }
                 $supplierId = (int) $data['supplier_id'];
-                $payable = $lot->lines->where('supplier_id', $supplierId)->sum(fn ($l) => $l->purchaseCost());
+                $payable = $lot->lines->where('supplier_id', $supplierId)->sum(fn ($l) => $l->purchaseCost()) - SupplierReturnService::payableReduced($lot, $supplierId);
                 $paid = self::paidTotal($lot->payments()->where('supplier_id', $supplierId)->with(['expense', 'corrections'])->get());
                 if ($data['amount'] > $payable - $paid) {
                     throw new RuntimeException('Payment exceeds what this lot owes the supplier ('.Money::format(max(0, $payable - $paid)).' outstanding).');

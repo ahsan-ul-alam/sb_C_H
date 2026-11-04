@@ -13,6 +13,7 @@ use App\Models\JournalEntry;
 use App\Models\JournalLine;
 use App\Models\SourcingLot;
 use App\Models\SourcingLotLine;
+use App\Models\SupplierReturn;
 
 /**
  * Read-only reconciliation of the inventory value subledger to the general ledger.
@@ -68,6 +69,10 @@ class InventoryReconciliation
             }
             if (bccomp($f['quantity'], '0', 2) < 0) {
                 $row['exceptions'][] = 'Line '.$line->id.' has a negative quantity.';
+            }
+            // A line whose goods are all gone (handed over, written off, returned to the supplier) must not keep value: it would be an unexplained residual.
+            if ($value !== 0 && bccomp($f['quantity'], '0', 2) === 0 && $accepted > 0 && InventoryValuation::status($accepted, $f['purchase_valued']) === 'valued') {
+                $row['exceptions'][] = 'Line '.$line->id.' holds no goods but still carries value '.$value.' (a zero-quantity residual).';
             }
         }
         // Per source event: a settlement is applied at most once, and a capitalised cost at most to the amount the journal carries.
@@ -132,8 +137,8 @@ class InventoryReconciliation
             'lots' => $rows, 'gl_inventory' => $gl, 'journal_by_lot' => $byLot, 'unattributed' => $gl - $byLot,
             'engine_subledger' => (int) $engine->sum('subledger_value'), 'engine_journal' => (int) $engine->sum('journal_value'), 'engine_unvalued' => (int) $engine->sum('unvalued_accepted'),
             'duplicates' => $duplicates, 'negative_lines' => $negative,
-            'handovers' => $handovers = self::handovers(), 'losses' => $losses = self::losses(),
-            'ok' => $gl === $byLot && $duplicates === 0 && $negative === 0 && $engine->every(fn ($r) => $r['ok']) && $handovers['ok'] && $losses['ok'],
+            'handovers' => $handovers = self::handovers(), 'losses' => $losses = self::losses(), 'supplier_returns' => $returns = self::supplierReturns(),
+            'ok' => $gl === $byLot && $duplicates === 0 && $negative === 0 && $engine->every(fn ($r) => $r['ok']) && $handovers['ok'] && $losses['ok'] && $returns['ok'],
         ];
     }
 
@@ -312,6 +317,86 @@ class InventoryReconciliation
             'impaired_gl' => $impairedGl, 'impaired_cases' => $impairedCases, 'abnormal_loss_gl' => $abnormalGl, 'abnormal_loss_cases' => $abnormalCases, 'problems' => $problems, 'ok' => $problems === []];
     }
 
+    /**
+     * Supplier returns, return by return (never netted across suppliers, lots or lines), against the journal, the value movements and the ledger accounts they use.
+     * Each row shows the quantities and the value that left inventory, how the recovery was allocated, what is still open as credit or receivable, what the supplier
+     * has not accepted, and what is still owed to the supplier. A difference is reported with the return it comes from and is never corrected here.
+     *
+     * @return array{rows: list<array<string, mixed>>, receivable_gl: int, receivable_open: int, credit_gl: int, credit_open: int, difference_gl: int, difference_cases: int, problems: list<string>, ok: bool}
+     */
+    public static function supplierReturns(): array
+    {
+        $rows = [];
+        $problems = [];
+        $side = fn ($ids, string $account, string $column) => (int) JournalLine::whereIn('journal_entry_id', $ids)->where('account', $account)->sum($column);
+        $approved = SupplierReturn::with(['line', 'lot'])->where('status', 'approved')->orderBy('id')->get();
+        foreach ($approved as $r) {
+            $issues = [];
+            $b = SupplierReturnService::balances($r);
+            $entries = JournalEntry::where('source_type', 'supplier_return')->where('source_id', $r->id)->pluck('id');
+            $line = $r->line;
+            $figures = InventoryValuation::lineFigures($line);
+            $row = ['return' => $r->id, 'supplier_id' => $r->supplier_id, 'lot_id' => $r->sourcing_lot_id, 'line_id' => $r->sourcing_lot_line_id, 'kind' => $r->kind, 'quantity' => (string) $r->quantity,
+                'accepted_quantity' => $r->kind === 'accepted' ? (string) $line->usable_quantity : bcsub((string) $line->received_quantity, (string) $line->usable_quantity, 2),
+                'previously_returned' => bcadd((string) SupplierReturn::where('sourcing_lot_line_id', $line->id)->where('kind', $r->kind)->where('status', 'approved')->where('id', '<', $r->id)->sum('quantity'), '0', 2),
+                'remaining_owned_valued' => $figures['quantity'], 'carrying_value' => (int) $r->carrying_value, 'purchase_removed' => (int) $r->purchase_value, 'landed_removed' => (int) $r->landed_value,
+                'cost_removed' => $side($entries, 'assets.inventory', 'credit'), 'payable_reduction' => $b['payable_reduction'], 'credit_total' => $b['credit_total'], 'credit_open' => $b['credit_open'],
+                'receivable_total' => $b['receivable_total'], 'cash_received' => $b['cash_received'], 'receivable_open' => $b['receivable_open'], 'disputed' => $b['disputed'], 'unallocated' => $b['unallocated'],
+                'not_recovered' => $b['difference'], 'remaining_supplier_obligation' => AdvanceSettlementService::payableOutstanding($r->lot, (int) $r->supplier_id), 'issues' => []];
+            if ($r->kind === 'accepted') {
+                $moved = -(int) InventoryValueMovement::where('source_type', 'supplier_return')->where('source_id', $r->id)->whereIn('component', ['purchase', 'landed'])->sum('value_delta');
+                if ($row['cost_removed'] !== (int) $r->carrying_value || $moved !== (int) $r->carrying_value) {
+                    $issues[] = 'Return #'.$r->id.': carrying value '.$r->carrying_value.', inventory credited in the journal '.$row['cost_removed'].', value movements '.$moved.' do not agree.';
+                }
+                if ($side($entries, 'liabilities', 'debit') !== (int) $r->payable_reduction || $side($entries, 'supplier.credit', 'debit') !== (int) $r->credit_note_amount
+                    || $side($entries, 'assets.supplier_receivable', 'debit') !== (int) $r->receivable_amount || $side($entries, 'supplier_return_difference', 'debit') !== (int) $r->difference_value) {
+                    $issues[] = 'Return #'.$r->id.': the journal does not carry the recovery allocation recorded on the return.';
+                }
+                if ((int) $r->payable_reduction + (int) $r->credit_note_amount + (int) $r->receivable_amount + (int) $r->difference_value !== (int) $r->carrying_value) {
+                    $issues[] = 'Return #'.$r->id.': recovery plus the part not recovered does not equal the carrying value.';
+                }
+                if ($entries->count() !== 1) {
+                    $issues[] = 'Return #'.$r->id.' has '.$entries->count().' journal entries; it must have exactly one.';
+                }
+            } elseif ($entries->isNotEmpty() || InventoryValueMovement::where('source_type', 'supplier_return')->where('source_id', $r->id)->exists()) {
+                $issues[] = 'Return #'.$r->id.' is of goods that never entered inventory but moved inventory value.';
+            }
+            if ($b['credit_open'] < 0 || $b['receivable_open'] < 0) {
+                $issues[] = 'Return #'.$r->id.': more credit was applied or more cash refunded than was recognised.';
+            }
+            foreach ($r->settlements()->where('status', 'posted')->get() as $s) {
+                $ids = JournalEntry::where('source_type', 'supplier_return_settlement')->where('source_id', $s->id)->pluck('id');
+                $posted = $s->method === 'cash_refund' ? $side($ids, 'assets.supplier_receivable', 'credit') : $side($ids, 'supplier.credit', 'credit');
+                if ($ids->count() !== 1 || $posted !== (int) $s->amount) {
+                    $issues[] = 'Return #'.$r->id.': settlement #'.$s->id.' ('.$s->method.') is not carried once by its journal entry.';
+                }
+            }
+            $row['issues'] = $issues;
+            $problems = [...$problems, ...$issues];
+            $rows[] = $row;
+        }
+        foreach (SupplierReturn::selectRaw('supplier_id, supplier_document, COUNT(*) n')->whereNotNull('supplier_document')->whereNotIn('status', ['rejected', 'cancelled'])->groupBy('supplier_id', 'supplier_document')->havingRaw('COUNT(*) > 1')->get() as $d) {
+            $problems[] = 'Credit note or acceptance document "'.$d->supplier_document.'" of supplier '.$d->supplier_id.' is registered on '.$d->n.' returns (a credit is recognised once).';
+        }
+        $kept = $approved->where('kind', 'accepted');
+        $receivableGl = Ledger::debitBalance('assets.supplier_receivable');
+        $receivableOpen = (int) $kept->sum(fn (SupplierReturn $r) => SupplierReturnService::balances($r)['receivable_open']);
+        $mineCredit = JournalEntry::whereIn('source_type', ['supplier_return', 'supplier_return_settlement'])->pluck('id');
+        $creditGl = $side($mineCredit, 'supplier.credit', 'debit') - $side($mineCredit, 'supplier.credit', 'credit');
+        $creditOpen = (int) $kept->sum(fn (SupplierReturn $r) => SupplierReturnService::balances($r)['credit_open']);
+        $differenceGl = Ledger::debitBalance('supplier_return_difference');
+        $differenceCases = (int) $kept->sum('difference_value');
+        foreach ([['The supplier receivable in the ledger', $receivableGl, 'the returns', $receivableOpen], ['Supplier credit from returns in the ledger', $creditGl, 'the returns', $creditOpen],
+            ['Unrecovered cost of returns in the ledger', $differenceGl, 'the returns', $differenceCases]] as [$what, $gl, $of, $sub]) {
+            if ($gl !== $sub) {
+                $problems[] = $what.' ('.$gl.') differs from '.$of.' ('.$sub.').';
+            }
+        }
+
+        return ['rows' => $rows, 'receivable_gl' => $receivableGl, 'receivable_open' => $receivableOpen, 'credit_gl' => $creditGl, 'credit_open' => $creditOpen, 'difference_gl' => $differenceGl,
+            'difference_cases' => $differenceCases, 'problems' => $problems, 'ok' => $problems === []];
+    }
+
     /** Inventory value of one lot as its own journal entries state it (settlements, capitalised costs, transport, whole-lot release, and their reversals). */
     public static function journalValue(SourcingLot $lot): int
     {
@@ -336,6 +421,9 @@ class InventoryReconciliation
         }
         foreach (InventoryLossCase::where('sourcing_lot_id', $lot->id)->where('status', 'approved')->pluck('id') as $caseId) {
             $total += InventoryValuation::inventoryNet('inventory_loss_case', $caseId);
+        }
+        foreach (SupplierReturn::where('sourcing_lot_id', $lot->id)->where('status', 'approved')->pluck('id') as $returnId) {
+            $total += InventoryValuation::inventoryNet('supplier_return', $returnId);
         }
 
         return $total;

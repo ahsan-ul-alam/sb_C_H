@@ -50,7 +50,8 @@ class SourcingReconciliation
                     $pending = (int) $awaiting->sum(fn (SupplierPayment $p) => (int) $p->expense->amount);
                     array_push($accounted, ...$awaiting->pluck('expense_id')->all());
 
-                    $remaining = max(0, $ordered - $verifiedPaid - $pending);
+                    $returned = SupplierReturnService::payableReduced($lot, $supplierId); // what returns and applied credit notes took off the payable
+                    $remaining = max(0, $ordered - $verifiedPaid - $pending - $returned);
                     $ledger = AdvanceSettlementService::payableOutstanding($lot, $supplierId);
                     // The lot's own ledger payable covers its owed amount first, then its payments awaiting verification (a pending payment of
                     // that payable is part of the same liability, not a second claim on cash). Never another lot's or supplier's.
@@ -61,7 +62,7 @@ class SourcingReconciliation
                     $rows[] = [
                         'lot' => $lot->number, 'lot_id' => $lot->id, 'kind' => 'supplier', 'ref' => $supplierId, 'label' => (string) $lines->first()['line']->supplier?->name,
                         'status' => self::status($remaining + $pending, $covered, $pending > 0 && $remaining === 0),
-                        'total_obligation' => $ordered, 'paid_amount' => $verifiedPaid, 'pending_payment' => $pending, 'remaining_owed' => $remaining,
+                        'total_obligation' => $ordered, 'returned_reduction' => $returned, 'paid_amount' => $verifiedPaid, 'pending_payment' => $pending, 'remaining_owed' => $remaining,
                         'verified_payable' => $ledger, 'recognised_in_ledger' => $covered, 'not_recognised' => $remainingLeft + $pendingLeft,
                         'not_recognised_owed' => $remainingLeft, 'not_recognised_pending' => $pendingLeft,
                     ];
