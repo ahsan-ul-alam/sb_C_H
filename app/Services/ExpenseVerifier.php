@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Expense;
 use App\Models\ExpenseRefundAllocation;
 use App\Models\Resolution;
+use App\Models\SourcingLotCost;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
@@ -28,7 +29,7 @@ class ExpenseVerifier
         $amount = (int) $e->amount;
         $accountId = AccountingService::resolveAccountId($e->financial_account_id);
         if ($e->reverses_id) {
-            $expenseAccount = self::debitAccount(self::original($e));
+            $expenseAccount = self::reversalCreditAccount(self::original($e));
             // An expense that was never paid is cancelled against its payable; nothing moves in cash.
             $debits = match ($e->correction_type) {
                 'liability_cancel' => [['liabilities', null, $amount, 0]],
@@ -82,6 +83,20 @@ class ExpenseVerifier
             (bool) $e->is_asset => 'assets.equipment',
             default => 'expense',
         };
+    }
+
+    /**
+     * The account a reversal takes the cost back out of. Normally the account the original was debited. A transport prepayment whose service has been
+     * confirmed is no longer in the prepayment asset (it was moved into inventory), so its correction comes out of inventory: crediting the emptied
+     * prepayment account would leave inventory overstated and the prepayment negative.
+     */
+    private static function reversalCreditAccount(Expense $original): string
+    {
+        if ($original->classification === 'transport_prepayment' && SourcingLotCost::where('expense_id', $original->id)->whereNotNull('service_completed_on')->exists()) {
+            return 'assets.inventory';
+        }
+
+        return self::debitAccount($original);
     }
 
     private static function original(Expense $e): Expense

@@ -8,9 +8,11 @@ use App\Models\InventoryEngineEnrolment;
 use App\Models\InventoryValueMovement;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
+use App\Models\LandedCostReallocation;
 use App\Models\SourcingLot;
 use App\Models\SourcingLotCost;
 use App\Models\SourcingLotLine;
+use App\Models\User;
 use App\Support\Costing;
 use App\Support\Money;
 use Illuminate\Support\Collection;
@@ -247,15 +249,17 @@ class InventoryValuation
                     foreach (Costing::allocateShared($amount, $weights) as $lineId => $share) {
                         if ($share > 0) {
                             self::record($lot, $lines[$lineId], $enrolment, ['component' => 'landed', 'type' => 'add', 'value_delta' => $share, 'valuation_status' => self::status(self::acceptedValue($lines[$lineId]), $state['purchase'][$lineId]),
-                                'source_type' => 'lot_cost', 'source_id' => $cost->id, 'journal_entry_id' => $journal, 'move_key' => $capKey.':'.$lineId, 'effective_on' => self::effectiveOn($date, $enrolment),
+                                'source_type' => 'lot_cost', 'source_id' => $cost->id, 'sourcing_lot_cost_id' => $cost->id, 'journal_entry_id' => $journal, 'move_key' => $capKey.':'.$lineId, 'effective_on' => self::effectiveOn($date, $enrolment),
                                 'verified_by' => $expense->verified_by, 'verified_at' => $expense->verified_at, 'reason' => $cost->category.' capitalised']);
                         }
                     }
                 }
             }
-            // A verified correction of a capitalised cost takes value back out in the proportions it went in.
-            if ($expense->classification === 'acquisition') {
-                $original = InventoryValueMovement::where('source_type', 'lot_cost')->where('source_id', $cost->id)->where('type', 'add')->get()->groupBy('sourcing_lot_line_id')->map(fn ($g) => (int) $g->sum('value_delta'));
+            // A verified correction of a capitalised cost takes value back out in the proportions it now sits on the lines. A confirmed transport
+            // prepayment is capitalised too: its correction credits inventory (see ExpenseVerifier), and a correction made before the service was
+            // confirmed credited the prepayment instead and is already netted out of the capitalised amount.
+            if ($expense->classification === 'acquisition' || ($expense->classification === 'transport_prepayment' && $cost->service_completed_on !== null)) {
+                $original = InventoryValueMovement::where('sourcing_lot_cost_id', $cost->id)->get()->groupBy('sourcing_lot_line_id')->map(fn ($g) => (int) $g->sum('value_delta'))->filter(fn ($v) => $v > 0);
                 foreach (Expense::where('reverses_id', $expense->id)->where('status', 'verified')->orderBy('id')->get() as $correction) {
                     $taken = -self::inventoryNet('expense', $correction->id); // credit to inventory => positive amount to remove
                     $correctionJournal = self::journalId('expense', $correction->id);
@@ -265,7 +269,7 @@ class InventoryValuation
                     foreach (Costing::allocateShared($taken, $original->all()) as $lineId => $share) {
                         if ($share > 0) {
                             self::record($lot, $lines[$lineId], $enrolment, ['component' => 'landed', 'type' => 'correction', 'value_delta' => -$share, 'valuation_status' => self::status(self::acceptedValue($lines[$lineId]), $state['purchase'][$lineId]),
-                                'source_type' => 'cost_correction', 'source_id' => $correction->id, 'journal_entry_id' => $correctionJournal, 'move_key' => 'cor:'.$correction->id.':'.$lineId,
+                                'source_type' => 'cost_correction', 'source_id' => $correction->id, 'sourcing_lot_cost_id' => $cost->id, 'journal_entry_id' => $correctionJournal, 'move_key' => 'cor:'.$correction->id.':'.$lineId,
                                 'effective_on' => self::effectiveOn($correction->spent_on->toDateString(), $enrolment), 'verified_by' => $correction->verified_by, 'verified_at' => $correction->verified_at, 'reason' => 'Correction of '.$cost->category]);
                         }
                     }
@@ -292,6 +296,97 @@ class InventoryValuation
                 'valuation_status' => self::status($accepted, $state['purchase'][$line->id]), 'source_type' => 'lot_line', 'source_id' => $line->id, 'journal_entry_id' => null,
                 'move_key' => 'qty:'.$line->id.':'.$sequence, 'effective_on' => self::effectiveOn(today()->toDateString(), $enrolment), 'reason' => 'Accepted quantity valued']);
             $state['quantity'][$line->id] = $target;
+        }
+    }
+
+    /** Net value one capitalised lot cost currently sits on the lot's lines in the subledger (what it put on, less corrections, net of reallocations). */
+    public static function costValueHeld(SourcingLotCost $cost): int
+    {
+        return (int) InventoryValueMovement::where('sourcing_lot_cost_id', $cost->id)->sum('value_delta');
+    }
+
+    /** Quantity of the line handed over to clients (issued, less returned). Zero until handovers exist. */
+    public static function issuedQuantity(SourcingLotLine $line): string
+    {
+        $sum = InventoryValueMovement::where('sourcing_lot_line_id', $line->id)->where('component', 'quantity')->whereIn('type', ['issue', 'issue_return'])->sum('quantity_delta');
+
+        return bcmul(bcadd((string) $sum, '0', 2), '-1', 2);
+    }
+
+    /**
+     * Apply an approved reallocation: the cost's current net value is spread over the named beneficiary lines by the stated basis, and the difference to
+     * what each line holds now is appended as compensating movements that net to zero. The aggregate, and the ledger entry carrying it, do not change.
+     */
+    public static function applyReallocation(LandedCostReallocation $reallocation, User $approver): void
+    {
+        $cost = SourcingLotCost::findOrFail($reallocation->sourcing_lot_cost_id);
+        $lot = SourcingLot::whereKey($cost->sourcing_lot_id)->lockForUpdate()->firstOrFail();
+        $enrolment = InventoryEngineEnrolment::where('sourcing_lot_id', $lot->id)->where('status', 'approved')->where('ownership', 'company')->firstOrFail();
+        $lines = $lot->lines()->get()->keyBy('id');
+        $state = self::state($lines);
+        $total = self::costValueHeld($cost);
+        $held = InventoryValueMovement::where('sourcing_lot_cost_id', $cost->id)->get();
+        $journal = $held->where('type', 'add')->first()?->journal_entry_id;
+        $current = $held->groupBy('sourcing_lot_line_id')->map(fn ($g) => (int) $g->sum('value_delta'));
+
+        $weights = [];
+        foreach ($reallocation->beneficiary_line_ids as $lineId) {
+            $line = $lines[$lineId];
+            $weights[$lineId] = $reallocation->basis === 'quantity' ? (int) bcmul((string) $line->usable_quantity, '100', 0) : self::acceptedValue($line);
+        }
+        $target = Costing::allocateShared($total, $weights);
+        foreach ($lines->keys()->merge($current->keys())->unique() as $lineId) {
+            $delta = (int) ($target[$lineId] ?? 0) - (int) ($current[$lineId] ?? 0);
+            if ($delta === 0) {
+                continue;
+            }
+            self::record($lot, $lines[$lineId], $enrolment, ['component' => 'landed', 'type' => 'reallocation', 'value_delta' => $delta, 'sourcing_lot_cost_id' => $cost->id,
+                'valuation_status' => self::status(self::acceptedValue($lines[$lineId]), $state['purchase'][$lineId]), 'source_type' => 'landed_reallocation', 'source_id' => $reallocation->id,
+                'journal_entry_id' => $journal, 'move_key' => 'realloc:'.$reallocation->id.':'.$lineId, 'effective_on' => self::effectiveOn(today()->toDateString(), $enrolment),
+                'verified_by' => $approver->id, 'verified_at' => now(), 'created_by' => $reallocation->prepared_by, 'reason' => 'Reallocated under '.$reallocation->policy_reference]);
+        }
+    }
+
+    /** True once any stock of the lot has been issued (handed over): from then a cost's value is partly consumed and may no longer be moved. */
+    public static function hasIssued(SourcingLot $lot): bool
+    {
+        return InventoryValueMovement::where('sourcing_lot_id', $lot->id)->where('type', 'issue')->exists();
+    }
+
+    /**
+     * A capitalised cost (acquisition cost, or transport whose service is confirmed) can be reversed only while its value is still in the lot's
+     * inventory. Once the lot's cost was released, or the value moved on or was consumed, the correct treatment (an open-period cost adjustment) is not
+     * established here, so the reversal is refused instead of crediting inventory that no longer holds it.
+     */
+    public static function assertCostReversible(SourcingLotCost $cost, int $amount, int $alreadyCounted = 0): void
+    {
+        $lot = SourcingLot::findOrFail($cost->sourcing_lot_id);
+        // $alreadyCounted: at approval time the reversal being decided is already marked verified, so the ledger's held figure no longer includes it.
+        if (CostRecognitionService::unreleased($lot) + $alreadyCounted < $amount) {
+            throw new RuntimeException('This cost has already been released into cost of goods sold, so it can no longer be taken back out of inventory. Record an authorised cost adjustment instead.');
+        }
+        if (InventoryEngine::isValued($lot) && InventoryValueMovement::where('sourcing_lot_cost_id', $cost->id)->exists() && (self::costValueHeld($cost) < $amount || self::hasIssued($lot))) {
+            throw new RuntimeException('Part of this cost\'s value has been moved or consumed by stock already handed over, so it cannot be reversed here. Record an authorised cost adjustment instead.');
+        }
+    }
+
+    /**
+     * A settlement that valued goods cannot be reversed while capitalised costs still sit on those goods: reversing it would leave value on a line with no
+     * valued quantity. The costs must be reversed, reallocated or written off (under an approved adjustment) first; nothing is silently zeroed or moved.
+     */
+    public static function assertSettlementReversible(AdvanceSettlement $settlement): void
+    {
+        if (! InventoryEngineEnrolment::where('sourcing_lot_id', $settlement->sourcing_lot_id)->where('status', 'approved')->where('ownership', 'company')->exists()) {
+            return;
+        }
+        $removed = InventoryValueMovement::where('source_type', 'advance_settlement')->where('source_id', $settlement->id)->where('type', 'add')
+            ->get()->groupBy('sourcing_lot_line_id')->map(fn ($g) => (int) $g->sum('value_delta'));
+        foreach ($removed as $lineId => $value) {
+            $line = SourcingLotLine::find($lineId);
+            $f = self::lineFigures($line);
+            if ($f['landed'] > 0 && self::acceptedValue($line) > $f['purchase'] - $value) {
+                throw new RuntimeException('Capitalised costs ('.Money::format($f['landed']).') still sit on "'.$line->description.'". Reverse, reallocate or write off those costs first, so no value is left on stock that is no longer valued.');
+            }
         }
     }
 

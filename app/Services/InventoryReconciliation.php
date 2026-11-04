@@ -8,6 +8,7 @@ use App\Models\Expense;
 use App\Models\InventoryEngineEnrolment;
 use App\Models\InventoryValueMovement;
 use App\Models\SourcingLot;
+use App\Models\SourcingLotLine;
 
 /**
  * Read-only reconciliation of the inventory value subledger to the general ledger.
@@ -56,6 +57,10 @@ class InventoryReconciliation
                 'unit_cost' => InventoryValuation::unitCost($line), 'status' => InventoryValuation::status($accepted, $f['purchase'])];
             if ($value < 0) {
                 $row['exceptions'][] = 'Line '.$line->id.' has a negative value.';
+            }
+            // Value with no goods to carry it is never left unexplained. (Accepted goods whose purchase is not settled yet are "pending": explained.)
+            if ($value > 0 && bccomp($f['quantity'], '0', 2) === 0 && $accepted <= 0) {
+                $row['exceptions'][] = 'Line '.$line->id.' carries value '.$value.' but has no accepted goods to hold it.';
             }
             if (bccomp($f['quantity'], '0', 2) < 0) {
                 $row['exceptions'][] = 'Line '.$line->id.' has a negative quantity.';
@@ -125,6 +130,59 @@ class InventoryReconciliation
             'duplicates' => $duplicates, 'negative_lines' => $negative,
             'ok' => $gl === $byLot && $duplicates === 0 && $negative === 0 && $engine->every(fn ($r) => $r['ok']),
         ];
+    }
+
+    /**
+     * Bridge between what sourcing accepted, what the valuation engine counts, and what the physical stock ledger shows, per lot line and by ownership.
+     * Differences are reported with their cause and are never corrected automatically: a count difference needs an approved adjustment, not a silent fix.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public static function quantities(): array
+    {
+        $rows = [];
+        foreach (SourcingLotLine::with('lot')->orderBy('id')->get() as $line) {
+            $lot = $line->lot;
+            $enrolment = InventoryEngine::enrolment($lot);
+            $balances = Inventory::balances($line);
+            $accepted = $line->received_quantity === null ? '0.00' : bcadd((string) $line->usable_quantity, '0', 2);
+            $class = match (true) {
+                $lot->status === 'cancelled' => 'cancelled',
+                $enrolment?->isValued() => 'company_valued',
+                $lot->ownership === 'client' || ($enrolment?->status === 'approved' && $enrolment->ownership === 'client') => 'client_custody',
+                $lot->ownership === null => 'unclassified',
+                default => 'company_not_enrolled',
+            };
+            $figures = InventoryValuation::lineFigures($line);
+            $issued = InventoryValuation::issuedQuantity($line);
+            $held = '0';
+            foreach (['available', 'reserved', 'returned', 'damaged', 'dispatched'] as $bucket) {
+                $held = bcadd($held, $balances[$bucket], 2);
+            }
+            $differences = [];
+            if (bccomp($balances['received'], $accepted, 2) !== 0) {
+                $differences[] = 'Physical receipts ('.$balances['received'].') differ from the accepted quantity ('.$accepted.').';
+            }
+            if (! Inventory::reconciles($line)) {
+                $differences[] = 'The physical stock buckets do not add up to what was received and adjusted.';
+            }
+            if ($class === 'company_valued') {
+                $status = InventoryValuation::status(InventoryValuation::acceptedValue($line), $figures['purchase']);
+                $expected = $status === 'valued' ? bcsub($accepted, $issued, 2) : '0.00';
+                if (bccomp($figures['quantity'], $expected, 2) !== 0) {
+                    $differences[] = 'Valued quantity ('.$figures['quantity'].') differs from what the settled, accepted goods imply ('.$expected.').';
+                }
+                if ($status === 'valued' && bccomp($issued, '0', 2) === 0 && bccomp($held, $figures['quantity'], 2) !== 0) {
+                    $differences[] = 'The physical count held ('.$held.') differs from the valued quantity ('.$figures['quantity'].'): this needs an approved stock adjustment; nothing is corrected automatically.';
+                }
+            }
+            $rows[] = ['line_id' => $line->id, 'lot' => $lot->number, 'description' => $line->description, 'classification' => $class, 'ordered' => (string) $line->quantity, 'accepted' => $accepted,
+                'valued' => $class === 'company_valued' ? $figures['quantity'] : null, 'handed_over' => $issued, 'physical_received' => $balances['received'], 'physical_held' => $held,
+                'available' => $balances['available'], 'reserved' => $balances['reserved'], 'delivered' => $balances['delivered'], 'returned' => $balances['returned'], 'damaged' => $balances['damaged'],
+                'differences' => $differences, 'ok' => $differences === []];
+        }
+
+        return $rows;
     }
 
     /** Inventory value of one lot as its own journal entries state it (settlements, capitalised costs, transport, whole-lot release, and their reversals). */

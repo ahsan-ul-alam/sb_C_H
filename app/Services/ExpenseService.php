@@ -9,6 +9,7 @@ use App\Models\ExpenseRefundAllocation;
 use App\Models\JournalEntry;
 use App\Models\LoanReceivable;
 use App\Models\PrepaidRelease;
+use App\Models\SourcingLotCost;
 use App\Models\User;
 use App\Support\Money;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -157,6 +158,7 @@ class ExpenseService
             if ($original->payment_status === 'partial') {
                 throw new RuntimeException('Void the payments of this expense before reversing it.');
             }
+            self::assertCapitalisedCostReversible($original);
             if ($original->payment_status === 'unpaid') {
                 $type = 'liability_cancel';
             } elseif (! in_array($type, ['recording_error', 'refund_received', 'credit_note'], true)) {
@@ -181,6 +183,22 @@ class ExpenseService
 
             return $reversal;
         });
+    }
+
+    /**
+     * A sourcing cost that has been capitalised into inventory (acquisition cost, or transport whose service is confirmed) can be reversed only while its
+     * value is still held there. A transport prepayment not yet confirmed is still a prepayment and reverses against that.
+     */
+    private static function assertCapitalisedCostReversible(Expense $original, int $alreadyCounted = 0): void
+    {
+        if (! in_array($original->classification, ['acquisition', 'transport_prepayment'], true)) {
+            return;
+        }
+        $cost = SourcingLotCost::where('expense_id', $original->id)->first();
+        if (! $cost || ($original->classification === 'transport_prepayment' && $cost->service_completed_on === null)) {
+            return;
+        }
+        InventoryValuation::assertCostReversible($cost, (int) $original->amount, $alreadyCounted);
     }
 
     /**
@@ -249,6 +267,7 @@ class ExpenseService
         if ($original->classification === 'prepaid' && PrepaidRelease::where('expense_id', $original->id)->exists()) {
             throw new RuntimeException('Part of this prepaid expense has been expensed since the reversal was requested; reversing it now would take the prepaid asset below zero. Reject the reversal and record an adjustment instead.');
         }
+        self::assertCapitalisedCostReversible($original, $reversal->status === 'verified' ? (int) $reversal->amount : 0);
 
         $live = $original->payments()->whereNull('voided_at')->get();
         if ($reversal->correction_type === 'liability_cancel') {

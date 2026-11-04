@@ -354,20 +354,19 @@ it('refuses an enrolment dated before the engine starts or into a closed month, 
 });
 
 it('reverses a settlement exactly, and the subledger can neither be edited nor deleted', function () {
-    [$lot, [$line], $transport] = ivLot();
+    [$lot, [$line]] = ivLot(transport: null);   // (with capitalised cost still on the goods the reversal is refused: see the hardening tests)
     ivEnrol($lot);
     ivAdvance($lot, 5_000_000);
     ivArrive($line, '100', '100');
-    ivPayTransport($transport);
     $settlements = ivSettle($lot);
     expect(ivFigures($line)['quantity'])->toBe('100.00');
 
     AdvanceSettlementService::reverse($settlements[0], 'Wrong delivery note', $this->board);
 
     $reversal = InventoryValueMovement::where('type', 'reversal')->firstOrFail();
-    expect(ivFigures($line))->toBe(['purchase' => 0, 'landed' => 500_000, 'quantity' => '0.00'])   // value back out, quantity withdrawn, landed cost stays
+    expect(ivFigures($line))->toBe(['purchase' => 0, 'landed' => 0, 'quantity' => '0.00'])   // value back out, quantity withdrawn
         ->and($reversal->value_delta)->toBe(-5_000_000)->and($reversal->reverses_id)->not->toBeNull()->and($reversal->journalEntry->source_type)->toBe('advance_settlement_rev')
-        ->and(InventoryReconciliation::lot($lot->refresh())['journal_value'])->toBe(500_000)->and(InventoryReconciliation::lot($lot)['subledger_value'])->toBe(500_000);
+        ->and(InventoryReconciliation::lot($lot->refresh())['journal_value'])->toBe(0)->and(InventoryReconciliation::lot($lot)['subledger_value'])->toBe(0);
     $count = InventoryValueMovement::count();
     InventoryValuation::syncLot($lot->id);
     expect(InventoryValueMovement::count())->toBe($count)  // a second sync does not reverse again

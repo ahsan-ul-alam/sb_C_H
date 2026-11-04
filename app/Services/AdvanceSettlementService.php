@@ -280,6 +280,7 @@ class AdvanceSettlementService
             if ($settlement->kind === 'payable' && self::payablePaymentsAwaitingVerification($lot, (int) $settlement->supplier_id) > 0) {
                 throw new RuntimeException('A payment of this payable awaits Board verification; verify or reject it before reversing the payable.');
             }
+            InventoryValuation::assertSettlementReversible($settlement);
             $original = JournalEntry::where('source_type', 'advance_settlement')->where('source_id', $settlement->id)->firstOrFail();
             Ledger::reverse($original, $original->entry_date->toDateString(), 'Reversal of advance settlement #'.$settlement->id.': '.$reason, 'advance_settlement_rev', $settlement->id, $user->id);
             $settlement->update(['status' => 'reversed']);
