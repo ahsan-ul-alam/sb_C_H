@@ -641,3 +641,16 @@ it('reads the trial balance, operational profit, cash flow, aging and exceptions
     $page = $this->co->as('finance')->get(route('finance.ledger-reports'))->assertOk()->getContent();
     expect($page)->toContain('Operational profit (ledger)')->and($page)->toContain('Balanced')->and($page)->toContain('Cost of returned goods not recovered from suppliers');
 });
+
+it('shows the frozen distributable profit beside the ledger operational profit with the approved fund split, and flags a landed cost that arrived after handover', function () {
+    [$lot, $line] = srLot();
+    AccountingPeriod::create(['month' => '2026-11', 'income' => 5_000_000, 'expenses' => 1_000_000, 'net_profit' => 4_000_000, 'closed_by' => $this->finance->id]);
+    $bridge = LedgerStatements::distributionBridge()[0];
+
+    expect($bridge['frozen_distributable_profit'])->toBe(4_000_000)->and($bridge['salary_fund'])->toBe(800_000)->and($bridge['office_fund'])->toBe(200_000)->and($bridge['emergency_reserve'])->toBe(1_000_000)->and($bridge['partners'])->toBe(2_000_000)
+        ->and($bridge['salary_fund'] + $bridge['office_fund'] + $bridge['emergency_reserve'] + $bridge['partners'])->toBe(4_000_000)
+        ->and($bridge['difference'])->toBe($bridge['ledger_operational_profit'] - 4_000_000);
+    expect(AccountingPeriod::first()->net_profit)->toBe(4_000_000);                      // the frozen figure is only read
+    $page = $this->co->as('finance')->get(route('finance.ledger-reports'))->assertOk()->getContent();
+    expect($page)->toContain('Distributable (frozen)')->and($page)->toContain('Partners 50%');
+});

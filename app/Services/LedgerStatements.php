@@ -2,16 +2,19 @@
 
 namespace App\Services;
 
+use App\Models\AccountingPeriod;
 use App\Models\AdvanceSettlement;
 use App\Models\ImpairedStockEvent;
 use App\Models\InventoryLossCase;
 use App\Models\InventoryRevaluation;
+use App\Models\InventoryValueMovement;
 use App\Models\Invoice;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
 use App\Models\SourcingLot;
 use App\Models\SupplierReturn;
 use App\Models\SupplierReturnSettlement;
+use Carbon\CarbonImmutable;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 
@@ -174,6 +177,29 @@ class LedgerStatements
     }
 
     /**
+     * The profit the allocation policy reads (frozen when a month was closed) beside what the ledger says the same month earned, and the fixed fund split applied to the frozen
+     * figure. Operational profit is the business-performance measure; distributable profit is the policy-controlled one: neither is substituted for the other, and the
+     * difference is stated, not hidden. Percentages are the approved policy: Salary Fund 20%, Office Fund 5%, Emergency Reserve 25%, Partners 50%.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public static function distributionBridge(int $months = 6): array
+    {
+        $rows = [];
+        foreach (AccountingPeriod::orderByDesc('month')->limit($months)->get() as $period) {
+            $from = $period->month.'-01';
+            $to = CarbonImmutable::parse($from)->endOfMonth()->toDateString();
+            $ledger = self::operationalProfit($from, $to);
+            $frozen = (int) $period->net_profit;
+            $rows[] = ['month' => $period->month, 'frozen_distributable_profit' => $frozen, 'ledger_operational_profit' => $ledger['operational_profit'], 'difference' => $ledger['operational_profit'] - $frozen,
+                'inventory_results_not_in_distributable' => -$ledger['inventory_total'], 'salary_fund' => intdiv($frozen * 20, 100), 'office_fund' => intdiv($frozen * 5, 100), 'emergency_reserve' => intdiv($frozen * 25, 100),
+                'partners' => $frozen - intdiv($frozen * 20, 100) - intdiv($frozen * 5, 100) - intdiv($frozen * 25, 100)];
+        }
+
+        return $rows;
+    }
+
+    /**
      * Every reconciliation that disagrees and every decision waiting. An empty list is the claim "nothing is outstanding"; each line says where to look.
      *
      * @return list<array{area: string, message: string}>
@@ -220,6 +246,12 @@ class LedgerStatements
         }
         foreach (StorageBilling::configurationExceptions() as $row) {
             $push('Storage Billing Configuration Required', [$row['client'].' - '.$row['subject'].' ('.$row['units'].' units): '.implode('; ', $row['missing']).'.']);
+        }
+        // A landed cost capitalised after units of the line were already handed over is spread over the units that remain: the share that belongs to the handed-over units is not
+        // moved into cost of goods sold without an approved costing policy, so it is listed for review instead of silently adjusted.
+        $late = InventoryValueMovement::where('component', 'landed')->where('type', 'add')->get()->filter(fn ($m) => InventoryValueMovement::where('sourcing_lot_line_id', $m->sourcing_lot_line_id)->where('type', 'issue')->where('id', '<', $m->id)->exists())->pluck('sourcing_lot_line_id')->unique();
+        foreach ($late as $lineId) {
+            $push('Late landed cost', ['Line '.$lineId.' received landed cost after units were handed over: it sits on the remaining units until Finance approves how the handed-over share is treated.']);
         }
         $unclassified = SourcingLot::whereNull('ownership')->whereHas('lines', fn ($l) => $l->whereNotNull('received_quantity'))->count();
         if ($unclassified > 0) {

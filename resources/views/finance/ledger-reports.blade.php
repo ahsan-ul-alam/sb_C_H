@@ -16,6 +16,14 @@
     </section>
 
     <section class="panel">
+        <div class="panel-head"><h2>Operational profit and distributable profit (closed months)</h2></div>
+        <div class="panel-body muted">The profit allocation reads is frozen when a month closes and is not replaced by operational profit. The fund split is the approved policy: Salary Fund 20%, Office Fund 5%, Emergency Reserve 25%, Partners 50%.</div>
+        <div class="table-wrap"><table class="table table-min-760"><thead><tr><th>Month</th><th class="num">Distributable (frozen)</th><th class="num">Operational (ledger)</th><th class="num">Difference</th><th class="num">Salary 20%</th><th class="num">Office 5%</th><th class="num">Reserve 25%</th><th class="num">Partners 50%</th></tr></thead><tbody>
+            @forelse ($bridge as $b)<tr><td>{{ $b['month'] }}</td><td class="num">{{ Money::format($b['frozen_distributable_profit']) }}</td><td class="num">{{ Money::format($b['ledger_operational_profit']) }}</td><td class="num">{{ Money::format($b['difference']) }}</td><td class="num">{{ Money::format($b['salary_fund']) }}</td><td class="num">{{ Money::format($b['office_fund']) }}</td><td class="num">{{ Money::format($b['emergency_reserve']) }}</td><td class="num">{{ Money::format($b['partners']) }}</td></tr>@empty<tr><td colspan="8" class="muted">No closed month yet.</td></tr>@endforelse
+        </tbody></table></div>
+    </section>
+
+    <section class="panel">
         <div class="panel-head"><h2>Storage Billing Configuration Required</h2></div>
         <div class="panel-body muted">Storage is charged only with a storage contract in force, a measured area and an approved rate. Stock missing any of these is listed here and is not charged.</div>
         <div class="table-wrap"><table class="table table-min-640"><thead><tr><th>Client</th><th>Stock</th><th class="num">Units</th><th>Missing</th></tr></thead><tbody>

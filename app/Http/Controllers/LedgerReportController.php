@@ -44,7 +44,7 @@ class LedgerReportController extends Controller
         return view('finance.ledger-reports', [
             'from' => $from, 'to' => $to, 'trial' => LedgerStatements::trialBalance($to), 'profit' => LedgerStatements::operationalProfit($from, $to), 'cash' => LedgerStatements::cashFlow($from, $to),
             'supplierAging' => LedgerStatements::supplierAging($to), 'receivableAging' => LedgerStatements::receivableAging($to), 'exceptions' => LedgerStatements::exceptions(),
-            'labels' => LedgerStatements::INVENTORY_RESULT_ACCOUNTS, 'storage' => StorageBilling::configurationExceptions(),
+            'labels' => LedgerStatements::INVENTORY_RESULT_ACCOUNTS, 'storage' => StorageBilling::configurationExceptions(), 'bridge' => LedgerStatements::distributionBridge(),
         ]);
     }
 }
