@@ -176,15 +176,16 @@ class InventoryReconciliation
                 if (bccomp($figures['quantity'], $expected, 2) !== 0) {
                     $differences[] = 'Valued quantity ('.$figures['quantity'].') differs from what the settled, accepted goods imply ('.$expected.').';
                 }
-                // Goods handed over to a client stay in our warehouse as the client's custody stock, so the physical count is the valued quantity plus what was handed over.
-                $expectedHeld = bcadd($figures['quantity'], $issued, 2);
+                // Goods handed over to a client stay in our warehouse as the client's custody stock, so the physical count is the valued quantity plus what was handed over,
+                // less what has since left the warehouse (delivered to the client's customers, or released to the client at handover).
+                $expectedHeld = bcsub(bcadd($figures['quantity'], $issued, 2), $balances['delivered'], 2);
                 if ($status === 'valued' && bccomp($held, $expectedHeld, 2) !== 0) {
                     $differences[] = 'The physical count held ('.$held.') differs from the valued quantity ('.$figures['quantity'].') plus goods handed over ('.$issued.'): this needs an approved stock adjustment; nothing is corrected automatically.';
                 }
             }
             $rows[] = ['line_id' => $line->id, 'lot' => $lot->number, 'description' => $line->description, 'classification' => $class, 'ordered' => (string) $line->quantity, 'accepted' => $accepted,
                 'valued' => $class === 'company_valued' ? $figures['quantity'] : null, 'handed_over' => $issued, 'physical_received' => $balances['received'], 'physical_held' => $held,
-                'available' => $balances['available'], 'reserved' => $balances['reserved'], 'delivered' => $balances['delivered'], 'returned' => $balances['returned'], 'damaged' => $balances['damaged'],
+                'owned_available' => Inventory::sliceBalances($line, null)['available'], 'available' => $balances['available'], 'reserved' => $balances['reserved'], 'delivered' => $balances['delivered'], 'returned' => $balances['returned'], 'damaged' => $balances['damaged'],
                 'differences' => $differences, 'ok' => $differences === []];
         }
 
@@ -232,6 +233,12 @@ class InventoryReconciliation
             }
             if (CostRecognition::where('sourcing_lot_id', $h->sourcing_lot_id)->exists()) {
                 $row['issues'][] = 'Handover #'.$h->id.' is on a lot whose cost was already released as a whole lot (recognised twice).';
+            }
+            // The same units must stand in exactly one place: custody slice (or the client's hands) against what the handover says is still the client's.
+            $custody = InventoryCustody::check($h);
+            $row['custody'] = $custody['held'];
+            foreach ($custody['differences'] as $difference) {
+                $row['issues'][] = 'Handover #'.$h->id.': '.$difference;
             }
             $problems = [...$problems, ...$row['issues']];
             $byProject[$h->project_id] = ($byProject[$h->project_id] ?? 0) + $netCogs;

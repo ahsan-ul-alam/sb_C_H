@@ -114,7 +114,7 @@ class ProductOperationsController extends Controller
     public function orders(Request $request): View
     {
         $project = $request->integer('project') ? Project::with('client')->find($request->integer('project')) : null;
-        $stock = $project ? Inventory::stockFor($project->client_id)->groupBy(fn ($r) => $r['line']->supplier_product_id)
+        $stock = $project ? Inventory::stockFor($project->client_id, null, $project->id)->groupBy(fn ($r) => $r['line']->supplier_product_id)
             ->map(fn ($g) => ['name' => $g->first()['line']->description, 'available' => $g->reduce(fn ($c, $r) => bcadd($c, $r['available'], 2), '0')]) : collect();
         $orders = ClientOrder::where('fulfilment', 'stock')->with(['project.client', 'items.line', 'collections', 'invoice'])->latest('id')->paginate(25)->withQueryString();
 

@@ -7,14 +7,18 @@ use App\Models\InventoryHandover;
 use App\Models\InventoryHandoverReturn;
 use App\Models\InventoryValueMovement;
 use App\Models\JournalEntry;
+use App\Models\StockMovement;
 use App\Models\Supplier;
+use App\Models\SupplierProduct;
 use App\Services\AdvanceSettlementService;
 use App\Services\Inventory;
+use App\Services\InventoryCustody;
 use App\Services\InventoryEngine;
 use App\Services\InventoryHandoverService;
 use App\Services\InventoryReconciliation;
 use App\Services\InventoryValuation;
 use App\Services\Ledger;
+use App\Services\OrderFulfilment;
 use App\Services\Sourcing;
 use App\Services\SourcingArrival;
 use App\Services\SourcingPayments;
@@ -51,11 +55,11 @@ afterEach(fn () => Carbon::setTestNow());
 /**
  * A lot enrolled as company-owned, accepted, settled and (optionally) costed: returns [lot, line, allocation].
  */
-function hoLot(string $quantity = '100', int $price = 50_000, ?int $transport = 500_000, bool $settle = true, ?string $allocate = null, ?string $ownership = 'company'): array
+function hoLot(string $quantity = '100', int $price = 50_000, ?int $transport = 500_000, bool $settle = true, ?string $allocate = null, ?string $ownership = 'company', ?int $product = null): array
 {
     $finance = test()->finance;
     $lot = Sourcing::createLot(['title' => 'Lot '.Str::random(4)], $finance);
-    $line = Sourcing::addLine($lot, ['supplier_id' => test()->supplier->id, 'description' => 'Zipper Hoodie', 'quantity' => $quantity, 'unit_price' => $price], $finance);
+    $line = Sourcing::addLine($lot, ['supplier_id' => test()->supplier->id, 'supplier_product_id' => $product, 'description' => 'Zipper Hoodie', 'quantity' => $quantity, 'unit_price' => $price], $finance);
     $cost = $transport ? Sourcing::addCost($lot, ['category' => 'Transportation', 'amount' => $transport, 'kind' => 'actual', 'incurred_on' => '2026-11-04'], $finance) : null;
     Sourcing::advance($lot, $finance);
     Sourcing::savePricing($lot, 'fixed', 10_000, [], $finance);
@@ -358,4 +362,141 @@ it('serves the handover screens with the same rules: request, pending approval, 
     $this->co->post('finance', 'sourcing.handovers.returns.store', ['quantity' => '5', 'condition' => 'resalable', 'returned_on' => '2026-11-10', 'evidence_reference' => 'Return note RT-5 signed', 'reason' => 'Wrong item'], $handover)
         ->assertSessionHasNoErrors()->assertSessionMissing('error');
     expect(InventoryHandoverReturn::count())->toBe(1);
+});
+
+/*
+| Phase 2D-0: ownership is not custody. An approved handover moves the units from Sellbees' own stock to the client's custody slice of the same line, without
+| moving the goods, without a second journal and without changing the lot's ownership.
+*/
+
+function custodyProduct(): int
+{
+    return SupplierProduct::create(['supplier_id' => test()->supplier->id, 'name' => 'Zipper Hoodie', 'reference_price' => 500])->id;
+}
+
+function custodyOrder($project, string $quantity, string $productId, string $ref = 'ORD-C1')
+{
+    return OrderFulfilment::create($project, ['reference' => $ref, 'ordered_on' => '2026-11-10', 'customer_name' => 'Buyer', 'items' => [['product_id' => (int) $productId, 'quantity' => $quantity, 'unit_price' => 80_000]]], test()->finance);
+}
+
+it('moves a partial handover into the client custody slice without moving the goods, changing the lot or posting a second journal', function () {
+    [$lot, $line, $allocation] = hoLot(product: custodyProduct());
+    $handover = hoApprove(hoPropose($allocation, '40'));
+
+    expect(Inventory::balances($line)['available'])->toBe('100.00')                              // the same physical units, none left the warehouse
+        ->and(Inventory::sliceBalances($line, null)['available'])->toBe('60.00')                 // Sellbees still owns 60
+        ->and(Inventory::sliceBalances($line, $handover->id)['available'])->toBe('40.00')        // the client's custody stock
+        ->and($lot->refresh()->ownership)->toBe('company')                                       // a partial handover never changes the whole lot
+        ->and(Inventory::reconciles($line))->toBeTrue()
+        ->and(JournalEntry::where('source_type', 'inventory_handover')->count())->toBe(1)       // exactly one: the cost release, nothing for the custody movements
+        ->and(hoCogs())->toBe(2_200_000)
+        ->and(InventoryCustody::check($handover)['ok'])->toBeTrue()
+        ->and(InventoryReconciliation::company()['ok'])->toBeTrue();
+    // Approving again changes nothing: same movement keys, same journal.
+    expect(fn () => InventoryHandoverService::decide($handover, true, $this->board))->toThrow(RuntimeException::class);
+    expect(StockMovement::where('inventory_handover_id', $handover->id)->count())->toBe(1);
+});
+
+it('keeps mixed ownership inside one lot apart: two projects hold their own custody slices and Sellbees keeps the rest', function () {
+    $product = custodyProduct();
+    [$lot, $line, $first] = hoLot(allocate: '40', product: $product);
+    $other = $this->co->project($this->client, 'Other project');
+    $second = Sourcing::allocate($lot->refresh(), ['project_id' => $other->id, 'line_id' => $line->id, 'kind' => 'sale', 'quantity' => '30'], $this->finance);
+
+    $a = hoApprove(hoPropose($first, '40'));
+    $b = hoApprove(hoPropose($second, '30'));
+
+    expect(Inventory::sliceBalances($line, null)['available'])->toBe('30.00')
+        ->and(Inventory::sliceBalances($line, $a->id)['available'])->toBe('40.00')
+        ->and(Inventory::sliceBalances($line, $b->id)['available'])->toBe('30.00')
+        ->and(Inventory::balances($line)['available'])->toBe('100.00');
+    // Another project's order cannot see this project's custody stock.
+    $stock = Inventory::stockFor($this->client->id, $product, $other->id);
+    expect($stock)->toHaveCount(1)->and($stock->first()['available'])->toBe('30.00')->and($stock->first()['handover']->id)->toBe($b->id);
+});
+
+it('reserves, dispatches and delivers custody stock to an end customer with no cost of goods sold and the commission and client-funds rules unchanged', function () {
+    $product = custodyProduct();
+    [$lot, $line, $allocation] = hoLot(product: $product);
+    $handover = hoApprove(hoPropose($allocation, '40'));
+    $cogsBefore = hoCogs();
+    $journals = JournalEntry::count();
+
+    $order = custodyOrder($this->project, '15', (string) $product);
+    OrderFulfilment::confirm($order, $this->finance);
+    expect(Inventory::sliceBalances($line, $handover->id)['reserved'])->toBe('15.00')->and(Inventory::sliceBalances($line, $handover->id)['available'])->toBe('25.00')
+        ->and(Inventory::sliceBalances($line, null)['available'])->toBe('60.00')                 // Sellbees' own stock is untouched
+        ->and($order->refresh()->items->first()->inventory_handover_id)->toBe($handover->id);
+
+    OrderFulfilment::dispatch($order->refresh(), $this->finance);
+    OrderFulfilment::deliver($order->refresh(), [], $this->finance);
+    expect(Inventory::sliceBalances($line, $handover->id)['delivered'])->toBe('15.00')
+        ->and(InventoryCustody::check($handover)['ok'])->toBeTrue()
+        ->and(hoCogs())->toBe($cogsBefore)                                                       // no Sellbees COGS on the end-customer delivery
+        ->and(JournalEntry::where('source_type', 'inventory_handover')->count())->toBe(1);
+
+    // Customer money is the client's: Dr cash / Cr client funds, and the order is accepted as the client's stock.
+    $account = FinancialAccount::firstOrFail();
+    $collection = OrderFulfilment::collect($order->refresh(), 1_200_000, '2026-11-10', 'COD-1', (string) Str::uuid(), $account->id, $this->finance);
+    expect($collection)->not->toBeNull()->and(dr('cogs'))->toBe($cogsBefore)->and(JournalEntry::count())->toBeGreaterThan($journals);
+});
+
+it('refuses to reserve more custody stock than the client holds, never reaches Sellbees stock or another client, and rolls a cancelled order back', function () {
+    $product = custodyProduct();
+    [$lot, $line, $allocation] = hoLot(product: $product);
+    $handover = hoApprove(hoPropose($allocation, '10'));
+
+    $big = custodyOrder($this->project, '11', (string) $product, 'ORD-BIG');
+    expect(fn () => OrderFulfilment::confirm($big, $this->finance))->toThrow(RuntimeException::class, 'Only 10.00');
+    expect(Inventory::sliceBalances($line, $handover->id)['reserved'])->toBe('0.00')->and(Inventory::sliceBalances($line, null)['available'])->toBe('90.00');
+
+    $stranger = $this->co->project($this->co->client('Another Client'), 'Their project');
+    $theirs = custodyOrder($stranger, '1', (string) $product, 'ORD-THEIRS');
+    expect(fn () => OrderFulfilment::confirm($theirs, $this->finance))->toThrow(RuntimeException::class);
+
+    $ok = custodyOrder($this->project, '10', (string) $product, 'ORD-OK');
+    OrderFulfilment::confirm($ok, $this->finance);
+    OrderFulfilment::cancel($ok->refresh(), $this->finance);
+    expect(Inventory::sliceBalances($line, $handover->id)['available'])->toBe('10.00')->and(Inventory::sliceBalances($line, $handover->id)['reserved'])->toBe('0.00');
+});
+
+it('lets a client return of custody stock go back to Sellbees only for units standing in custody, and keeps damaged units out of sellable stock', function () {
+    $product = custodyProduct();
+    [$lot, $line, $allocation] = hoLot(product: $product);
+    $handover = hoApprove(hoPropose($allocation, '40'));
+    $order = custodyOrder($this->project, '30', (string) $product);
+    OrderFulfilment::confirm($order, $this->finance);
+
+    // 10 are free, 30 reserved: returning 20 must be refused, 10 allowed.
+    $tooMany = InventoryHandoverService::proposeReturn($handover, '20', 'resalable', '2026-11-10', 'Return note RT-1 signed', 'Client changed mind', (string) Str::uuid(), $this->finance);
+    expect(fn () => InventoryHandoverService::decideReturn($tooMany, true, $this->board))->toThrow(RuntimeException::class, 'Only 10.00');
+
+    $fine = InventoryHandoverService::proposeReturn($handover, '6', 'resalable', '2026-11-10', 'Return note RT-2 signed', 'Wrong item', (string) Str::uuid(), $this->finance);
+    InventoryHandoverService::decideReturn($fine, true, $this->board);
+    $damaged = InventoryHandoverService::proposeReturn($handover->refresh(), '4', 'damaged', '2026-11-10', 'Return note RT-3 signed', 'Crushed', (string) Str::uuid(), $this->finance);
+    InventoryHandoverService::decideReturn($damaged, true, $this->board);
+
+    expect(Inventory::sliceBalances($line, $handover->id)['available'])->toBe('0.00')
+        ->and(Inventory::sliceBalances($line, null)['available'])->toBe('66.00')                // 60 own + 6 resalable returned
+        ->and(Inventory::sliceBalances($line, null)['damaged'])->toBe('4.00')                   // held apart from sellable stock
+        ->and(Inventory::balances($line)['available'])->toBe('66.00')
+        ->and(InventoryCustody::check($handover->refresh())['ok'])->toBeTrue()
+        ->and(Inventory::reconciles($line))->toBeTrue();
+});
+
+it('records goods that physically leave at handover as a physical movement, not as warehouse custody', function () {
+    $product = custodyProduct();
+    [$lot, $line, $allocation] = hoLot(product: $product);
+    $handover = InventoryHandoverService::propose($allocation->refresh(), '25', '2026-11-09', '2026-11-09', 'Signed receiving note RN-9', null, (string) Str::uuid(), $this->finance, 'released');
+    hoApprove($handover);
+
+    expect(Inventory::balances($line)['available'])->toBe('75.00')                              // the physical count fell
+        ->and(Inventory::sliceBalances($line, null)['delivered'])->toBe('25.00')
+        ->and(StockMovement::where('inventory_handover_id', $handover->id)->count())->toBe(0)  // never counted as custody too
+        ->and(Inventory::stockFor($this->client->id, $product, $this->project->id))->toHaveCount(0)
+        ->and(InventoryReconciliation::company()['ok'])->toBeTrue();
+    // They come back physically, and the same units are not counted twice.
+    $return = InventoryHandoverService::proposeReturn($handover->refresh(), '25', 'resalable', '2026-11-10', 'Return note RT-9 signed', 'Rejected on site', (string) Str::uuid(), $this->finance);
+    InventoryHandoverService::decideReturn($return, true, $this->board);
+    expect(Inventory::balances($line)['available'])->toBe('100.00')->and(Inventory::sliceBalances($line, null)['delivered'])->toBe('0.00');
 });

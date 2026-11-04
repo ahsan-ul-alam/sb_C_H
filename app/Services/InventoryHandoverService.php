@@ -40,13 +40,16 @@ class InventoryHandoverService
         return bccomp($left, '0', 2) > 0 ? $left : '0.00';
     }
 
-    public static function propose(SourcingAllocation $allocation, string $quantity, string $proposedOn, string $transferredOn, string $evidenceReference, ?string $evidenceNote, string $key, User $user): InventoryHandover
+    public static function propose(SourcingAllocation $allocation, string $quantity, string $proposedOn, string $transferredOn, string $evidenceReference, ?string $evidenceNote, string $key, User $user, string $custodyMode = 'warehouse'): InventoryHandover
     {
+        if (! in_array($custodyMode, ['warehouse', 'released'], true)) {
+            throw new RuntimeException('State whether the goods stay in our warehouse as the client\'s custody stock or physically left with the client.');
+        }
         if ($existing = InventoryHandover::where('idempotency_key', $key)->first()) {
             return $existing; // the same submission twice records one request
         }
         try {
-            return DB::transaction(function () use ($allocation, $quantity, $proposedOn, $transferredOn, $evidenceReference, $evidenceNote, $key, $user) {
+            return DB::transaction(function () use ($allocation, $quantity, $proposedOn, $transferredOn, $evidenceReference, $evidenceNote, $key, $user, $custodyMode) {
                 $lot = SourcingLot::whereKey($allocation->sourcing_lot_id)->lockForUpdate()->firstOrFail();
                 $allocation = SourcingAllocation::whereKey($allocation->id)->lockForUpdate()->firstOrFail();
                 if ($allocation->kind !== 'sale' || $allocation->sourcing_lot_line_id === null) {
@@ -66,7 +69,7 @@ class InventoryHandoverService
                 $line = $lot->lines()->findOrFail($allocation->sourcing_lot_line_id);
                 $handover = InventoryHandover::create(['project_id' => $allocation->project_id, 'client_id' => $allocation->project->client_id, 'sourcing_allocation_id' => $allocation->id,
                     'sourcing_lot_id' => $lot->id, 'sourcing_lot_line_id' => $line->id, 'supplier_product_id' => $line->supplier_product_id, 'quantity' => $quantity, 'proposed_on' => $proposedOn,
-                    'transferred_on' => $transferredOn, 'evidence_reference' => trim($evidenceReference), 'evidence_note' => $evidenceNote, 'prepared_by' => $user->id, 'idempotency_key' => $key]);
+                    'transferred_on' => $transferredOn, 'evidence_reference' => trim($evidenceReference), 'evidence_note' => $evidenceNote, 'prepared_by' => $user->id, 'idempotency_key' => $key, 'custody_mode' => $custodyMode]);
                 Audit::log('inventory.handover_proposed', 'lot '.$lot->number, '#'.$handover->id.' '.$quantity.' of '.$line->description.' ('.trim($evidenceReference).')');
 
                 return $handover->refresh();
@@ -136,8 +139,12 @@ class InventoryHandoverService
             if (bccomp((string) $handover->quantity, InventoryValuation::lineFigures($line)['quantity'], 2) > 0) {
                 throw new RuntimeException('Only '.InventoryValuation::lineFigures($line)['quantity'].' of this line is valued and available to hand over.');
             }
-            if (bccomp(Inventory::balances($line)['reserved'], '0', 2) > 0) {
+            $own = Inventory::sliceBalances($line, null);
+            if (bccomp($own['reserved'], '0', 2) > 0) {
                 throw new RuntimeException('Stock of this line is reserved for an order; release the reservation before handing it over.');
+            }
+            if (bccomp((string) $handover->quantity, $own['available'], 2) > 0) {
+                throw new RuntimeException('Only '.$own['available'].' of this line is physically available in the warehouse as Sellbees stock; nothing can be handed over that is not there.');
             }
             $date = $handover->transferred_on->toDateString();
             if ($date > today()->toDateString()) {
@@ -155,6 +162,7 @@ class InventoryHandoverService
                 ['cogs', null, $total, 0], ['assets.inventory', null, 0, $total],
             ], $user->id);
             InventoryValuation::recordIssue($handover, $line, $cost['purchase'], $cost['landed'], $entry->id, $user);
+            InventoryCustody::receive($handover, $line, $user);
             $handover->update(['status' => 'approved', 'approved_by' => $user->id, 'approved_at' => now(), 'decision_note' => trim((string) $note) ?: null,
                 'purchase_value' => $cost['purchase'], 'landed_value' => $cost['landed'], 'cogs_value' => $total, 'journal_entry_id' => $entry->id]);
             Audit::log('inventory.handover_approved', 'handover '.$handover->id, $handover->quantity.' of '.$line->description.', cost '.$total);
@@ -248,6 +256,9 @@ class InventoryHandoverService
             if ($handover->status !== 'approved' || bccomp((string) $return->quantity, $handover->netQuantity(), 2) > 0) {
                 throw new RuntimeException('That quantity is no longer with the client under this handover.');
             }
+
+            // The units are taken out of the client's custody slice first: refused while they are reserved for an order or already with the client's customers.
+            InventoryCustody::giveBack($handover, $return, $user);
 
             if ($return->condition === 'damaged') {
                 // Control comes back but the goods are damaged: they are NOT resalable stock and no cost is restored. The original cost of goods sold stays

@@ -60,10 +60,11 @@ class InventoryHandoverController extends Controller
             'evidence_reference' => ['required', 'string', 'min:5', 'max:255'],
             'evidence_note' => ['nullable', 'string', 'max:255'],
             'idempotency_key' => ['nullable', 'uuid'],
+            'custody_mode' => ['nullable', 'in:warehouse,released'],
         ]);
 
         return $this->attempt(fn () => InventoryHandoverService::propose(SourcingAllocation::findOrFail($data['sourcing_allocation_id']), $data['quantity'], $data['proposed_on'], $data['transferred_on'],
-            $data['evidence_reference'], $data['evidence_note'] ?? null, $data['idempotency_key'] ?? (string) Str::uuid(), $request->user()), 'Handover request recorded; a Board member must approve it. Nothing is posted until then.');
+            $data['evidence_reference'], $data['evidence_note'] ?? null, $data['idempotency_key'] ?? (string) Str::uuid(), $request->user(), $data['custody_mode'] ?? 'warehouse'), 'Handover request recorded; a Board member must approve it. Nothing is posted until then.');
     }
 
     public function cancel(Request $request, InventoryHandover $handover): RedirectResponse

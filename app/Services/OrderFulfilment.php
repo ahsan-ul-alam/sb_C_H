@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\ClientOrder;
 use App\Models\ClientOrderItem;
+use App\Models\InventoryHandover;
 use App\Models\OrderCollection;
 use App\Models\Project;
 use App\Models\StockMovement;
@@ -77,11 +78,12 @@ class OrderFulfilment
             self::expect($o, 'pending');
             $clientId = $o->project->client_id;
             foreach ($o->items as $request) {
-                $plan = Inventory::allocate($clientId, (int) $request->supplier_product_id, (string) $request->quantity);
+                $plan = Inventory::allocate($clientId, (int) $request->supplier_product_id, (string) $request->quantity, (int) $o->project_id);
                 $first = true;
-                foreach ($plan as [$line, $qty]) {
-                    $item = $first ? tap($request)->update(['quantity' => $qty, 'sourcing_lot_line_id' => $line->id])
-                        : $o->items()->create(['supplier_product_id' => $request->supplier_product_id, 'description' => $request->description, 'quantity' => $qty, 'unit_price' => $request->unit_price, 'sourcing_lot_line_id' => $line->id]);
+                foreach ($plan as [$line, $qty, $custody]) {
+                    // A custody row keeps its handover on the order line, so every later step moves the same units and nothing of another client or project.
+                    $item = $first ? tap($request)->update(['quantity' => $qty, 'sourcing_lot_line_id' => $line->id, 'inventory_handover_id' => $custody?->id])
+                        : $o->items()->create(['supplier_product_id' => $request->supplier_product_id, 'description' => $request->description, 'quantity' => $qty, 'unit_price' => $request->unit_price, 'sourcing_lot_line_id' => $line->id, 'inventory_handover_id' => $custody?->id]);
                     $first = false;
                     Inventory::move($line, 'reserve', ['available' => bcmul($qty, '-1', 2), 'reserved' => $qty], 'res:'.$item->id, $item, $user);
                 }
@@ -248,7 +250,8 @@ class OrderFulfilment
             return DB::transaction(function () use ($order, $amount, $date, $reference, $key, $accountId, $user) {
                 $o = ClientOrder::whereKey($order->id)->lockForUpdate()->with(['items.line.lot', 'project'])->firstOrFail();
                 self::expect($o, 'delivered');
-                if ($o->items->contains(fn ($i) => $i->line?->lot?->ownership !== 'client')) {
+                $custodyOk = fn ($i) => $i->inventory_handover_id !== null && InventoryHandover::whereKey($i->inventory_handover_id)->where('client_id', $o->project->client_id)->where('project_id', $o->project_id)->exists();
+                if ($o->items->contains(fn ($i) => $i->line?->lot?->ownership !== 'client' && ! $custodyOk($i))) {
                     throw new RuntimeException('Only stock stated as client-owned can be settled to a client. State who owns the stock first.');
                 }
                 if ($amount <= 0) {
