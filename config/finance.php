@@ -77,4 +77,16 @@ return [
     */
     'liquidity_model' => (bool) env('FINANCE_LIQUIDITY_MODEL', false),
 
+    /*
+    | Accrual customer revenue (earned revenue, customer advances as liabilities, contract assets, credit notes, refunds). Empty = off. A date is normalised to the first of a
+    | month and never applies before the real-time posting cutover. Forward-only: earlier customer money keeps its cash-basis booking.
+    */
+    'accrual_revenue_from' => env('FINANCE_ACCRUAL_REVENUE_FROM') ?: null,
+
+    /*
+    | When true, warehouse storage is charged only for a client with a recorded storage contract in force, a measured area and an approved rate. Off by default (the existing
+    | billing is unchanged); stock that cannot be charged is listed as "Storage Billing Configuration Required" either way.
+    */
+    'storage_contract_required' => (bool) env('FINANCE_STORAGE_CONTRACT_REQUIRED', false),
+
 ];

@@ -2,7 +2,11 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Client;
+use App\Services\Audit;
 use App\Services\LedgerStatements;
+use App\Services\StorageBilling;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\View\View;
 
@@ -12,6 +16,15 @@ use Illuminate\View\View;
  */
 class LedgerReportController extends Controller
 {
+    public function storageContract(Request $request, Client $client): RedirectResponse
+    {
+        $data = $request->validate(['storage_contract_reference' => ['required', 'string', 'min:5', 'max:255'], 'storage_contract_from' => ['required', 'date']]);
+        $client->forceFill($data)->save();
+        Audit::log('storage.contract', 'client '.$client->id, $data['storage_contract_reference'].' from '.$data['storage_contract_from']);
+
+        return back()->with('success', 'Storage contract recorded.');
+    }
+
     public function index(Request $request): View
     {
         $data = $request->validate(['from' => ['nullable', 'date'], 'to' => ['nullable', 'date', 'after_or_equal:from']]);
@@ -21,7 +34,7 @@ class LedgerReportController extends Controller
         return view('finance.ledger-reports', [
             'from' => $from, 'to' => $to, 'trial' => LedgerStatements::trialBalance($to), 'profit' => LedgerStatements::operationalProfit($from, $to), 'cash' => LedgerStatements::cashFlow($from, $to),
             'supplierAging' => LedgerStatements::supplierAging($to), 'receivableAging' => LedgerStatements::receivableAging($to), 'exceptions' => LedgerStatements::exceptions(),
-            'labels' => LedgerStatements::INVENTORY_RESULT_ACCOUNTS,
+            'labels' => LedgerStatements::INVENTORY_RESULT_ACCOUNTS, 'storage' => StorageBilling::configurationExceptions(),
         ]);
     }
 }

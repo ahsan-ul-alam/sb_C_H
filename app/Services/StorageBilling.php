@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\BusinessSetting;
 use App\Models\Client;
+use App\Models\InventoryHandover;
 use App\Models\SourcingLot;
 use App\Models\StorageCharge;
 use App\Support\BusinessDate;
@@ -26,6 +27,63 @@ class StorageBilling
     public static function rateFor(Client $client): int
     {
         return (int) ($client->storage_rate_minor ?? BusinessSetting::current()->storage_rate_minor);
+    }
+
+    /** A storage contract is recorded and had started by the given day. */
+    public static function contractInForce(Client $client, string $on): bool
+    {
+        return trim((string) $client->storage_contract_reference) !== '' && ($client->storage_contract_from === null || substr((string) $client->storage_contract_from, 0, 10) <= $on);
+    }
+
+    /**
+     * Every client's stock that cannot be charged for storage yet, and exactly what is missing: the entitlement (a storage contract in force), measurable usage (an area a
+     * person measured) and an approved rate and policy. Verified custody stock (goods Sellbees handed over and still holds in its warehouse for the client) is listed with
+     * the reason it is not billed: no process measures or bills it, so it is neither charged nor hidden. Nothing here charges anything.
+     *
+     * @return list<array{client_id: int, client: string, subject: string, units: string, missing: list<string>}>
+     */
+    public static function configurationExceptions(): array
+    {
+        $today = today()->toDateString();
+        $policy = StandingPolicies::active(StandingPolicies::STORAGE);
+        $rows = [];
+        $missingCommon = function (Client $client) use ($policy, $today): array {
+            $m = [];
+            if (! self::contractInForce($client, $today)) {
+                $m[] = 'no storage contract in force is recorded for this client';
+            }
+            if (self::rateFor($client) <= 0) {
+                $m[] = 'no approved storage rate';
+            }
+            if (! $policy) {
+                $m[] = 'the storage charging policy is not approved';
+            }
+
+            return $m;
+        };
+        foreach (SourcingLot::where('ownership', 'client')->whereNotNull('project_id')->where('status', '!=', 'cancelled')->with('project.client')->orderBy('id')->get() as $lot) {
+            $units = self::onHand($lot, $today);
+            if (bccomp($units, '0', 2) <= 0) {
+                continue;
+            }
+            $missing = $missingCommon($lot->project->client);
+            if ($lot->storage_sqft === null || (float) $lot->storage_sqft <= 0) {
+                $missing[] = 'no measured storage area';
+            }
+            if ($missing !== []) {
+                $rows[] = ['client_id' => $lot->project->client->id, 'client' => $lot->project->client->name, 'subject' => 'Lot '.$lot->number, 'units' => $units, 'missing' => $missing];
+            }
+        }
+        foreach (InventoryHandover::with(['client', 'line'])->where('status', 'approved')->where('custody_mode', 'warehouse')->orderBy('id')->get() as $h) {
+            $units = Inventory::sliceBalances($h->line, $h->id);
+            $held = bcadd(bcadd($units['available'], $units['reserved'], 2), bcadd($units['returned'], $units['damaged'], 2), 2);
+            if (bccomp($held, '0', 2) > 0) {
+                $rows[] = ['client_id' => $h->client->id, 'client' => $h->client->name, 'subject' => 'Custody stock, handover #'.$h->id.' ('.$h->line->description.')', 'units' => $held,
+                    'missing' => [...$missingCommon($h->client), 'no measured storage area for custody stock', 'custody stock is not billed by any process yet (it must not also be charged through a client-owned lot)']];
+            }
+        }
+
+        return $rows;
     }
 
     /** Units physically on hand in the lot at the end of the given day. */
@@ -61,6 +119,11 @@ class StorageBilling
             $qty = self::onHand($lot, $cutoff);
             $rate = self::rateFor($client);
             $existing = StorageCharge::where('sourcing_lot_id', $lot->id)->where('period', $month)->first();
+            if (config('finance.storage_contract_required') && ! self::contractInForce($client, $cutoff)) {
+                $out['skipped']++; // no contract entitlement: nothing is charged, and the stock is listed under Storage Billing Configuration Required
+
+                return;
+            }
             if (bccomp($qty, $threshold, 2) <= 0 || $rate <= 0 || ($existing && $existing->status === 'billed')) {
                 $out['skipped']++;
 

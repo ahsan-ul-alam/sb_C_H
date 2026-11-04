@@ -218,6 +218,9 @@ class LedgerStatements
         if ($inv['supplier_returns']['unregistered_historical_corrections'] > 0) {
             $push('Supplier recovery', [$inv['supplier_returns']['unregistered_historical_corrections'].' refund or credit-note correction(s) pre-date the recovery document register and cannot be checked against it.']);
         }
+        foreach (StorageBilling::configurationExceptions() as $row) {
+            $push('Storage Billing Configuration Required', [$row['client'].' - '.$row['subject'].' ('.$row['units'].' units): '.implode('; ', $row['missing']).'.']);
+        }
         $unclassified = SourcingLot::whereNull('ownership')->whereHas('lines', fn ($l) => $l->whereNotNull('received_quantity'))->count();
         if ($unclassified > 0) {
             $push('Ownership', [$unclassified.' lot(s) with received goods have no stated owner: they are outside inventory valuation and custody.']);

@@ -16,6 +16,15 @@
     </section>
 
     <section class="panel">
+        <div class="panel-head"><h2>Storage Billing Configuration Required</h2></div>
+        <div class="panel-body muted">Storage is charged only with a storage contract in force, a measured area and an approved rate. Stock missing any of these is listed here and is not charged.</div>
+        <div class="table-wrap"><table class="table table-min-640"><thead><tr><th>Client</th><th>Stock</th><th class="num">Units</th><th>Missing</th></tr></thead><tbody>
+            @forelse ($storage as $s)<tr><td>{{ $s['client'] }}</td><td>{{ $s['subject'] }}</td><td class="num">{{ $s['units'] }}</td><td>{{ implode('; ', $s['missing']) }}</td></tr>@empty<tr><td colspan="4" class="muted">Nothing is waiting for storage billing configuration.</td></tr>@endforelse
+        </tbody></table></div>
+        @can('commission.manage')@foreach (collect($storage)->unique('client_id') as $s)<form method="POST" action="{{ route('finance.storage-contract', $s['client_id']) }}" class="panel-body" style="display:flex; gap:.4rem; flex-wrap:wrap">@csrf<span>{{ $s['client'] }}:</span><input name="storage_contract_reference" placeholder="Storage contract reference" required minlength="5"><input type="date" name="storage_contract_from" required><button class="btn btn-sm">Record contract</button></form>@endforeach @endcan
+    </section>
+
+    <section class="panel">
         <div class="panel-head"><h2>Operational profit (ledger)</h2></div>
         <div class="table-wrap"><table class="table"><tbody>
             <tr><td>Income</td><td class="num">{{ Money::format($profit['income']) }}</td></tr>

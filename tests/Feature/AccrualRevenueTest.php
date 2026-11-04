@@ -7,6 +7,7 @@ use App\Models\RevenueEvent;
 use App\Services\AccrualRevenue;
 use App\Services\LedgerStatements;
 use App\Services\RevenueRecognition;
+use App\Services\StorageBilling;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
@@ -191,4 +192,11 @@ it('serves the earned revenue screens with the same separation of duties', funct
     $this->co->post('finance', 'finance.revenue-events.decide', ['decision' => 'approve'], $event)->assertForbidden();
     $this->co->post('board', 'finance.revenue-events.decide', ['decision' => 'approve'], $event)->assertSessionHasNoErrors()->assertSessionMissing('error');
     expect($event->refresh()->status)->toBe('approved')->and(dr('income'))->toBe(-500_000)->and($this->co->as('board')->get(route('finance.revenue-events'))->getContent())->toContain('Reconciled');
+});
+
+it('charges storage only with a contract, a measured area and a rate, and lists everything else as configuration required without ever charging it', function () {
+    expect(StorageBilling::configurationExceptions())->toBe([]);                                  // no units on hand: nothing to bill or to report
+    expect(StorageBilling::contractInForce($this->client, '2026-11-10'))->toBeFalse();
+    $this->co->post('clients', 'finance.storage-contract', ['storage_contract_reference' => 'Warehouse agreement WA-2026-3', 'storage_contract_from' => '2026-10-01'], $this->client)->assertSessionHasNoErrors();
+    expect(StorageBilling::contractInForce($this->client->refresh(), '2026-11-10'))->toBeTrue()->and(StorageBilling::contractInForce($this->client, '2026-09-30'))->toBeFalse();
 });
