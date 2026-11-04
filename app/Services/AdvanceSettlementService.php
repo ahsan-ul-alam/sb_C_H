@@ -252,6 +252,7 @@ class AdvanceSettlementService
             }
             $settlement->update(['status' => $approve ? 'verified' : 'rejected', 'verified_by' => $user->id, 'verified_at' => now(), 'decision_note' => trim((string) $note) ?: null]);
             Audit::log('sourcing.advance.settlement_'.($approve ? 'verified' : 'rejected'), 'lot '.$lot->number, (string) $settlement->amount);
+            InventoryValuation::syncLot($lot->id); // a lot the engine values records what this settlement put into inventory
         });
     }
 
@@ -282,6 +283,7 @@ class AdvanceSettlementService
             $original = JournalEntry::where('source_type', 'advance_settlement')->where('source_id', $settlement->id)->firstOrFail();
             Ledger::reverse($original, $original->entry_date->toDateString(), 'Reversal of advance settlement #'.$settlement->id.': '.$reason, 'advance_settlement_rev', $settlement->id, $user->id);
             $settlement->update(['status' => 'reversed']);
+            InventoryValuation::syncLot($lot->id);
             Audit::log('sourcing.advance.settlement_reversed', 'lot '.$lot->number, $reason);
         });
     }

@@ -110,6 +110,7 @@ class ExpenseVerifier
             AccountingService::assertCanSpend(AccountingService::resolveAccountId($e->financial_account_id), (int) $e->amount);
         }
         Ledger::post($e->spent_on->toDateString(), $e->category.': '.$e->description, 'expense', $e->id, self::lines($e), $userId);
+        InventoryValuation::onExpensePosted($e); // a capitalised cost of a lot the engine values (or its correction) changes that lot's value
     }
 
     /**

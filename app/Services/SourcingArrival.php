@@ -59,6 +59,7 @@ class SourcingArrival
             }
             Audit::log('sourcing.arrival', 'lot '.$lot->number, $line->description.' received '.$received.' accepted '.$accepted.' on '.$arrivedOn);
             Inventory::syncReceipt($line, $user); // the accepted quantity becomes stock (re-recording an arrival posts only the difference)
+            InventoryValuation::syncLot($lot->id); // and, for a lot the engine values, its accepted goods become (pending) valuation
         });
     }
 }

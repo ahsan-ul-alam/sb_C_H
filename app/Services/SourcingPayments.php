@@ -257,6 +257,7 @@ class SourcingPayments
             ], $user->id);
             $cost->update(['service_completed_on' => $on]);
             Audit::log('sourcing.transport_service_done', 'lot '.$lot->number, $cost->category.' '.$amount);
+            InventoryValuation::syncLot($lot->id);
         });
     }
 }

@@ -70,6 +70,10 @@ class CostRecognitionService
     public static function obstacles(SourcingLot $lot): array
     {
         $obstacles = [];
+        // A lot the valuation engine values recognises cost per quantity (a later phase), never as a whole lot: releasing it here as well would expense it twice.
+        if (InventoryEngine::isOnEngine($lot)) {
+            return ['This lot is valued by the inventory engine; its cost is recognised per quantity, not released as a whole lot.'];
+        }
         if (SourcingBasis::recognitionTrigger() === null) {
             $obstacles[] = 'Cost recognition is switched off: the Board has not approved when product cost reaches profit (FINANCE_SOURCING_RECOGNITION).';
 
