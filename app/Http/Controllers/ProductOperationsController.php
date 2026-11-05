@@ -23,6 +23,7 @@ use App\Support\Money;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 use RuntimeException;
 
@@ -33,6 +34,12 @@ use RuntimeException;
 class ProductOperationsController extends Controller
 {
     private const QTY = '/^\d{1,10}(\.\d{1,2})?$/';
+
+    public const CHANNELS = ['website' => 'Website', 'facebook' => 'Facebook / social', 'phone' => 'Phone', 'marketplace' => 'Marketplace', 'walk_in' => 'Walk-in', 'other' => 'Other'];
+
+    public const PAYMENT_METHODS = ['cod' => 'Cash on delivery', 'bank' => 'Bank transfer', 'mobile' => 'Mobile banking', 'prepaid' => 'Prepaid'];
+
+    public const DELIVERY_METHODS = ['courier' => 'Courier', 'own' => 'Own delivery', 'pickup' => 'Customer pickup'];
 
     public function inventory(Request $request): View
     {
@@ -129,10 +136,16 @@ class ProductOperationsController extends Controller
         $data = $request->validate([
             'project_id' => ['required', 'exists:projects,id'], 'reference' => ['required', 'string', 'max:120'], 'ordered_on' => ['required', 'date'],
             'customer_name' => ['nullable', 'string', 'max:255'], 'customer_phone' => ['nullable', 'string', 'max:40'], 'customer_address' => ['nullable', 'string', 'max:255'],
+            'sales_channel' => ['nullable', Rule::in(array_keys(self::CHANNELS))], 'payment_method' => ['nullable', Rule::in(array_keys(self::PAYMENT_METHODS))],
+            'delivery_method' => ['nullable', Rule::in(array_keys(self::DELIVERY_METHODS))], 'discount_reason' => ['nullable', 'string', 'max:255'],
             'items' => ['required', 'array', 'min:1'], 'items.*.product_id' => ['nullable', 'integer'], 'items.*.quantity' => ['nullable', 'regex:'.self::QTY], 'items.*.price' => ['nullable', 'regex:'.Money::AMOUNT_REGEX],
+            'items.*.discount' => ['nullable', 'regex:'.Money::AMOUNT_REGEX],
         ]);
         $items = collect($data['items'])->filter(fn ($i) => ! empty($i['product_id']) && ($i['quantity'] ?? '') !== '')
-            ->map(fn ($i) => ['product_id' => (int) $i['product_id'], 'quantity' => $i['quantity'], 'unit_price' => Money::toMinor($i['price'] ?? 0)])->values()->all();
+            ->map(fn ($i) => ['product_id' => (int) $i['product_id'], 'quantity' => $i['quantity'], 'unit_price' => Money::toMinor($i['price'] ?? 0), 'unit_discount' => Money::toMinor($i['discount'] ?? 0)])->values()->all();
+        if (collect($items)->contains(fn ($i) => $i['unit_discount'] > 0) && ! $request->user()->can('orders.discount')) {
+            throw ValidationException::withMessages(['discount_reason' => 'You are not authorised to give a discount; ask Finance.']);
+        }
 
         return $this->attempt(fn () => OrderFulfilment::create(Project::findOrFail($data['project_id']), ['items' => $items] + $data, $request->user()), 'Order recorded. Confirm it to reserve the stock.');
     }

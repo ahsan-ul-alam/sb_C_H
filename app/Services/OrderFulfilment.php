@@ -45,13 +45,21 @@ class OrderFulfilment
                 if (bccomp($row['quantity'], '0', 2) <= 0 || $row['unit_price'] <= 0) {
                     throw new RuntimeException('Every product needs a quantity and a selling price above zero.');
                 }
-                $item = ['supplier_product_id' => $product->id, 'description' => $product->label(), 'quantity' => $row['quantity'], 'unit_price' => $row['unit_price']];
+                $discount = (int) ($row['unit_discount'] ?? 0);
+                if ($discount < 0 || $discount >= $row['unit_price']) {
+                    throw new RuntimeException('A discount must be above zero and below the selling price.');
+                }
+                if ($discount > 0 && trim((string) ($data['discount_reason'] ?? '')) === '') {
+                    throw new RuntimeException('Give the reason for the discount.');
+                }
+                $item = ['supplier_product_id' => $product->id, 'description' => $product->label(), 'quantity' => $row['quantity'], 'unit_price' => $row['unit_price'], 'unit_discount' => $discount];
                 $total += (new ClientOrderItem($item))->amount();
                 $items[] = $item;
             }
             $order = OrderCommission::record($project, ['reference' => $data['reference'], 'ordered_on' => $data['ordered_on'], 'net_value' => $total], $user);
             $order->update(['fulfilment' => 'stock', 'delivery_status' => 'pending', 'customer_name' => $data['customer_name'] ?? null,
-                'customer_phone' => $data['customer_phone'] ?? null, 'customer_address' => $data['customer_address'] ?? null]);
+                'customer_phone' => $data['customer_phone'] ?? null, 'customer_address' => $data['customer_address'] ?? null, 'sales_channel' => $data['sales_channel'] ?? null,
+                'payment_method' => $data['payment_method'] ?? null, 'delivery_method' => $data['delivery_method'] ?? null, 'discount_reason' => ($data['discount_reason'] ?? null) ?: null]);
             $order->items()->createMany($items);
             Audit::log('order.created', 'order '.$order->id, $order->reference.' '.$total);
 
@@ -83,7 +91,7 @@ class OrderFulfilment
                 foreach ($plan as [$line, $qty, $custody]) {
                     // A custody row keeps its handover on the order line, so every later step moves the same units and nothing of another client or project.
                     $item = $first ? tap($request)->update(['quantity' => $qty, 'sourcing_lot_line_id' => $line->id, 'inventory_handover_id' => $custody?->id])
-                        : $o->items()->create(['supplier_product_id' => $request->supplier_product_id, 'description' => $request->description, 'quantity' => $qty, 'unit_price' => $request->unit_price, 'sourcing_lot_line_id' => $line->id, 'inventory_handover_id' => $custody?->id]);
+                        : $o->items()->create(['supplier_product_id' => $request->supplier_product_id, 'description' => $request->description, 'quantity' => $qty, 'unit_price' => $request->unit_price, 'unit_discount' => $request->unit_discount, 'sourcing_lot_line_id' => $line->id, 'inventory_handover_id' => $custody?->id]);
                     $first = false;
                     Inventory::move($line, 'reserve', ['available' => bcmul($qty, '-1', 2), 'reserved' => $qty], 'res:'.$item->id, $item, $user);
                 }

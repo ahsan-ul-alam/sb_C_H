@@ -6,6 +6,8 @@ use App\Models\ClientOrder;
 use App\Models\ClientOrderItem;
 use App\Models\StockLocation;
 use App\Models\StockMovement;
+use App\Support\Money;
+use Illuminate\Support\Collection;
 use InvalidArgumentException;
 
 /**
@@ -21,6 +23,7 @@ class InventoryReports
         'valuation' => 'Inventory valuation', 'sales-by-project' => 'Sales by project', 'sales-by-product' => 'Sales by product', 'orders-by-status' => 'Orders by status',
         'returns-damage' => 'Returns and damage', 'reconciliation' => 'Stock versus sales reconciliation',
         'location-stock' => 'Location-wise stock', 'location-reconciliation' => 'Global stock versus locations',
+        'sales-by-channel' => 'Sales by channel', 'discounts' => 'Discounts given',
     ];
 
     /**
@@ -34,6 +37,7 @@ class InventoryReports
             'valuation' => self::valuation($f), 'sales-by-project' => self::salesByProject($f), 'sales-by-product' => self::salesByProduct($f), 'orders-by-status' => self::ordersByStatus($f),
             'returns-damage' => self::returnsDamage($f), 'reconciliation' => self::reconciliation($f),
             'location-stock' => self::locationStock($f), 'location-reconciliation' => self::locationReconciliation($f),
+            'sales-by-channel' => self::salesByChannel($f), 'discounts' => self::discounts($f),
             default => throw new InvalidArgumentException('Unknown report.'),
         };
     }
@@ -130,6 +134,35 @@ class InventoryReports
             })->all();
 
         return ['title' => self::TYPES['orders-by-status'], 'headers' => ['Order', 'Project', 'Date', 'Order status', 'Fulfilment', 'Payment', 'Gross value', 'Delivered value', 'Collected', 'Commission'], 'rows' => $rows];
+    }
+
+    /** @return Collection<int, ClientOrder> */
+    private static function stockOrders(array $f)
+    {
+        return ClientOrder::where('fulfilment', 'stock')->with(['items', 'collections', 'project'])
+            ->when($f['from'] ?? null, fn ($q, $v) => $q->whereDate('ordered_on', '>=', $v))->when($f['to'] ?? null, fn ($q, $v) => $q->whereDate('ordered_on', '<=', $v))->orderBy('id')->get();
+    }
+
+    /** @return Report */
+    private static function salesByChannel(array $f): array
+    {
+        $rows = self::stockOrders($f)->groupBy(fn ($o) => $o->sales_channel ?? 'not stated')->map(fn ($g, $channel) => [
+            $channel, $g->count(), self::major((int) $g->whereNotIn('delivery_status', ['cancelled'])->sum(fn ($o) => $o->items->sum(fn ($i) => $i->amount()))),
+            self::major((int) $g->where('delivery_status', 'delivered')->sum(fn ($o) => $o->deliveredValue())), self::major((int) $g->sum(fn ($o) => $o->collections->sum('amount'))), self::major((int) $g->where('delivery_status', 'delivered')->sum('commission')),
+        ])->values()->all();
+
+        return ['title' => self::TYPES['sales-by-channel'], 'headers' => ['Channel', 'Orders', 'Gross order value (client merchandise, net of discount)', 'Delivered value', 'Collected', 'Commission (Sellbees revenue)'], 'rows' => $rows];
+    }
+
+    /** @return Report */
+    private static function discounts(array $f): array
+    {
+        $rows = self::stockOrders($f)->filter(fn ($o) => $o->items->contains(fn ($i) => $i->unit_discount > 0))->map(fn ($o) => [
+            $o->reference, $o->project?->name, $o->discount_reason, self::major((int) $o->items->sum(fn ($i) => Money::multiply((string) $i->quantity, (int) $i->unit_price))),
+            self::major((int) $o->items->sum(fn ($i) => $i->discountAmount())), self::major((int) $o->items->sum(fn ($i) => $i->amount())),
+        ])->values()->all();
+
+        return ['title' => self::TYPES['discounts'], 'headers' => ['Order', 'Project', 'Reason', 'List value', 'Discount', 'Net order value'], 'rows' => $rows];
     }
 
     /** @return Report */

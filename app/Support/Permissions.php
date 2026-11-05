@@ -45,7 +45,7 @@ class Permissions
                 'account.manage', 'transfer.record', 'expense.pay', 'loan.record', 'income.record', 'reconcile.review',
                 'sourcing.view', 'sourcing.reports', 'sourcing.manage', 'sourcing.override', 'sourcing.price.approve', 'sourcing.payment.record',
                 'sourcing.fund.request', 'sourcing.fund.utilize', 'sourcing.settle', 'sourcing.supplier.secrets',
-                'commission.view', 'commission.manage', 'commission.rates', 'inventory.view', 'orders.manage', 'inventory.adjust', 'inventory.handover.propose', 'inventory.loss.propose', 'inventory.loss.review', 'supplier.return.propose', 'supplier.return.review', 'revenue.event.propose', 'collection.record', 'settlement.view', 'settlement.record'],
+                'commission.view', 'commission.manage', 'commission.rates', 'inventory.view', 'orders.manage', 'orders.discount', 'inventory.adjust', 'inventory.handover.propose', 'inventory.loss.propose', 'inventory.loss.review', 'supplier.return.propose', 'supplier.return.review', 'revenue.event.propose', 'collection.record', 'settlement.view', 'settlement.record'],
             'hr' => ['resolution.create'],
             'partner' => ['own.view', 'payout.request', 'resolution.create'],
             'client_management' => ['clienthub', 'sourcing.view', 'sourcing.manage', 'sourcing.fund.request', 'commission.view', 'commission.manage', 'inventory.view', 'inventory.handover.propose', 'inventory.loss.propose', 'supplier.return.propose', 'orders.manage', 'collection.record', 'settlement.view'],

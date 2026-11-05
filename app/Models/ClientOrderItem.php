@@ -12,7 +12,7 @@ class ClientOrderItem extends Model
 
     protected function casts(): array
     {
-        return ['quantity' => 'decimal:2', 'delivered_quantity' => 'decimal:2', 'returned_quantity' => 'decimal:2', 'unit_price' => 'integer'];
+        return ['quantity' => 'decimal:2', 'delivered_quantity' => 'decimal:2', 'returned_quantity' => 'decimal:2', 'unit_price' => 'integer', 'unit_discount' => 'integer'];
     }
 
     /** @return BelongsTo<ClientOrder, $this> */
@@ -27,14 +27,26 @@ class ClientOrderItem extends Model
         return $this->belongsTo(SourcingLotLine::class, 'sourcing_lot_line_id');
     }
 
+    /** The price the customer pays per unit: the unit price less any authorised discount. */
+    public function netUnitPrice(): int
+    {
+        return (int) $this->unit_price - (int) $this->unit_discount;
+    }
+
     public function amount(): int
     {
-        return Money::multiply((string) $this->quantity, (int) $this->unit_price);
+        return Money::multiply((string) $this->quantity, $this->netUnitPrice());
+    }
+
+    /** Total discount given on this line (list value less net value). */
+    public function discountAmount(): int
+    {
+        return Money::multiply((string) $this->quantity, (int) $this->unit_discount);
     }
 
     /** Value of what was really delivered and not returned: the only base commission and customer money can follow. */
     public function deliveredAmount(): int
     {
-        return Money::multiply(bcsub((string) $this->delivered_quantity, (string) $this->returned_quantity, 2), (int) $this->unit_price);
+        return Money::multiply(bcsub((string) $this->delivered_quantity, (string) $this->returned_quantity, 2), $this->netUnitPrice());
     }
 }
