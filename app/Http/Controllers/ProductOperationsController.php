@@ -6,8 +6,10 @@ use App\Models\BusinessSetting;
 use App\Models\Client;
 use App\Models\ClientOrder;
 use App\Models\ClientOrderItem;
+use App\Models\CommissionAdjustment;
 use App\Models\FinancialAccount;
 use App\Models\OrderRefund;
+use App\Models\OrderRefundAllocation;
 use App\Models\Project;
 use App\Models\SourcingLot;
 use App\Models\SourcingLotLine;
@@ -212,23 +214,26 @@ class ProductOperationsController extends Controller
 
     public function refunds(): View
     {
-        return view('product.refunds', ['refunds' => OrderRefund::with(['order.project.client', 'requester'])->latest('id')->limit(100)->get(), 'accounts' => FinancialAccount::where('is_active', true)->orderBy('name')->get(),
+        return view('product.refunds', ['refunds' => OrderRefund::with(['order.project.client', 'requester'])->latest('id')->limit(100)->get(), 'classes' => OrderRefunds::CLASSES,
+            'allocations' => OrderRefundAllocation::with('collection')->get()->groupBy('order_refund_id'), 'adjustments' => CommissionAdjustment::all()->keyBy('order_refund_id'), 'accounts' => FinancialAccount::where('is_active', true)->orderBy('name')->get(),
             'refundable' => ClientOrder::where('fulfilment', 'stock')->where('delivery_status', 'delivered')->with(['collections', 'project.client'])->latest('id')->get()
                 ->map(fn ($o) => ['order' => $o, 'left' => OrderRefunds::refundable($o)])->filter(fn ($r) => $r['left'] > 0)->values()]);
     }
 
     public function refundStore(Request $request, ClientOrder $order): RedirectResponse
     {
-        $d = $request->validate(['amount' => ['required', 'regex:'.Money::AMOUNT_REGEX], 'kind' => ['required', Rule::in(['return', 'no_return'])], 'reason' => ['required', 'string', 'max:255']]);
+        $d = $request->validate(['amount' => ['required', 'regex:'.Money::AMOUNT_REGEX], 'classification' => ['required', Rule::in(array_keys(OrderRefunds::CLASSES))], 'reason' => ['required', 'string', 'max:255'],
+            'beneficiary' => ['nullable', 'string', 'max:255']]);
 
-        return $this->attempt(fn () => OrderRefunds::request($order, Money::toMinor($d['amount']), $d['kind'], $d['reason'], $request->user()), 'Refund requested. Someone else must approve it before it can be paid.');
+        return $this->attempt(fn () => OrderRefunds::request($order, Money::toMinor($d['amount']), $d['classification'], $d['reason'], $d['beneficiary'] ?? null, $request->user()), 'Refund requested. Someone else must approve it before it can be paid.');
     }
 
     public function refundDecide(Request $request, OrderRefund $refund): RedirectResponse
     {
-        $d = $request->validate(['decision' => ['required', Rule::in(['approve', 'reject'])], 'note' => ['nullable', 'string', 'max:255']]);
+        $d = $request->validate(['decision' => ['required', Rule::in(['approve', 'reject'])], 'note' => ['nullable', 'string', 'max:255'], 'treatment' => ['nullable', Rule::in(['reduce', 'keep'])],
+            'responsible' => ['nullable', Rule::in(['client', 'sellbees'])]]);
 
-        return $this->attempt(fn () => OrderRefunds::decide($refund, $d['decision'] === 'approve', $d['note'] ?? null, $request->user()), 'Decision recorded.');
+        return $this->attempt(fn () => OrderRefunds::decide($refund, $d['decision'] === 'approve', $d['note'] ?? null, $request->user(), $d['treatment'] ?? null, $d['responsible'] ?? null), 'Decision recorded.');
     }
 
     public function refundPay(Request $request, OrderRefund $refund): RedirectResponse

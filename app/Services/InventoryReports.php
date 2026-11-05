@@ -4,6 +4,8 @@ namespace App\Services;
 
 use App\Models\ClientOrder;
 use App\Models\ClientOrderItem;
+use App\Models\CommissionAdjustment;
+use App\Models\OrderRefund;
 use App\Models\SourcingArrivalEvent;
 use App\Models\StockLocation;
 use App\Models\StockMovement;
@@ -24,7 +26,7 @@ class InventoryReports
         'valuation' => 'Inventory valuation', 'sales-by-project' => 'Sales by project', 'sales-by-product' => 'Sales by product', 'orders-by-status' => 'Orders by status',
         'returns-damage' => 'Returns and damage', 'reconciliation' => 'Stock versus sales reconciliation',
         'location-stock' => 'Location-wise stock', 'location-reconciliation' => 'Global stock versus locations',
-        'sales-by-channel' => 'Sales by channel', 'discounts' => 'Discounts given', 'collections-refunds' => 'Collections and refunds', 'stock-aging' => 'Stock aging', 'quarantine' => 'Rejected and damaged goods in quarantine',
+        'sales-by-channel' => 'Sales by channel', 'discounts' => 'Discounts given', 'collections-refunds' => 'Collections and refunds', 'stock-aging' => 'Stock aging', 'quarantine' => 'Rejected and damaged goods in quarantine', 'refunds' => 'Customer refunds',
     ];
 
     /**
@@ -38,7 +40,7 @@ class InventoryReports
             'valuation' => self::valuation($f), 'sales-by-project' => self::salesByProject($f), 'sales-by-product' => self::salesByProduct($f), 'orders-by-status' => self::ordersByStatus($f),
             'returns-damage' => self::returnsDamage($f), 'reconciliation' => self::reconciliation($f),
             'location-stock' => self::locationStock($f), 'location-reconciliation' => self::locationReconciliation($f),
-            'sales-by-channel' => self::salesByChannel($f), 'discounts' => self::discounts($f), 'collections-refunds' => self::collectionsRefunds($f), 'stock-aging' => self::stockAging($f), 'quarantine' => self::quarantine($f),
+            'sales-by-channel' => self::salesByChannel($f), 'discounts' => self::discounts($f), 'collections-refunds' => self::collectionsRefunds($f), 'stock-aging' => self::stockAging($f), 'quarantine' => self::quarantine($f), 'refunds' => self::refunds($f),
             default => throw new InvalidArgumentException('Unknown report.'),
         };
     }
@@ -172,6 +174,17 @@ class InventoryReports
         })->values()->all();
 
         return ['title' => self::TYPES['stock-aging'], 'headers' => ['Lot', 'Product', 'Unit', 'Last arrival', 'Days', 'Age band', 'Available'], 'rows' => $rows];
+    }
+
+    /** @return Report */
+    private static function refunds(array $f): array
+    {
+        $adjustments = CommissionAdjustment::all()->keyBy('order_refund_id');
+        $rows = OrderRefund::with('order.project')->when($f['from'] ?? null, fn ($q, $v) => $q->whereDate('created_at', '>=', $v))->when($f['to'] ?? null, fn ($q, $v) => $q->whereDate('created_at', '<=', $v))->orderBy('id')->get()
+            ->map(fn ($r) => [$r->order->reference, $r->order->project?->name, OrderRefunds::CLASSES[$r->classification][0] ?? $r->classification, $r->status, $r->responsible_party === 'client' ? 'Client funds' : 'Sellbees',
+                self::major($r->amount), $r->commission_treatment, $adjustments->has($r->id) ? self::major($adjustments[$r->id]->commission_before - $adjustments[$r->id]->commission_after) : '', $r->reference])->all();
+
+        return ['title' => self::TYPES['refunds'], 'headers' => ['Order', 'Project', 'Type', 'Status', 'Borne by', 'Amount', 'Commission treatment', 'Commission reduced by', 'Payment reference'], 'rows' => $rows];
     }
 
     /**

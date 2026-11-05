@@ -26,9 +26,7 @@ return new class extends Migration
                 $table->string('classification', 24)->default('return_of_goods');
                 $table->string('beneficiary')->nullable();
                 $table->string('responsible_party', 10)->default('client'); // client = paid from the client's funds | sellbees = Sellbees bears it (needs Finance review)
-                $table->string('commission_treatment', 12)->default('pending'); // pending | reduce | keep
-                $table->unsignedBigInteger('commission_reduction')->default(0); // minor units the approved treatment takes off the commission
-                $table->unsignedInteger('refunded_quantity_units')->nullable();
+                $table->string('commission_treatment', 12)->default('pending'); // pending | reduce | keep | review (reduce was approved but the commission was already paid or netted, so it needs a manual correction)
             });
         }
         if (! Schema::hasTable('order_refund_allocations')) {

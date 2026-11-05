@@ -13,7 +13,8 @@
             <tr><td class="primary-cell">{{ $r['order']->reference }}<span class="secondary">{{ $r['order']->project->client->name }}</span></td><td class="num">{{ Money::format($r['left']) }}</td>
                 <td><form method="POST" action="{{ route('product.refunds.store', $r['order']) }}" class="inline-form">@csrf
                     <input name="amount" size="8" inputmode="decimal" placeholder="amount" required>
-                    <select name="kind"><option value="return">Goods are coming back</option><option value="no_return">No goods returned</option></select>
+                    <select name="classification" aria-label="Refund type">@foreach ($classes as $k => $c)<option value="{{ $k }}">{{ $c[0] }}</option>@endforeach</select>
+                    <input name="beneficiary" size="14" placeholder="paid to (customer)" value="{{ $r['order']->customer_name }}">
                     <input name="reason" size="22" placeholder="reason" required><button class="btn">Request</button></form></td></tr>
         @empty
             <tr><td colspan="3" class="muted">No delivered order has collected money left to refund.</td></tr>
@@ -27,12 +28,14 @@
         @forelse ($refunds as $f)
             <tr><td class="primary-cell">{{ $f->order->reference }}<span class="secondary">{{ $f->order->project->client->name }} · by {{ $f->requester?->name }}</span></td>
                 <td class="num">{{ Money::format($f->amount) }}</td>
-                <td>{{ $f->kind === 'return' ? 'Goods returned' : 'No goods returned' }}<span class="secondary">{{ $f->reason }}@if ($f->decision_note) · note: {{ $f->decision_note }}@endif</span></td>
+                <td>{{ $classes[$f->classification][0] ?? $f->classification }}<span class="secondary">{{ $f->reason }}@if ($f->beneficiary) · to {{ $f->beneficiary }}@endif @if ($f->decision_note) · note: {{ $f->decision_note }}@endif</span>
+                    <span class="secondary">Borne by: {{ $f->responsible_party === 'client' ? 'client funds' : 'Sellbees (blocked here)' }} · commission: {{ $f->commission_treatment }}@if ($adjustments->has($f->id)) ({{ Money::format($adjustments[$f->id]->commission_before) }} → {{ Money::format($adjustments[$f->id]->commission_after) }})@endif</span>
+                    @foreach ($allocations->get($f->id, collect()) as $a)<span class="secondary">Collection #{{ $a->order_collection_id }}{{ $a->collection->reference ? ' ('.$a->collection->reference.')' : '' }}: {{ Money::format($a->amount) }}</span>@endforeach</td>
                 <td><span class="badge {{ $f->status === 'paid' ? 'badge-paid' : (in_array($f->status, ['rejected', 'cancelled']) ? 'badge-unpaid' : 'badge-partial') }}">{{ ucfirst($f->status) }}</span>@if ($f->status === 'paid')<span class="secondary">{{ $f->paid_on->format('j M Y') }} · {{ $f->reference }}</span>@endif</td>
                 <td>
                     @if ($f->status === 'requested')
                         @can('order.refund.approve')
-                        <form method="POST" action="{{ route('product.refunds.decide', $f) }}" class="inline-form">@csrf<input name="note" size="18" placeholder="note / justification"><button name="decision" value="approve" class="btn btn-sm btn-primary">Approve</button><button name="decision" value="reject" class="btn btn-sm">Reject</button></form>
+                        <form method="POST" action="{{ route('product.refunds.decide', $f) }}" class="inline-form">@csrf<input name="note" size="18" placeholder="note / justification">@if ($f->classification === 'other')<select name="treatment" aria-label="Commission treatment"><option value="keep">Commission unchanged</option><option value="reduce">Reduce commission</option></select><select name="responsible" aria-label="Borne by"><option value="client">Client funds</option><option value="sellbees">Sellbees</option></select>@endif<button name="decision" value="approve" class="btn btn-sm btn-primary">Approve</button><button name="decision" value="reject" class="btn btn-sm">Reject</button></form>
                         @endcan
                     @elseif ($f->status === 'approved')
                         @can('settlement.record')

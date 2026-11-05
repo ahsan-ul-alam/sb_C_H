@@ -218,12 +218,14 @@ class OrderFulfilment
             if ((int) $o->collections()->sum('amount') - OrderRefunds::paid($o) > $value) {
                 throw new RuntimeException('More money was collected than the order is now worth: refund the customer first (Customer Refunds), then record the return.');
             }
-            if ($o->billed_invoice_id && $o->commission > 0) {
-                OrderCommission::reduceInvoiced($o, $value > 0 ? $value : null, 'Customer return'); // refuses once the commission was paid or netted
-            } elseif ($o->commission > 0) {
-                $o->update(['commission' => OrderCommission::commission($value, (int) $o->rate_bps)]);
+            // The commission base is the delivered value less any paid refund that already lowered it, so a return never undoes (or repeats) that correction.
+            $base = max(0, $value - OrderRefunds::baseReduction($o));
+            if ($o->billed_invoice_id && $o->commission > 0 && $base !== (int) $o->net_value) {
+                OrderCommission::reduceInvoiced($o, $base > 0 ? $base : null, 'Customer return'); // refuses once the commission was paid or netted
+            } elseif ($o->commission > 0 && ! $o->billed_invoice_id) {
+                $o->update(['commission' => OrderCommission::commission($base, (int) $o->rate_bps)]);
             }
-            $o->update(['net_value' => $value]);
+            $o->update(['net_value' => $base]);
             Audit::log('order.returned', 'order '.$o->id, 'delivered value now '.$value);
         });
     }

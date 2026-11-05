@@ -2,7 +2,6 @@
 
 use App\Models\AccountingPeriod;
 use App\Models\ClientOrder;
-use App\Models\FinancialAccount;
 use App\Models\InventoryHandover;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
@@ -12,11 +11,9 @@ use App\Services\Inventory;
 use App\Services\InventoryReports;
 use App\Services\OrderRefunds;
 use App\Services\Receiving;
-use App\Services\StockLocations;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
-use Tests\Support\SellbeesCompany;
 
 require_once __DIR__.'/../Support/helpers.php';
 require_once __DIR__.'/../Support/inventory_helpers.php';
@@ -24,47 +21,6 @@ require_once __DIR__.'/../Support/inventory_helpers.php';
 uses(RefreshDatabase::class);
 
 afterEach(fn () => Carbon::setTestNow());
-
-function integrationStock($test): array
-{
-    $s = unreceivedLot(SellbeesCompany::boot($test), '200');
-    $co = $s['co'];
-    $s['bank'] = FinancialAccount::factory()->asDefault()->create(['name' => 'City Bank']);
-    $co->invest('A', '1000000', '2026-02-02');
-    $s['main'] = StockLocations::default();
-    $s['dhk'] = StockLocations::create('DHK', 'Dhaka shelf');
-    Receiving::receive($s['line'], '120', '110', '3', '2026-02-10', $s['main']->id, 'GRN-1', null, null, $s['user']);   // 10 rejected
-    Receiving::receive($s['line'], '80', '80', '0', '2026-02-10', $s['dhk']->id, 'GRN-2', null, null, $s['user']);
-    $co->post('clients', 'sourcing.lots.bill-client', ['project_id' => $s['project']->id], $s['lot'])->assertSessionHasNoErrors();
-    $co->post('finance', 'finance.orders.rates', ['default_percent' => '10'])->assertSessionHasNoErrors();
-
-    return $s;
-}
-
-function loc(array $s): array
-{
-    return StockLocations::balances($s['line']->refresh());
-}
-
-function refundDelivered(array $s): ClientOrder
-{
-    $co = $s['co'];
-    $co->post('finance', 'product.orders.store', ['project_id' => $s['project']->id, 'reference' => 'O1', 'ordered_on' => '2026-02-10', 'sales_channel' => 'website', 'payment_method' => 'cod', 'delivery_method' => 'courier',
-        'discount_reason' => 'launch', 'items' => [['product_id' => $s['product']->id, 'quantity' => '150', 'price' => '600', 'discount' => '50']]])->assertSessionHasNoErrors();
-    $o = ClientOrder::where('reference', 'O1')->firstOrFail();
-    $co->post('clients', 'product.orders.confirm', [], $o)->assertSessionHasNoErrors();
-    $co->post('clients', 'product.orders.dispatch', [], $o)->assertSessionHasNoErrors();
-    $item = $o->items()->first();
-    $co->post('clients', 'product.orders.deliver', ['delivered' => [$item->id => '100']], $o)->assertSessionHasNoErrors();
-    $co->post('clients', 'product.orders.collect', ['amount' => '40000', 'collected_on' => '2026-02-10', 'idempotency_key' => (string) Str::uuid()], $o)->assertSessionHasNoErrors();
-
-    return $o->refresh();
-}
-
-function journalBalanced(): bool
-{
-    return (int) JournalLine::sum('debit') === (int) JournalLine::sum('credit');
-}
 
 it('runs receive, locate, discount, dispatch from locations, partial delivery, collection, refund, return and reconciliation with exact figures', function () {
     $s = integrationStock($this);
@@ -99,7 +55,7 @@ it('runs receive, locate, discount, dispatch from locations, partial delivery, c
     expect(ClientSettlementService::fundsHeld($s['client']))->toBe(4_000_000);
 
     // Refund BDT 10,000: requested by one person, approved by another, paid once from a named account.
-    $co->post('clients', 'product.refunds.store', ['amount' => '10000', 'kind' => 'return', 'reason' => 'customer sent 10 back'], $o)->assertSessionHasNoErrors();
+    $co->post('clients', 'product.refunds.store', ['amount' => '10000', 'classification' => 'return_of_goods', 'reason' => 'customer sent 10 back'], $o)->assertSessionHasNoErrors();
     $refund = OrderRefund::firstOrFail();
     $co->post('finance', 'product.refunds.pay', ['paid_on' => '2026-02-10', 'reference' => 'TX1', 'financial_account_id' => $s['bank']->id, 'idempotency_key' => (string) Str::uuid()], $refund)->assertSessionHas('error'); // not approved yet
     $co->post('clients', 'product.refunds.decide', ['decision' => 'approve'], $refund)->assertForbidden();                         // client management cannot approve
@@ -139,9 +95,9 @@ it('refuses over-refunds, self-approval, unjustified no-return refunds, inactive
     $o = refundDelivered($s);
     $co = $s['co'];
     // Collected 4,000,000: more than that can never be claimed.
-    $co->post('clients', 'product.refunds.store', ['amount' => '40001', 'kind' => 'return', 'reason' => 'x'], $o)->assertSessionHas('error');
+    $co->post('clients', 'product.refunds.store', ['amount' => '40001', 'classification' => 'return_of_goods', 'reason' => 'x'], $o)->assertSessionHas('error');
     expect(OrderRefund::count())->toBe(0);
-    $co->post('finance', 'product.refunds.store', ['amount' => '1000', 'kind' => 'no_return', 'reason' => 'goodwill'], $o)->assertSessionHasNoErrors();
+    $co->post('finance', 'product.refunds.store', ['amount' => '1000', 'classification' => 'goodwill', 'reason' => 'goodwill'], $o)->assertSessionHasNoErrors();
     $r = OrderRefund::firstOrFail();
     $co->post('finance', 'product.refunds.decide', ['decision' => 'approve', 'note' => 'ok'], $r)->assertSessionHas('error');          // the requester cannot approve
     $co->post('board', 'product.refunds.decide', ['decision' => 'approve'], $r)->assertSessionHas('error');                           // no-return needs the contractual justification
@@ -166,7 +122,7 @@ it('never uses Sellbees cash when the money held for the client is not enough', 
     // The client has been paid out everything held, so there is no client money left to refund from.
     $co->post('finance', 'product.settlements.store', ['pay' => '34500', 'paid_on' => '2026-02-10', 'reference' => 'SETTLE', 'financial_account_id' => $s['bank']->id, 'idempotency_key' => (string) Str::uuid()], $s['client']);
     expect(ClientSettlementService::fundsHeld($s['client']->refresh()))->toBe(0);
-    $co->post('clients', 'product.refunds.store', ['amount' => '10000', 'kind' => 'return', 'reason' => 'x'], $o)->assertSessionHasNoErrors();
+    $co->post('clients', 'product.refunds.store', ['amount' => '10000', 'classification' => 'return_of_goods', 'reason' => 'x'], $o)->assertSessionHasNoErrors();
     $r = OrderRefund::firstOrFail();
     $co->post('finance', 'product.refunds.decide', ['decision' => 'approve'], $r)->assertSessionHasNoErrors();
     $co->post('finance', 'product.refunds.pay', ['paid_on' => '2026-02-10', 'reference' => 'TX', 'financial_account_id' => $s['bank']->id, 'idempotency_key' => (string) Str::uuid()], $r)->assertSessionHas('error');

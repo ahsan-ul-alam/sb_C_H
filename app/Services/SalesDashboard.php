@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\ClientOrder;
 use App\Models\InventoryHandover;
+use App\Models\OrderRefund;
 use Illuminate\Support\Collection;
 
 /**
@@ -36,6 +37,7 @@ class SalesDashboard
             'collected' => $collected,
             'receivable' => max(0, $deliveredValue - (int) $delivered->sum(fn ($o) => $o->collections->sum('amount'))),
             'commission' => (int) $delivered->sum('commission'),
+            'refunded' => (int) OrderRefund::where('status', 'paid')->whereIn('client_order_id', $orders->pluck('id'))->sum('amount'),
             'cogs' => (int) InventoryHandover::where('status', 'approved')->sum('cogs_value'),
             'by_project' => $orders->groupBy('project_id')->map(fn ($g) => [
                 'project' => $g->first()->project, 'orders' => $g->count(), 'delivered_orders' => $g->where('delivery_status', 'delivered')->count(),

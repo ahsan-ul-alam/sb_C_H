@@ -18,6 +18,7 @@
         <div class="metric"><div class="label">Gross order value (client merchandise)</div><div class="value">{{ Money::format($f['gross']) }}</div></div>
         <div class="metric"><div class="label">Delivered value</div><div class="value">{{ Money::format($f['delivered']) }}</div></div>
         <div class="metric"><div class="label">Cash collected (held for clients)</div><div class="value">{{ Money::format($f['collected']) }}</div></div>
+        <div class="metric"><div class="label">Refunded to customers (paid)</div><div class="value">{{ Money::format($f['refunded']) }}</div></div>
         <div class="metric"><div class="label">Customer receivables</div><div class="value">{{ Money::format($f['receivable']) }}</div></div>
         <div class="metric"><div class="label">Commission earned (Sellbees revenue)</div><div class="value">{{ Money::format($f['commission']) }}</div></div>
         <div class="metric"><div class="label">Product COGS (on client handover)</div><div class="value">{{ Money::format($f['cogs']) }}</div></div>
