@@ -1,9 +1,12 @@
 <?php
 
+use App\Mail\ClientInformationCode;
 use App\Models\AccountTransfer;
 use App\Models\AdvanceSettlement;
 use App\Models\AuditLog;
 use App\Models\CapitalEntry;
+use App\Models\Client;
+use App\Models\ClientInfoChallenge;
 use App\Models\CostRecognition;
 use App\Models\Expense;
 use App\Models\ExpensePayment;
@@ -19,6 +22,7 @@ use App\Models\SupplierPayment;
 use App\Models\SupplierReturn;
 use App\Services\AccountingService;
 use App\Services\AdvanceSettlementService;
+use App\Services\ClientApiIntegrations;
 use App\Services\InventoryEngine;
 use App\Services\InventoryHandoverService;
 use App\Services\InventoryValuation;
@@ -32,6 +36,7 @@ use App\Services\SupplierReturnService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Tests\Support\SellbeesCompany;
@@ -118,6 +123,30 @@ function ccRun(string|array $operation, int $count, callable $argsFor): array
 
     return $results;
 }
+
+it('gives eight clients created at once eight different SB numbers', function () {
+    $results = ccRun('client_create', 8, fn (int $i) => ['n' => $i]);
+    $numbers = collect($results)->where('ok', true)->pluck('recorded');
+
+    expect($numbers)->toHaveCount(8)->and($numbers->unique())->toHaveCount(8)->and(Client::whereNotNull('sb_number')->distinct()->count('sb_number'))->toBe(8)
+        ->and((int) DB::table('sb_number_sequence')->value('last_value'))->toBe(8);
+});
+
+it('lets exactly one of six simultaneous correct code submissions return the client information', function () {
+    Mail::fake();
+    $client = Client::create(['name' => 'Otp Race Co', 'mobile' => '017', 'email' => 'race@example.test']);
+    $client->forceFill(['email_verified_at' => now()])->save();
+    $made = ClientApiIntegrations::create('Race site');
+    ClientApiIntegrations::grant($made['integration'], $client);
+    $issued = $this->withToken($made['credential'])->postJson('/api/v1/client-information/request', ['sb_number' => $client->sb_number])->assertOk()->json();
+    $code = Mail::sent(ClientInformationCode::class)->last()?->code;
+    expect($code)->not->toBeNull();
+
+    $results = ccRun('otp_verify', 6, fn () => ['integration' => $made['integration']->id, 'sb' => $client->sb_number, 'request_id' => $issued['request_id'], 'code' => $code]);
+
+    expect(collect($results)->where('ok', true)->where('recorded', true)->count())->toBe(1)
+        ->and(ClientInfoChallenge::first()->consumed_at)->not->toBeNull();
+});
 
 it('records a transfer submitted four times at once exactly once', function () {
     $key = (string) Str::uuid();

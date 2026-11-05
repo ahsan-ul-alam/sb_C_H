@@ -101,3 +101,4 @@ Artisan::command('finance:process', function () {
 })->purpose('Run the standing-policy month-end automation (safe to re-run)');
 
 Schedule::command('finance:process')->dailyAt('02:30')->withoutOverlapping();
+Schedule::command('client-api:prune')->hourly()->withoutOverlapping();

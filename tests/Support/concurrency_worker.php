@@ -2,6 +2,8 @@
 
 use App\Models\AdvanceSettlement;
 use App\Models\CapitalEntry;
+use App\Models\Client;
+use App\Models\ClientApiIntegration;
 use App\Models\Expense;
 use App\Models\FinancialAccount;
 use App\Models\InventoryEngineEnrolment;
@@ -17,6 +19,7 @@ use App\Models\SupplierReturnSettlement;
 use App\Models\User;
 use App\Services\AccountingService;
 use App\Services\AdvanceSettlementService;
+use App\Services\ClientInformationOtp;
 use App\Services\CostRecognitionService;
 use App\Services\ExpenseService;
 use App\Services\InventoryEngine;
@@ -125,6 +128,8 @@ try {
 
             return true;
         })(),
+        'client_create' => Client::create(['name' => 'Race client '.$args['n'], 'mobile' => '017'])->sb_number,
+        'otp_verify' => ClientInformationOtp::verify(ClientApiIntegration::findOrFail($args['integration']), $args['sb'], $args['request_id'], $args['code']) !== null,
         'payment' => (function () use ($args) {
             $project = Project::findOrFail($args['project']);
 

@@ -6,6 +6,7 @@ use App\Enums\IdentificationType;
 use App\Models\Client;
 use App\Models\Invoice;
 use App\Models\Payment;
+use App\Services\Audit;
 use App\Support\ListFilters;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -106,6 +107,20 @@ class ClientController extends Controller
         $client->save();
 
         return back()->with('status', $client->isArchived() ? 'Client archived.' : 'Client restored.');
+    }
+
+    /**
+     * Staff confirm that the address on file belongs to the client. Changing the address withdraws this, and only a verified address can receive a client information code.
+     */
+    public function verifyEmail(Request $request, Client $client): RedirectResponse
+    {
+        if (! $client->email) {
+            return back()->with('error', 'This client has no email address to verify.');
+        }
+        $client->forceFill(['email_verified_at' => now(), 'email_verified_by' => $request->user()->id])->save();
+        Audit::log('client.email_verified', 'client '.$client->id, $client->sb_number);
+
+        return back()->with('status', 'Email address marked as verified.');
     }
 
     /**

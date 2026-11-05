@@ -10,7 +10,7 @@
         <form method="GET" action="{{ route('clients.index') }}" class="filters" role="search">
             <div class="field grow">
                 <label for="q">Search</label>
-                <input type="search" id="q" name="q" value="{{ request('q') }}" placeholder="Name, mobile or email">
+                <input type="search" id="q" name="q" value="{{ request('q') }}" placeholder="SB number, name, mobile or email">
             </div>
             <label class="check"><input type="checkbox" name="archived" value="1" @checked($showArchived)> Archived only</label>
             <button type="submit" class="btn"><x-icon name="search" class="icon-sm" /> Search</button>
@@ -31,11 +31,12 @@
             <div class="table-wrap">
                 <table class="table table-min-640">
                     <thead>
-                        <tr><th>Client</th><th>Mobile</th><th>Email</th><th>Country</th><th class="num">Projects</th></tr>
+                        <tr><th>SB number</th><th>Client</th><th>Mobile</th><th>Email</th><th>Country</th><th class="num">Projects</th></tr>
                     </thead>
                     <tbody>
                         @foreach ($clients as $client)
                             <tr>
+                                <td class="nowrap">{{ $client->sb_number }}</td>
                                 <td class="primary-cell">
                                     <a href="{{ route('clients.show', $client) }}">{{ $client->name }}</a>
                                     @if ($client->isArchived()) <span class="badge badge-archived">Archived</span> @endif

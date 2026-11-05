@@ -85,6 +85,7 @@ Route::middleware('auth')->group(function () {
 
         Route::resource('clients', ClientController::class);
         Route::patch('clients/{client}/archive', [ClientController::class, 'toggleArchive'])->name('clients.archive');
+        Route::post('clients/{client}/verify-email', [ClientController::class, 'verifyEmail'])->name('clients.verify-email');
 
         Route::resource('clients.projects', ProjectController::class)->shallow()->except('index');
         Route::patch('projects/{project}/archive', [ProjectController::class, 'toggleArchive'])->name('projects.archive');

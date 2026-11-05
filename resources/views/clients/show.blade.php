@@ -128,8 +128,18 @@
                 <div class="panel-head"><h2>Contact</h2></div>
                 <div class="panel-body">
                     <ul class="contact-list">
+                        <li><x-icon name="id-card" class="icon-sm" /> <span><strong>{{ $client->sb_number }}</strong> <span class="muted">SB client number, permanent</span></span></li>
                         <li><x-icon name="phone" class="icon-sm" /> <span>{{ $client->mobile }}@if ($client->mobile_alt)<br>{{ $client->mobile_alt }}@endif</span></li>
-                        @if ($client->email)<li><x-icon name="mail" class="icon-sm" /> <a href="mailto:{{ $client->email }}">{{ $client->email }}</a></li>@endif
+                        @if ($client->email)<li><x-icon name="mail" class="icon-sm" /> <a href="mailto:{{ $client->email }}">{{ $client->email }}</a>
+                            @if ($client->hasVerifiedEmail())
+                                <span class="badge">Verified {{ $client->email_verified_at->format('j M Y') }}</span>
+                            @else
+                                <span class="badge badge-archived">Not verified: client information codes cannot be sent</span>
+                                <form method="POST" action="{{ route('clients.verify-email', $client) }}" style="display:inline">@csrf
+                                    <button type="submit" class="btn btn-sm" onclick="return confirm('Confirm that this email address belongs to the client and that they can read it?')">Mark verified</button>
+                                </form>
+                            @endif
+                        </li>@endif
                         @if ($client->address || $client->country)
                             <li><x-icon name="map-pin" class="icon-sm" /> <span style="white-space:pre-line">{{ trim($client->address."\n".$client->country) }}</span></li>
                         @endif
