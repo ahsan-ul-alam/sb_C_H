@@ -4,6 +4,7 @@ use App\Models\AdvanceSettlement;
 use App\Models\CapitalEntry;
 use App\Models\Expense;
 use App\Models\FinancialAccount;
+use App\Models\InventoryEngineEnrolment;
 use App\Models\InventoryHandover;
 use App\Models\LoanReceivable;
 use App\Models\LoanReceivableRepayment;
@@ -18,6 +19,7 @@ use App\Services\AccountingService;
 use App\Services\AdvanceSettlementService;
 use App\Services\CostRecognitionService;
 use App\Services\ExpenseService;
+use App\Services\InventoryEngine;
 use App\Services\InventoryHandoverService;
 use App\Services\InvestmentService;
 use App\Services\LoanReceivableService;
@@ -83,6 +85,16 @@ try {
                 $capital->update(['status' => 'verified', 'verified_by' => auth()->id(), 'verified_at' => now()]);
                 InvestmentService::post($capital, auth()->id());
             });
+
+            return true;
+        })(),
+        'enrol_propose' => (function () use ($args) {
+            InventoryEngine::propose(SourcingLot::findOrFail($args['lot']), 'company', 'Board resolution 2026/11 and signed purchase order', '2026-11-01', auth()->user());
+
+            return true;
+        })(),
+        'enrol_decide' => (function () use ($args) {
+            InventoryEngine::decide(InventoryEngineEnrolment::findOrFail($args['enrolment']), true, auth()->user());
 
             return true;
         })(),

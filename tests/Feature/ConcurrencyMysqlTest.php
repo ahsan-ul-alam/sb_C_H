@@ -2,11 +2,13 @@
 
 use App\Models\AccountTransfer;
 use App\Models\AdvanceSettlement;
+use App\Models\AuditLog;
 use App\Models\CapitalEntry;
 use App\Models\CostRecognition;
 use App\Models\Expense;
 use App\Models\ExpensePayment;
 use App\Models\FinancialAccount;
+use App\Models\InventoryEngineEnrolment;
 use App\Models\JournalEntry;
 use App\Models\LoanReceivable;
 use App\Models\LoanReceivableRepayment;
@@ -99,7 +101,7 @@ function ccRun(string|array $operation, int $count, callable $argsFor): array
         $args = json_encode(['user' => test()->co->users['finance']->id, ...$argsFor($i), 'start' => $start]);
         // One operation for every worker, or a list with one operation per worker to race different operations against each other.
         $cmd = [PHP_BINARY, __DIR__.'/../Support/concurrency_worker.php', is_array($operation) ? $operation[$i] : $operation, $args];
-        $procs[$i] = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes[$i], null, [...getenv(), 'CC_TEST_NOW' => '2026-11-10', 'FINANCE_REALTIME_FROM' => '2026-11-01',
+        $procs[$i] = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes[$i], null, [...getenv(), 'CC_TEST_NOW' => '2026-11-10', 'FINANCE_INVENTORY_ENGINE_FROM' => '2026-11-01', 'FINANCE_REALTIME_FROM' => '2026-11-01',
             'FINANCE_SOURCING_BASIS' => 'accrual', 'FINANCE_SOURCING_ACCRUAL_FROM' => '2026-11-01', 'FINANCE_SOURCING_RECOGNITION' => 'lot_completed']);
     }
     $results = [];
@@ -418,4 +420,31 @@ it('collects a supplier refund once when two Board members approve the same sett
     $results = ccRun('sret_settle_decide', 2, fn (int $i) => ['user' => [$this->co->users['board']->id, $this->co->users['board2']->id][$i], 'settlement' => $settlement->id]);
 
     expect(collect($results)->where('ok', true)->count())->toBe(1)->and(JournalEntry::where('source_type', 'supplier_return_settlement')->count())->toBe(1)->and(dr('assets.supplier_receivable'))->toBe(0)->and(ledgerAudit()['duplicates'])->toBe(0);
+});
+
+it('creates one enrolment when several requests for the same lot arrive at once', function () {
+    config(['finance.inventory_engine_from' => '2026-11-01']);
+    $finance = $this->co->users['finance'];
+    $supplier = Supplier::create(['name' => 'Enrol Race Supplier']);
+    $lot = Sourcing::createLot(['title' => 'Enrol race lot'], $finance);
+    Sourcing::addLine($lot, ['supplier_id' => $supplier->id, 'description' => 'Goods', 'quantity' => '10', 'unit_price' => 50_000], $finance);
+
+    $results = ccRun('enrol_propose', 4, fn () => ['lot' => $lot->id]);
+
+    expect(collect($results)->where('ok', true)->count())->toBe(1)->and(collect($results)->where('ok', false)->every(fn ($r) => str_contains($r['error'], 'already has an enrolment')))->toBeTrue()
+        ->and(InventoryEngineEnrolment::where('sourcing_lot_id', $lot->id)->count())->toBe(1);
+});
+
+it('approves one enrolment once when two Board members decide at the same moment', function () {
+    config(['finance.inventory_engine_from' => '2026-11-01']);
+    $finance = $this->co->users['finance'];
+    $supplier = Supplier::create(['name' => 'Enrol Decide Supplier']);
+    $lot = Sourcing::createLot(['title' => 'Enrol decide lot'], $finance);
+    Sourcing::addLine($lot, ['supplier_id' => $supplier->id, 'description' => 'Goods', 'quantity' => '10', 'unit_price' => 50_000], $finance);
+    $enrolment = InventoryEngine::propose($lot->refresh(), 'company', 'Board resolution 2026/11', '2026-11-01', $finance);
+
+    $results = ccRun('enrol_decide', 2, fn (int $i) => ['user' => [$this->co->users['board']->id, $this->co->users['board2']->id][$i], 'enrolment' => $enrolment->id]);
+
+    expect(collect($results)->where('ok', true)->count())->toBe(1)->and(collect($results)->where('ok', false)->every(fn ($r) => str_contains($r['error'], 'Already decided')))->toBeTrue()
+        ->and($enrolment->refresh()->status)->toBe('approved')->and(AuditLog::where('action', 'inventory.engine_approved')->count())->toBe(1)->and(JournalEntry::count())->toBe(1);
 });
