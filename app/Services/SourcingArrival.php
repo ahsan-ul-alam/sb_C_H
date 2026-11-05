@@ -18,9 +18,9 @@ class SourcingArrival
     /**
      * @param  string|null  $accepted  quantity accepted after inspection; omitted keeps the line's current usable quantity
      */
-    public static function record(SourcingLotLine $line, string $received, ?string $accepted, string $arrivedOn, User $user, ?string $reference = null): void
+    public static function record(SourcingLotLine $line, string $received, ?string $accepted, string $arrivedOn, User $user, ?string $reference = null, ?int $eventId = null, ?int $locationId = null): void
     {
-        DB::transaction(function () use ($line, $received, $accepted, $arrivedOn, $reference, $user) {
+        DB::transaction(function () use ($line, $received, $accepted, $arrivedOn, $reference, $user, $eventId, $locationId) {
             $lot = SourcingLot::whereKey($line->sourcing_lot_id)->lockForUpdate()->firstOrFail();
             if ($lot->isClosed()) {
                 throw new RuntimeException('This lot is '.strtolower($lot->statusLabel()).' and can no longer be changed.');
@@ -58,7 +58,7 @@ class SourcingArrival
                 $lot->update(['status' => 'costing', 'priced_by' => null]);
             }
             Audit::log('sourcing.arrival', 'lot '.$lot->number, $line->description.' received '.$received.' accepted '.$accepted.' on '.$arrivedOn);
-            Inventory::syncReceipt($line, $user); // the accepted quantity becomes stock (re-recording an arrival posts only the difference)
+            Inventory::syncReceipt($line, $user, $eventId, $locationId); // the accepted quantity becomes stock (re-recording an arrival posts only the difference)
             InventoryValuation::syncLot($lot->id); // and, for a lot the engine values, its accepted goods become (pending) valuation
         });
     }
