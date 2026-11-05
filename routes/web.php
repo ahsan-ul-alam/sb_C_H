@@ -17,6 +17,7 @@ use App\Http\Controllers\FinancialAccountController;
 use App\Http\Controllers\FinancialCompletenessController;
 use App\Http\Controllers\FinancialOverviewController;
 use App\Http\Controllers\FinancialStatementsController;
+use App\Http\Controllers\HistoricalReconciliationController;
 use App\Http\Controllers\HomeController;
 use App\Http\Controllers\InventoryHandoverController;
 use App\Http\Controllers\InventoryLossController;
@@ -336,6 +337,7 @@ Route::middleware('auth')->group(function () {
             Route::get('loans', [LoanController::class, 'index'])->name('loans');
             Route::get('loans-receivable', [LoanReceivableController::class, 'index'])->name('loans-receivable');
             Route::get('statements', [StatementController::class, 'index'])->name('statements');
+            Route::get('historical', [HistoricalReconciliationController::class, 'index'])->name('historical');
             Route::get('completeness', [FinancialCompletenessController::class, 'index'])->name('completeness');
             Route::get('approvals', [ApprovalController::class, 'index'])->name('approvals');
             Route::get('other-income', [OtherIncomeController::class, 'index'])->name('other-income');
@@ -384,6 +386,20 @@ Route::middleware('auth')->group(function () {
         Route::post('completeness/payments/{payment}/classify', [FinancialCompletenessController::class, 'classify'])->name('completeness.classify')->middleware('can:reconcile.review');
         Route::post('statements', [StatementController::class, 'store'])->name('statements.store')->middleware('can:account.manage');
         Route::post('statements/{statement}/decide', [StatementController::class, 'decide'])->name('statements.decide')->middleware('can:reconcile.review');
+
+        // Historical reconciliation preparation: propose / review / approve are separate permissions held by different people; nothing here posts to the ledger.
+        Route::post('historical/accounts', [HistoricalReconciliationController::class, 'accountPrepare'])->name('historical.accounts.prepare')->middleware('can:account.manage');
+        Route::post('historical/accounts/{account}/confirm', [HistoricalReconciliationController::class, 'accountConfirm'])->name('historical.accounts.confirm')->middleware('can:account.manage');
+        Route::post('historical/accounts/{account}/activate', [HistoricalReconciliationController::class, 'accountActivate'])->name('historical.accounts.activate')->middleware('can:reconcile.review');
+        Route::post('historical/receipts', [HistoricalReconciliationController::class, 'receiptPropose'])->name('historical.receipts.propose')->middleware('can:account.manage');
+        Route::post('historical/receipts/{review}/review', [HistoricalReconciliationController::class, 'receiptReview'])->name('historical.receipts.review')->middleware('can:reconcile.review');
+        Route::post('historical/receipts/{review}/approve', [HistoricalReconciliationController::class, 'receiptApprove'])->name('historical.receipts.approve')->middleware('can:receipt.classification.approve');
+        Route::post('historical/receipts/{review}/apply', [HistoricalReconciliationController::class, 'receiptApply'])->name('historical.receipts.apply')->middleware('can:account.manage');
+        Route::post('historical/receipts/{review}/reject', [HistoricalReconciliationController::class, 'receiptReject'])->name('historical.receipts.reject')->middleware('can:reconcile.review');
+        Route::post('historical/exceptions', [HistoricalReconciliationController::class, 'exceptionsRegister'])->name('historical.exceptions.register')->middleware('can:account.manage');
+        Route::post('historical/exceptions/{exception}/resolve', [HistoricalReconciliationController::class, 'exceptionResolve'])->name('historical.exceptions.resolve')->middleware('can:reconcile.review');
+        Route::post('historical/lots/{lot}/ownership', [HistoricalReconciliationController::class, 'ownershipPropose'])->name('historical.ownership.propose')->middleware('can:sourcing.manage');
+        Route::post('historical/ownership/{ownershipRequest}/decide', [HistoricalReconciliationController::class, 'ownershipDecide'])->name('historical.ownership.decide')->middleware('can:ownership.approve');
         Route::post('loans-receivable', [LoanReceivableController::class, 'store'])->name('loans-receivable.store')->middleware('can:loan.record');
         Route::post('loans-receivable/{loan}/decide', [LoanReceivableController::class, 'decide'])->name('loans-receivable.decide')->middleware('can:loan.verify');
         Route::post('loans-receivable/{loan}/reverse', [LoanReceivableController::class, 'reverse'])->name('loans-receivable.reverse')->middleware('can:loan.verify');

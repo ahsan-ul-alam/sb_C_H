@@ -21,7 +21,7 @@ class FinancialAccount extends Model
 
     protected function casts(): array
     {
-        return ['is_default' => 'boolean', 'is_active' => 'boolean', 'allow_negative' => 'boolean'];
+        return ['is_default' => 'boolean', 'is_active' => 'boolean', 'allow_negative' => 'boolean', 'opening_date' => 'date', 'confirmed_at' => 'datetime', 'activated_at' => 'datetime'];
     }
 
     public function typeLabel(): string

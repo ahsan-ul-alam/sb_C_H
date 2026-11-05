@@ -95,6 +95,9 @@ class ProductOperationsController extends Controller
             if ($lot->ownership !== null) {
                 throw new RuntimeException('Ownership of this stock is already recorded and cannot be changed here (it decides how its sales are accounted).');
             }
+            if ($lot->ownershipRequests()->exists()) {
+                throw new RuntimeException('Ownership of this lot is being settled through an evidence-backed request (Finance → Historical Reconciliation); it cannot be set directly.');
+            }
             if ($data['ownership'] === 'client' && ! $lot->project_id) {
                 throw new RuntimeException('Choose the client project this lot is for first (on the lot, under Optional details).');
             }

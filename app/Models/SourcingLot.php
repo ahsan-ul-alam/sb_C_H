@@ -61,6 +61,11 @@ class SourcingLot extends Model
         return $this->hasMany(SupplierPayment::class)->orderByDesc('paid_on')->orderByDesc('id');
     }
 
+    public function ownershipRequests(): HasMany
+    {
+        return $this->hasMany(LotOwnershipRequest::class);
+    }
+
     public function advanceSettlements(): HasMany
     {
         return $this->hasMany(AdvanceSettlement::class);

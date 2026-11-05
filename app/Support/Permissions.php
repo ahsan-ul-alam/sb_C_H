@@ -27,7 +27,7 @@ class Permissions
     public const GOVERNANCE = [
         'policy.approve', 'allocation.approve', 'payout.approve', 'resolution.decide', 'period.verify',
         'exit.approve', 'capital.verify', 'expense.verify', 'opening.approve', 'sourcing.fund.approve', 'sourcing.negative_margin',
-        'transfer.void', 'loan.verify', 'income.verify', 'cashalloc.approve', 'sourcing.advance.approve', 'inventory.handover.approve', 'inventory.loss.approve', 'supplier.return.approve', 'revenue.event.approve',
+        'transfer.void', 'loan.verify', 'income.verify', 'cashalloc.approve', 'sourcing.advance.approve', 'inventory.handover.approve', 'inventory.loss.approve', 'supplier.return.approve', 'revenue.event.approve', 'receipt.classification.approve', 'ownership.approve',
     ];
 
     /**
@@ -39,7 +39,7 @@ class Permissions
         $roles = [
             'board_member' => [...$view, 'policy.create', 'policy.approve', 'allocation.approve', 'payout.approve',
                 'resolution.create', 'resolution.decide', 'period.verify', 'exit.approve', 'partner.manage', 'capital.verify', 'expense.verify', 'opening.approve', 'document.upload', 'transfer.void', 'loan.verify', 'income.verify', 'cashalloc.approve', 'reconcile.review',
-                'sourcing.view', 'sourcing.reports', 'sourcing.price.approve', 'sourcing.negative_margin', 'sourcing.fund.approve', 'sourcing.advance.approve', 'inventory.handover.approve', 'inventory.loss.approve', 'supplier.return.approve', 'revenue.event.approve', 'sourcing.supplier.secrets', 'inventory.view', 'settlement.view', 'commission.view', 'order.refund.approve'],
+                'sourcing.view', 'sourcing.reports', 'sourcing.price.approve', 'sourcing.negative_margin', 'sourcing.fund.approve', 'sourcing.advance.approve', 'inventory.handover.approve', 'inventory.loss.approve', 'supplier.return.approve', 'revenue.event.approve', 'sourcing.supplier.secrets', 'inventory.view', 'settlement.view', 'commission.view', 'order.refund.approve', 'receipt.classification.approve', 'ownership.approve'],
             'finance' => ['clienthub', ...$view, 'capital.record', 'expense.record', 'period.close', 'allocation.prepare',
                 'allocation.post', 'payout.pay', 'resolution.pay', 'exit.prepare', 'exit.pay', 'policy.create', 'revenue.record', 'opening.prepare', 'document.upload',
                 'account.manage', 'transfer.record', 'expense.pay', 'loan.record', 'income.record', 'reconcile.review',
