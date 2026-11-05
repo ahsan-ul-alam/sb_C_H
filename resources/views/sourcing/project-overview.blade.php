@@ -111,7 +111,8 @@
                         <td class="num"><a class="btn btn-sm"
                                 href="{{ route('sourcing.lots.show', [$lot, 'tab' => 'receiving']) }}">Receive goods</a>
                             <a class="btn btn-sm"
-                                href="{{ route('sourcing.lots.show', [$lot, 'tab' => 'payments']) }}">Payments</a></td>
+                                href="{{ route('sourcing.lots.show', [$lot, 'tab' => 'payments']) }}">Payments</a>
+                        </td>
                     </tr>
                     @empty
                     <tr>
