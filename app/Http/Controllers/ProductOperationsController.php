@@ -240,10 +240,14 @@ class ProductOperationsController extends Controller
     {
         $d = $request->validate(['paid_on' => ['required', 'date', 'before_or_equal:today'], 'reference' => ['required', 'string', 'max:255'], 'financial_account_id' => ['required', 'exists:financial_accounts,id'], 'idempotency_key' => ['required', 'uuid']]);
 
-        return $this->attempt(function () use ($refund, $d, $request) {
+        try {
             $saved = OrderRefunds::pay($refund, $d['paid_on'], (int) $d['financial_account_id'], $d['reference'], $d['idempotency_key'], $request->user());
-            session()->flash($saved ? 'status' : 'warning', $saved ? 'Refund payment recorded against the money held for the client.' : 'That refund payment was already recorded; nothing was duplicated.');
-        }, 'Done.');
+        } catch (RuntimeException $e) {
+            return back()->with('error', $e->getMessage())->withInput();
+        }
+
+        // Returned directly so the specific message is shown (attempt() would replace it with its generic success text).
+        return $saved ? back()->with('status', 'Refund payment recorded against the money held for the client.') : back()->with('warning', 'That refund payment was already recorded; nothing was duplicated.');
     }
 
     public function refundCancel(OrderRefund $refund): RedirectResponse

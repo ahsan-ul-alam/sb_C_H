@@ -240,9 +240,12 @@
     async function ajaxSubmit(form, submitter) {
         if (form.dataset.busy) return; // a request for this form is already in flight
         clearErrors(form);
-        setLoading(form, submitter, true);
+        // Build the payload BEFORE the loading state disables the buttons: a disabled submitter is left out of FormData, which dropped named buttons
+        // such as decision=approve and made the server reject the request.
         var data;
         try { data = new FormData(form, submitter || undefined); } catch (e) { data = new FormData(form); }
+        if (submitter && submitter.name && !data.has(submitter.name)) data.append(submitter.name, submitter.value);
+        setLoading(form, submitter, true);
         var keepLocked = false, refreshState = false;
         try {
             var res = await fetch(localUrl(form.action), { method: 'POST', body: data, headers: headers(), credentials: 'same-origin' });
