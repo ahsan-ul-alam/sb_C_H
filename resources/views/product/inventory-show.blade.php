@@ -40,6 +40,15 @@
             <form method="POST" action="{{ route('product.lots.area', $line->lot) }}" class="inline-form">@csrf<input name="storage_sqft" size="8" inputmode="decimal" placeholder="sq ft" required><button class="btn">Save area</button></form>
             @endcan
         </div></section>
+        @if ($line->product)
+        <section class="panel"><div class="panel-head"><h2>Product image</h2></div><div class="panel-body">
+            @if ($line->product->image_path)<img src="{{ route('stock.products.image', $line->product) }}" alt="{{ $line->description }}" width="96" height="96" style="object-fit:cover;border-radius:8px">@else<p class="muted">No image yet.</p>@endif
+            @can('sourcing.manage')
+            <form method="POST" action="{{ route('stock.products.image.store', $line->product) }}" enctype="multipart/form-data" class="inline-form">@csrf
+                <input type="file" name="image" accept=".jpg,.jpeg,.png,.webp" required><button class="btn">Save image</button>@error('image') <span class="error">{{ $message }}</span> @enderror</form>
+            @endcan
+        </div></section>
+        @endif
         @can('inventory.adjust')
         <section class="panel"><div class="panel-head"><h2>Stock-take adjustment</h2></div><div class="panel-body">
             <form method="POST" action="{{ route('product.inventory.adjust', $line) }}" class="inline-form">@csrf

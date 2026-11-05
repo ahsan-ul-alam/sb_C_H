@@ -39,7 +39,14 @@
         @forelse ($history as $e)
             <tr><td>{{ $e->arrived_on->format('j M Y') }}</td><td>{{ $e->reference }}</td><td class="primary-cell">{{ $e->line->lot->number }} {{ $e->line->description }}</td>
                 <td class="num">{{ $e->received_quantity }}</td><td class="num">{{ $e->accepted_quantity }}</td><td class="num">{{ $e->rejected_quantity }}</td><td class="num">{{ $e->damaged_quantity }}</td>
-                <td>{{ $e->location?->name }}</td><td>{{ $e->evidence_reference ?? '—' }}</td><td>{{ $e->creator?->name }}</td></tr>
+                <td>{{ $e->location?->name }}</td>
+                <td>{{ $e->evidence_reference }}
+                    @foreach ($evidence->get($e->id, collect()) as $doc)<a href="{{ route('stock.evidence.download', $doc) }}" title="{{ $doc->sha256 }}">{{ $doc->name }}</a><br>@endforeach
+                    @can('sourcing.manage')
+                    <form method="POST" action="{{ route('stock.evidence.store', $e) }}" enctype="multipart/form-data" class="inline-form">@csrf
+                        <select name="kind" aria-label="Evidence type">@foreach ($kinds as $k => $v)<option value="{{ $k }}">{{ $v }}</option>@endforeach</select>
+                        <input type="file" name="file" accept=".pdf,.jpg,.jpeg,.png" required><button class="btn btn-sm">Attach</button></form>
+                    @endcan</td><td>{{ $e->creator?->name }}</td></tr>
         @empty
             <tr><td colspan="10" class="muted">No arrivals recorded through this screen yet.</td></tr>
         @endforelse

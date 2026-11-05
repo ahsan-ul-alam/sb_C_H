@@ -255,6 +255,10 @@ Route::middleware('auth')->group(function () {
         Route::get('movements', [StockOperationsController::class, 'movements'])->name('movements');
         Route::get('receiving', [StockOperationsController::class, 'receiving'])->name('receiving');
         Route::post('receiving/{line}', [StockOperationsController::class, 'receive'])->name('receive')->middleware('can:sourcing.manage')->whereNumber('line');
+        Route::post('arrivals/{event}/evidence', [StockOperationsController::class, 'evidenceStore'])->name('evidence.store')->middleware('can:sourcing.manage')->whereNumber('event');
+        Route::get('evidence/{document}', [StockOperationsController::class, 'evidenceDownload'])->name('evidence.download')->whereNumber('document');
+        Route::post('products/{product}/image', [StockOperationsController::class, 'productImageStore'])->name('products.image.store')->middleware('can:sourcing.manage')->whereNumber('product');
+        Route::get('products/{product}/image', [StockOperationsController::class, 'productImage'])->name('products.image')->whereNumber('product');
         Route::get('reservations', [StockOperationsController::class, 'reservations'])->name('reservations');
         Route::get('transfers', [StockOperationsController::class, 'transfers'])->name('transfers');
         Route::middleware('can:inventory.adjust')->group(function () {

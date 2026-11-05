@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Client;
 use App\Models\ClientOrder;
+use App\Models\Document;
 use App\Models\Project;
 use App\Models\SourcingArrivalEvent;
 use App\Models\SourcingLotLine;
@@ -12,6 +13,7 @@ use App\Models\StockThreshold;
 use App\Models\StockTransfer;
 use App\Models\Supplier;
 use App\Models\SupplierProduct;
+use App\Services\Audit;
 use App\Services\InventoryExceptions;
 use App\Services\InventoryReports;
 use App\Services\ProjectInventory;
@@ -23,6 +25,8 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
 use Illuminate\View\View;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -74,7 +78,10 @@ class StockOperationsController extends Controller
         $expected = SourcingLotLine::query()->whereHas('lot', fn ($q) => $q->whereNotIn('status', ['cancelled', 'settled']))->with(['lot.project', 'supplier'])->orderBy('sourcing_lot_id')->get()
             ->filter(fn ($l) => bccomp(Receiving::expected($l), '0', 2) > 0);
 
-        return view('stock.receiving', ['expected' => $expected, 'history' => SourcingArrivalEvent::with(['line.lot', 'location', 'creator'])->latest('id')->limit(100)->get(), 'locations' => InventoryExceptions::locationList()]);
+        $history = SourcingArrivalEvent::with(['line.lot', 'location', 'creator'])->latest('id')->limit(100)->get();
+
+        return view('stock.receiving', ['expected' => $expected, 'history' => $history, 'locations' => InventoryExceptions::locationList(), 'kinds' => self::EVIDENCE_KINDS,
+            'evidence' => Document::where('subject_type', 'stock_arrival')->whereIn('subject_id', $history->pluck('id'))->orderBy('id')->get()->groupBy('subject_id')]);
     }
 
     public function receive(Request $request, SourcingLotLine $line): RedirectResponse
@@ -85,6 +92,51 @@ class StockOperationsController extends Controller
 
         return $this->attempt(fn () => Receiving::receive($line, $d['received_quantity'], $d['accepted_quantity'], $d['damaged_quantity'] ?? '0', $d['arrived_on'], $d['stock_location_id'] ?? null,
             $d['reference'], $d['evidence_reference'] ?? null, $d['notes'] ?? null, $request->user()), 'Arrival recorded. The accepted units are now stock.');
+    }
+
+    public const EVIDENCE_KINDS = ['challan' => 'Supplier delivery challan', 'grn' => 'Goods receiving note', 'invoice' => 'Invoice / packing list', 'inspection' => 'Inspection evidence', 'photo' => 'Product condition photo'];
+
+    /** Evidence is append-only: a file is added to an arrival, never replaced or removed, and the same file cannot be added twice. Stock is never touched here. */
+    public function evidenceStore(Request $request, SourcingArrivalEvent $event): RedirectResponse
+    {
+        $d = $request->validate(['kind' => ['required', Rule::in(array_keys(self::EVIDENCE_KINDS))], 'file' => ['required', 'file', 'max:8192', 'mimes:pdf,jpg,jpeg,png']]);
+        $file = $request->file('file');
+        $hash = hash_file('sha256', $file->getRealPath());
+        if (Document::where('subject_type', 'stock_arrival')->where('subject_id', $event->id)->where('sha256', $hash)->exists()) {
+            return back()->with('error', 'That exact file is already attached to this arrival.');
+        }
+        $document = Document::create(['subject_type' => 'stock_arrival', 'subject_id' => $event->id, 'name' => self::EVIDENCE_KINDS[$d['kind']], 'path' => $file->store('receiving-evidence'),
+            'uploaded_by' => $request->user()->id, 'kind' => $d['kind'], 'mime' => $file->getMimeType(), 'size' => $file->getSize(), 'sha256' => $hash]);
+        Audit::log('inventory.evidence', 'arrival '.$event->id, $d['kind'].' sha256 '.$hash.' (document '.$document->id.')');
+
+        return back()->with('status', 'Evidence attached to the arrival. It cannot be replaced; add another file if needed.');
+    }
+
+    public function evidenceDownload(Document $document): StreamedResponse
+    {
+        abort_unless($document->subject_type === 'stock_arrival' && Storage::exists($document->path), 404);
+
+        return Storage::download($document->path, $document->name.'.'.pathinfo($document->path, PATHINFO_EXTENSION));
+    }
+
+    public function productImageStore(Request $request, SupplierProduct $product): RedirectResponse
+    {
+        $request->validate(['image' => ['required', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048', 'dimensions:min_width=50,min_height=50,max_width=4000,max_height=4000']]);
+        $old = $product->image_path;
+        $product->update(['image_path' => $request->file('image')->store('product-images')]);
+        Audit::log('product.image', 'product '.$product->id, 'image replaced');
+        if ($old) {
+            Storage::delete($old);
+        }
+
+        return back()->with('status', 'Product image saved.');
+    }
+
+    public function productImage(SupplierProduct $product): StreamedResponse
+    {
+        abort_unless($product->image_path && Storage::exists($product->image_path), 404);
+
+        return Storage::response($product->image_path, null, ['Cache-Control' => 'private, max-age=3600']);
     }
 
     public function reservations(): View

@@ -36,7 +36,10 @@
                 @foreach ($group as $r)
                     @php($l = $r['line'])
                     <tr>
-                        <td class="primary-cell"><a href="{{ route('product.inventory.show', $l) }}">{{ $l->description }}</a><span class="secondary">{{ $l->supplier->name }} · {{ $l->lot->number }}@if ($r['handover']) · handover #{{ $r['handover']->id }}@endif @if ($r['shared_projects']) · {{ implode(', ', $r['shared_projects']) }}@endif</span></td>
+                        <td class="primary-cell">
+                            @if ($l->product?->image_path)<img src="{{ route('stock.products.image', $l->product) }}" alt="" width="36" height="36" loading="lazy" style="object-fit:cover;border-radius:6px;vertical-align:middle;margin-right:.4rem">
+                            @else<span aria-hidden="true" style="display:inline-flex;width:36px;height:36px;border-radius:6px;background:var(--surface-2,#eee);align-items:center;justify-content:center;margin-right:.4rem;vertical-align:middle">{{ mb_strtoupper(mb_substr($l->description, 0, 1)) }}</span>@endif
+                            <a href="{{ route('product.inventory.show', $l) }}">{{ $l->description }}</a><span class="secondary">{{ $l->supplier->name }} · {{ $l->lot->number }}@if ($r['handover']) · handover #{{ $r['handover']->id }}@endif @if ($r['shared_projects']) · {{ implode(', ', $r['shared_projects']) }}@endif</span></td>
                         <td>{{ ProjectInventory::OWNERSHIP[$r['ownership']] }}</td>
                         <td class="num">{{ $r['accepted'] ?? '—' }}</td><td class="num">{{ $r['rejected'] ?? '—' }}</td>
                         <td class="num strong">{{ $r['b']['available'] }}</td><td class="num">{{ $r['b']['reserved'] }}</td><td class="num">{{ $r['b']['dispatched'] }}</td><td class="num">{{ $r['b']['delivered'] }}</td><td class="num">{{ $r['b']['returned'] }}</td><td class="num">{{ $r['b']['damaged'] }}</td>
