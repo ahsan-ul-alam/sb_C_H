@@ -16,6 +16,7 @@ use App\Models\SupplierProduct;
 use App\Services\Audit;
 use App\Services\InventoryExceptions;
 use App\Services\InventoryReports;
+use App\Services\ProductImages;
 use App\Services\ProjectInventory;
 use App\Services\Receiving;
 use App\Services\SalesDashboard;
@@ -122,14 +123,8 @@ class StockOperationsController extends Controller
     public function productImageStore(Request $request, SupplierProduct $product): RedirectResponse
     {
         $request->validate(['image' => ['required', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048', 'dimensions:min_width=50,min_height=50,max_width=4000,max_height=4000']]);
-        $old = $product->image_path;
-        $product->update(['image_path' => $request->file('image')->store('product-images')]);
-        Audit::log('product.image', 'product '.$product->id, 'image replaced');
-        if ($old) {
-            Storage::delete($old);
-        }
 
-        return back()->with('status', 'Product image saved.');
+        return $this->attempt(fn () => ProductImages::replace($product, $request->file('image')), 'Product image saved.');
     }
 
     public function productImage(SupplierProduct $product): StreamedResponse

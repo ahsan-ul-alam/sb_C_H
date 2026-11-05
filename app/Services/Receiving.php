@@ -18,14 +18,14 @@ use RuntimeException;
  */
 class Receiving
 {
-    public static function receive(SourcingLotLine $line, string $received, string $accepted, string $damaged, string $arrivedOn, ?int $locationId, string $reference, ?string $evidence, ?string $notes, User $user): SourcingArrivalEvent
+    public static function receive(SourcingLotLine $line, string $received, string $accepted, string $damaged, string $arrivedOn, ?int $locationId, string $reference, ?string $evidence, ?string $notes, User $user, ?int $quarantineLocationId = null): SourcingArrivalEvent
     {
         $reference = trim($reference);
         if ($reference === '') {
             throw new RuntimeException('Enter the delivery reference (delivery note or GRN number) so this arrival cannot be recorded twice.');
         }
 
-        return DB::transaction(function () use ($line, $received, $accepted, $damaged, $arrivedOn, $locationId, $reference, $evidence, $notes, $user) {
+        return DB::transaction(function () use ($line, $received, $accepted, $damaged, $arrivedOn, $locationId, $reference, $evidence, $notes, $user, $quarantineLocationId) {
             SourcingLot::whereKey($line->sourcing_lot_id)->lockForUpdate()->firstOrFail();
             $line = SourcingLotLine::findOrFail($line->id);
             if (SourcingArrivalEvent::where('sourcing_lot_line_id', $line->id)->where('reference', $reference)->exists()) {
@@ -52,7 +52,11 @@ class Receiving
             }
             $location = $locationId ? StockLocation::where('is_active', true)->findOrFail($locationId) : StockLocations::default(); // the very first receipt sets up the main warehouse
 
-            $event = SourcingArrivalEvent::create(['sourcing_lot_line_id' => $line->id, 'reference' => $reference, 'received_quantity' => $received, 'accepted_quantity' => $accepted,
+            // Rejected and damaged units stay in our custody but are never stock or value: they are placed in a quarantine location (QUAR unless chosen).
+            $quarantine = bccomp($rejected, '0', 2) > 0
+                ? ($quarantineLocationId ? StockLocation::where('is_active', true)->findOrFail($quarantineLocationId) : StockLocation::firstOrCreate(['code' => 'QUAR'], ['name' => 'Quarantine']))
+                : null;
+            $event = SourcingArrivalEvent::create(['quarantine_location_id' => $quarantine?->id, 'sourcing_lot_line_id' => $line->id, 'reference' => $reference, 'received_quantity' => $received, 'accepted_quantity' => $accepted,
                 'rejected_quantity' => $rejected, 'damaged_quantity' => $damaged, 'arrived_on' => $arrivedOn, 'stock_location_id' => $location->id,
                 'evidence_reference' => $evidence ? trim($evidence) : null, 'notes' => $notes ? trim($notes) : null, 'created_by' => $user->id]);
             SourcingArrival::record($line, $cumulative, bcadd($acceptedBefore, $accepted, 2), $arrivedOn, $user, $reference, $event->id, $location->id);

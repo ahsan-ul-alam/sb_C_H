@@ -62,7 +62,9 @@
                     <td>
                         @can('orders.manage')
                             @if ($o->delivery_status === 'pending')
-                                <form method="POST" action="{{ route('product.orders.confirm', $o) }}" class="inline-form">@csrf<button class="btn btn-sm btn-primary">Confirm &amp; reserve</button></form>
+                                <form method="POST" action="{{ route('product.orders.confirm', $o) }}" class="inline-form">@csrf
+                                    <select name="stock_location_id" aria-label="Reserve from location"><option value="">Any location</option>@foreach (\App\Models\StockLocation::where('is_active', true)->orderBy('name')->get() as $loc)<option value="{{ $loc->id }}">{{ $loc->name }}</option>@endforeach</select>
+                                    <button class="btn btn-sm btn-primary">Confirm &amp; reserve</button></form>
                             @endif
                             @if ($o->delivery_status === 'confirmed')
                                 <form method="POST" action="{{ route('product.orders.dispatch', $o) }}" class="inline-form">@csrf<button class="btn btn-sm btn-primary">Dispatched</button></form>

@@ -80,9 +80,9 @@ class OrderFulfilment
     }
 
     /** Reserve the stock: each requested product is taken from the client's oldest lots first, and the exact source lot is kept on the order line. */
-    public static function confirm(ClientOrder $order, User $user): void
+    public static function confirm(ClientOrder $order, User $user, ?int $locationId = null): void
     {
-        self::locked($order, function (ClientOrder $o) use ($user) {
+        self::locked($order, function (ClientOrder $o) use ($user, $locationId) {
             self::expect($o, 'pending');
             $clientId = $o->project->client_id;
             foreach ($o->items as $request) {
@@ -93,7 +93,7 @@ class OrderFulfilment
                     $item = $first ? tap($request)->update(['quantity' => $qty, 'sourcing_lot_line_id' => $line->id, 'inventory_handover_id' => $custody?->id])
                         : $o->items()->create(['supplier_product_id' => $request->supplier_product_id, 'description' => $request->description, 'quantity' => $qty, 'unit_price' => $request->unit_price, 'unit_discount' => $request->unit_discount, 'sourcing_lot_line_id' => $line->id, 'inventory_handover_id' => $custody?->id]);
                     $first = false;
-                    Inventory::move($line, 'reserve', ['available' => bcmul($qty, '-1', 2), 'reserved' => $qty], 'res:'.$item->id, $item, $user);
+                    Inventory::move($line, 'reserve', ['available' => bcmul($qty, '-1', 2), 'reserved' => $qty], 'res:'.$item->id, $item, $user, null, null, $locationId); // an explicit location reserves only the units standing there
                 }
             }
             $o->update(['delivery_status' => 'confirmed']);

@@ -154,7 +154,9 @@ class ProductOperationsController extends Controller
 
     public function orderConfirm(Request $request, ClientOrder $order): RedirectResponse
     {
-        return $this->attempt(fn () => OrderFulfilment::confirm($order, $request->user()), 'Order confirmed and the stock is reserved.');
+        $d = $request->validate(['stock_location_id' => ['nullable', 'exists:stock_locations,id']]);
+
+        return $this->attempt(fn () => OrderFulfilment::confirm($order, $request->user(), $d['stock_location_id'] ?? null), 'Order confirmed and the stock is reserved.');
     }
 
     public function orderDispatch(Request $request, ClientOrder $order): RedirectResponse

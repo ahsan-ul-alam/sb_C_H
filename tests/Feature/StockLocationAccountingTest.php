@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\ClientOrder;
+use App\Models\SourcingArrivalEvent;
 use App\Models\StockLocation;
 use App\Models\StockMovement;
 use App\Services\Inventory;
@@ -83,4 +84,46 @@ it('keeps older stock explicitly unplaced, does not invent a location, and requi
     $row = InventoryReports::build('location-reconciliation')['rows'][0];
     expect($row[3])->toBe('30.00')->and($row[4])->toBe('20.00')->and($row[8])->toBe('Reconciled');
     expect(InventoryReports::build('location-stock')['rows'])->toHaveCount(2);
+});
+
+it('reserves, releases and dispatches at the locations that hold the units, and never double-books a location', function () {
+    $s = placedStock($this);                                                     // MAIN 40, DHK 20, all available
+    $m = (string) $s['main']->id;
+    $d = (string) $s['dhk']->id;
+    $co = $s['co'];
+    $confirm = fn ($o, $loc = null) => $co->post('clients', 'product.orders.confirm', $loc ? ['stock_location_id' => $loc] : [], $o);
+
+    $a = locOrder($s, 'R1', '15');
+    $confirm($a, $s['dhk']->id)->assertSessionHasNoErrors();                    // explicit reservation location
+    expect(StockLocations::availableBalances($s['line']->refresh()))->toBe([$m => '40.00', $d => '5.00'])->and(StockLocations::balances($s['line']))->toBe([$m => '40.00', $d => '20.00']);
+
+    $b = locOrder($s, 'R2', '10');
+    $confirm($b, $s['dhk']->id)->assertSessionHas('error');                      // only 5 are still available at DHK
+    expect(StockLocations::availableAt($s['line'], $s['dhk']->id))->toBe('5.00');
+    $confirm($b)->assertSessionHasNoErrors();                                   // any location: MAIN (largest available) first
+    expect(StockLocations::availableBalances($s['line']))->toBe([$m => '30.00', $d => '5.00']);
+
+    // Reserved units cannot be transferred away: only the available ones can move.
+    $big = StockLocations::request($s['line'], null, $s['dhk']->id, $s['main']->id, '6', 'try', $s['user']);
+    expect(fn () => StockLocations::complete($big, $s['user']))->toThrow(RuntimeException::class, 'available at that location');
+
+    // Dispatch takes the reserved units from where they are reserved; releasing returns them to the same place.
+    $co->post('clients', 'product.orders.dispatch', [], $a)->assertSessionHasNoErrors();
+    expect(StockLocations::balances($s['line']))->toBe([$m => '40.00', $d => '5.00']);
+    $co->post('clients', 'product.orders.cancel', [], $b)->assertSessionHasNoErrors();
+    expect(StockLocations::availableBalances($s['line']))->toBe([$m => '40.00', $d => '5.00'])->and(Inventory::reconciles($s['line']))->toBeTrue();
+    $co->post('clients', 'product.orders.fail', [], $a)->assertSessionHasNoErrors();   // failed delivery restocks DHK
+    expect(StockLocations::availableBalances($s['line']))->toBe([$m => '40.00', $d => '20.00']);
+});
+it('keeps rejected and damaged units in quarantine, out of stock, valuation and the accepted location', function () {
+    $s = unreceivedLot(SellbeesCompany::boot($this), '100');
+    Receiving::receive($s['line'], '100', '90', '4', '2026-02-10', null, 'GRN-1', null, null, $s['user']);
+    $event = SourcingArrivalEvent::firstOrFail();
+    expect($event->quarantineLocation->code)->toBe('QUAR')->and(Inventory::balances($s['line']->refresh())['available'])->toBe('90.00');
+    $main = StockLocations::default();
+    expect(StockLocations::balances($s['line']))->toBe([(string) $main->id => '90.00']);                         // the 10 rejected are not on hand anywhere in stock
+    expect(StockMovement::where('sourcing_lot_line_id', $s['line']->id)->sum('d_available'))->toEqual(90);
+    $row = InventoryReports::build('quarantine')['rows'][0];
+    expect($row[0])->toBe('Quarantine')->and($row[5])->toBe('10.00')->and($row[6])->toBe('4.00');
+    expect(InventoryReports::build('location-reconciliation')['rows'][0][8])->toBe('Reconciled');
 });

@@ -26,6 +26,12 @@ class SourcingArrivalEvent extends Model
         return $this->belongsTo(StockLocation::class, 'stock_location_id');
     }
 
+    /** @return BelongsTo<StockLocation, $this> */
+    public function quarantineLocation(): BelongsTo
+    {
+        return $this->belongsTo(StockLocation::class, 'quarantine_location_id');
+    }
+
     /** @return BelongsTo<User, $this> */
     public function creator(): BelongsTo
     {

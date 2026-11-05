@@ -61,6 +61,59 @@ class StockLocations
     }
 
     /**
+     * Available units per location ('' = unplaced); only positive balances are returned.
+     *
+     * @return array<string, string>
+     */
+    public static function availableBalances(SourcingLotLine $line): array
+    {
+        return StockMovement::where('sourcing_lot_line_id', $line->id)->selectRaw('COALESCE(stock_location_id, 0) loc, COALESCE(SUM(d_available),0) q')->groupBy('loc')->get()
+            ->mapWithKeys(fn ($r) => [(int) $r->loc === 0 ? '' : (string) (int) $r->loc => bcadd((string) $r->q, '0', 2)])->filter(fn ($q) => bccomp($q, '0', 2) > 0)->all();
+    }
+
+    public static function availableAt(SourcingLotLine $line, ?int $locationId): string
+    {
+        return self::availableBalances($line)[$locationId === null ? '' : (string) $locationId] ?? '0.00';
+    }
+
+    /**
+     * What one order line currently holds in a bucket ('d_reserved'), per location.
+     *
+     * @return array<string, string>
+     */
+    private static function heldByItem(ClientOrderItem $item, string $column): array
+    {
+        return StockMovement::where('client_order_item_id', $item->id)->selectRaw("COALESCE(stock_location_id, 0) loc, COALESCE(SUM($column),0) q")->groupBy('loc')->get()
+            ->mapWithKeys(fn ($r) => [(int) $r->loc === 0 ? '' : (string) (int) $r->loc => bcadd((string) $r->q, '0', 2)])->filter(fn ($q) => bccomp($q, '0', 2) > 0)->all();
+    }
+
+    /**
+     * Take a quantity from per-location balances, placed locations (largest first) before the unplaced balance; refuses when they hold less.
+     *
+     * @param  array<string, string>  $balances
+     * @return list<array{0: ?int, 1: string}>
+     */
+    private static function takeFrom(array $balances, string $size, SourcingLotLine $line, string $bucket): array
+    {
+        $order = collect($balances)->reject(fn ($q, $id) => $id === '')->sortDesc()->keys()->all();
+        if (isset($balances[''])) {
+            $order[] = '';
+        }
+        $chunks = [];
+        $left = $size;
+        foreach ($order as $id) {
+            $take = bccomp($balances[$id], $left, 2) >= 0 ? $left : $balances[$id];
+            $chunks[] = [$id === '' ? null : (int) $id, $take];
+            $left = bcsub($left, $take, 2);
+            if (bccomp($left, '0', 2) === 0) {
+                return $chunks;
+            }
+        }
+
+        throw new RuntimeException('Only '.bcsub($size, $left, 2).' '.$bucket.' of '.$line->description.' stand in recorded locations; '.$size.' were needed.');
+    }
+
+    /**
      * Split one movement into per-location movements. Returns [location id|null, deltas] parts that add up to the requested deltas.
      *
      * @param  array<string, string>  $deltas
@@ -77,10 +130,27 @@ class StockLocations
             if (bccomp($onHand, '0', 2) < 0 && bccomp(self::onHandAt($line, $location), bcmul($onHand, '-1', 2), 2) < 0) {
                 throw new RuntimeException('Only '.self::onHandAt($line, $location).' stand at that location; '.bcmul($onHand, '-1', 2).' were to be taken.');
             }
+            // Units that are reserved are not available to move or reserve again, so the location's AVAILABLE units must cover any take from "available".
+            if (bccomp($deltas['available'] ?? '0', '0', 2) < 0 && bccomp(self::availableAt($line, $location), bcmul($deltas['available'], '-1', 2), 2) < 0) {
+                throw new RuntimeException('Only '.self::availableAt($line, $location).' of '.$line->description.' are available at that location (the rest is reserved or elsewhere).');
+            }
 
             return [[$location, $deltas]];
         }
-        if (in_array($type, self::OWNERSHIP_ONLY, true) || bccomp($onHand, '0', 2) === 0) {
+        if (in_array($type, self::OWNERSHIP_ONLY, true)) {
+            return [[null, $deltas]];
+        }
+        // A reservation is taken from the locations that hold available units; releasing it or dispatching it works from the locations it was reserved at.
+        if ($type === 'reserve' && bccomp($deltas['reserved'] ?? '0', '0', 2) > 0) {
+            return self::scale($deltas, self::takeFrom(self::availableBalances($line), ltrim($deltas['available'], '-'), $line, 'available'), ltrim($deltas['available'], '-'));
+        }
+        if ($item && in_array($type, ['release', 'dispatch'], true)) {
+            $held = self::heldByItem($item, 'd_reserved');
+            if (bccomp(array_reduce($held, fn ($c, $q) => bcadd($c, $q, 2), '0'), ltrim($deltas['reserved'], '-'), 2) >= 0) {
+                return self::scale($deltas, self::takeFrom($held, ltrim($deltas['reserved'], '-'), $line, 'reserved'), ltrim($deltas['reserved'], '-'));
+            }
+        }
+        if (bccomp($onHand, '0', 2) === 0) {
             return [[null, $deltas]];
         }
         $size = ltrim($onHand, '-');

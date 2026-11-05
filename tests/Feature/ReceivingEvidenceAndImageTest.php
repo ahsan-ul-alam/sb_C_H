@@ -2,6 +2,7 @@
 
 use App\Models\Document;
 use App\Models\StockMovement;
+use App\Models\SupplierProduct;
 use App\Services\Inventory;
 use App\Services\Receiving;
 use App\Services\StockLocations;
@@ -54,6 +55,21 @@ it('lets only authorised staff upload and view evidence', function () {
     $s['co']->as('auditor')->get(route('stock.evidence.download', $doc))->assertOk();
     $s['co']->as('employee')->get(route('stock.evidence.download', $doc))->assertForbidden();
     $s['co']->as('finance')->get(route('stock.receiving'))->assertOk()->assertSee('Product condition photo');
+});
+
+it('keeps the old image and reference when saving the replacement fails, and removes the orphan file', function () {
+    $s = arrivedLot($this);
+    $product = $s['product'];
+    $s['co']->post('clients', 'stock.products.image.store', ['image' => UploadedFile::fake()->image('a.png', 300, 300)], $product)->assertSessionHasNoErrors();
+    $old = $product->refresh()->image_path;
+    $filesBefore = Storage::allFiles('product-images');
+
+    SupplierProduct::updating(fn () => throw new RuntimeException('database down'));
+    $s['co']->post('clients', 'stock.products.image.store', ['image' => UploadedFile::fake()->image('b.png', 300, 300)], $product)->assertSessionHas('error');
+    SupplierProduct::flushEventListeners();
+
+    expect($product->refresh()->image_path)->toBe($old)->and(Storage::allFiles('product-images'))->toBe($filesBefore);
+    Storage::assertExists($old);
 });
 
 it('stores one validated, private product image and serves it only to authorised staff', function () {

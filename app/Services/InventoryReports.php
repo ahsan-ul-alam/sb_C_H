@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\ClientOrder;
 use App\Models\ClientOrderItem;
+use App\Models\SourcingArrivalEvent;
 use App\Models\StockLocation;
 use App\Models\StockMovement;
 use App\Support\Money;
@@ -23,7 +24,7 @@ class InventoryReports
         'valuation' => 'Inventory valuation', 'sales-by-project' => 'Sales by project', 'sales-by-product' => 'Sales by product', 'orders-by-status' => 'Orders by status',
         'returns-damage' => 'Returns and damage', 'reconciliation' => 'Stock versus sales reconciliation',
         'location-stock' => 'Location-wise stock', 'location-reconciliation' => 'Global stock versus locations',
-        'sales-by-channel' => 'Sales by channel', 'discounts' => 'Discounts given', 'collections-refunds' => 'Collections and refunds', 'stock-aging' => 'Stock aging',
+        'sales-by-channel' => 'Sales by channel', 'discounts' => 'Discounts given', 'collections-refunds' => 'Collections and refunds', 'stock-aging' => 'Stock aging', 'quarantine' => 'Rejected and damaged goods in quarantine',
     ];
 
     /**
@@ -37,7 +38,7 @@ class InventoryReports
             'valuation' => self::valuation($f), 'sales-by-project' => self::salesByProject($f), 'sales-by-product' => self::salesByProduct($f), 'orders-by-status' => self::ordersByStatus($f),
             'returns-damage' => self::returnsDamage($f), 'reconciliation' => self::reconciliation($f),
             'location-stock' => self::locationStock($f), 'location-reconciliation' => self::locationReconciliation($f),
-            'sales-by-channel' => self::salesByChannel($f), 'discounts' => self::discounts($f), 'collections-refunds' => self::collectionsRefunds($f), 'stock-aging' => self::stockAging($f),
+            'sales-by-channel' => self::salesByChannel($f), 'discounts' => self::discounts($f), 'collections-refunds' => self::collectionsRefunds($f), 'stock-aging' => self::stockAging($f), 'quarantine' => self::quarantine($f),
             default => throw new InvalidArgumentException('Unknown report.'),
         };
     }
@@ -171,6 +172,21 @@ class InventoryReports
         })->values()->all();
 
         return ['title' => self::TYPES['stock-aging'], 'headers' => ['Lot', 'Product', 'Unit', 'Last arrival', 'Days', 'Age band', 'Available'], 'rows' => $rows];
+    }
+
+    /**
+     * Units received but not accepted, by the place they stand. They are custody records only: never in the stock ledger, never valued. Their later
+     * disposal or return to the supplier is recorded through the loss and supplier-return cases, not netted here.
+     *
+     * @return Report
+     */
+    private static function quarantine(array $f): array
+    {
+        $rows = SourcingArrivalEvent::with(['line.lot', 'quarantineLocation'])->where('rejected_quantity', '>', 0)
+            ->when($f['from'] ?? null, fn ($q, $v) => $q->whereDate('arrived_on', '>=', $v))->when($f['to'] ?? null, fn ($q, $v) => $q->whereDate('arrived_on', '<=', $v))->orderBy('id')->get()
+            ->map(fn ($e) => [$e->quarantineLocation?->name ?? 'Not placed', $e->line->lot->number, $e->line->description, $e->reference, $e->arrived_on->toDateString(), (string) $e->rejected_quantity, (string) $e->damaged_quantity])->all();
+
+        return ['title' => self::TYPES['quarantine'], 'headers' => ['Quarantine location', 'Lot', 'Product', 'Delivery reference', 'Arrived', 'Rejected units', 'of which damaged'], 'rows' => $rows];
     }
 
     /** @return Report */
