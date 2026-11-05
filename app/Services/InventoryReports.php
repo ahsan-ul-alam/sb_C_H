@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\ClientOrder;
 use App\Models\ClientOrderItem;
+use App\Models\StockLocation;
 use App\Models\StockMovement;
 use InvalidArgumentException;
 
@@ -19,6 +20,7 @@ class InventoryReports
         'project-stock' => 'Project-wise stock', 'product-stock' => 'Product-wise stock', 'movements' => 'Stock movements', 'lot-remaining' => 'Lot-wise remaining quantity',
         'valuation' => 'Inventory valuation', 'sales-by-project' => 'Sales by project', 'sales-by-product' => 'Sales by product', 'orders-by-status' => 'Orders by status',
         'returns-damage' => 'Returns and damage', 'reconciliation' => 'Stock versus sales reconciliation',
+        'location-stock' => 'Location-wise stock', 'location-reconciliation' => 'Global stock versus locations',
     ];
 
     /**
@@ -31,6 +33,7 @@ class InventoryReports
             'project-stock' => self::projectStock($f), 'product-stock' => self::productStock($f), 'movements' => self::movements($f), 'lot-remaining' => self::lotRemaining($f),
             'valuation' => self::valuation($f), 'sales-by-project' => self::salesByProject($f), 'sales-by-product' => self::salesByProduct($f), 'orders-by-status' => self::ordersByStatus($f),
             'returns-damage' => self::returnsDamage($f), 'reconciliation' => self::reconciliation($f),
+            'location-stock' => self::locationStock($f), 'location-reconciliation' => self::locationReconciliation($f),
             default => throw new InvalidArgumentException('Unknown report.'),
         };
     }
@@ -127,6 +130,44 @@ class InventoryReports
             })->all();
 
         return ['title' => self::TYPES['orders-by-status'], 'headers' => ['Order', 'Project', 'Date', 'Order status', 'Fulfilment', 'Payment', 'Gross value', 'Delivered value', 'Collected', 'Commission'], 'rows' => $rows];
+    }
+
+    /** @return Report */
+    private static function locationStock(array $f): array
+    {
+        $names = StockLocation::pluck('name', 'id');
+        $rows = [];
+        foreach (ProjectInventory::positions($f)->filter(fn ($r) => $r['own_slice']) as $r) {
+            foreach (StockLocations::balances($r['line']) as $id => $qty) {
+                $rows[] = [$id === '' ? 'Not placed (unverified)' : ($names[(int) $id] ?? '#'.$id), $r['line']->lot->number, $r['line']->description, $r['unit'], $qty];
+            }
+        }
+        usort($rows, fn ($a, $b) => [$a[0], $a[1]] <=> [$b[0], $b[1]]);
+
+        return ['title' => self::TYPES['location-stock'], 'headers' => ['Location', 'Lot', 'Product', 'Unit', 'Units on hand (available + reserved + awaiting inspection)'], 'rows' => $rows];
+    }
+
+    /**
+     * Global on-hand of each line (from the movement ledger) against the sum of its located balances plus its explicitly unplaced balance. Transfers
+     * complete in one step, so nothing is ever in transit between locations. Negative location balances (possible only in data written before location
+     * rules existed) are listed in their own column and never corrected silently.
+     *
+     * @return Report
+     */
+    private static function locationReconciliation(array $f): array
+    {
+        $rows = [];
+        foreach (ProjectInventory::positions($f)->filter(fn ($r) => $r['own_slice']) as $r) {
+            $balances = StockLocations::balances($r['line']);
+            $placed = collect($balances)->reject(fn ($q, $id) => $id === '')->reduce(fn ($c, $q) => bcadd($c, $q, 2), '0.00');
+            $unplaced = $balances[''] ?? '0.00';
+            $global = Inventory::onHand($r['line']);
+            $negative = collect($balances)->filter(fn ($q) => bccomp($q, '0', 2) < 0)->count();
+            $diff = bcsub($global, bcadd($placed, $unplaced, 2), 2);
+            $rows[] = [$r['line']->lot->number, $r['line']->description, $global, $placed, $unplaced, '0.00', $diff, $negative, bccomp($diff, '0', 2) === 0 && $negative === 0 ? 'Reconciled' : 'Investigate'];
+        }
+
+        return ['title' => self::TYPES['location-reconciliation'], 'headers' => ['Lot', 'Product', 'Global on-hand (ledger)', 'In verified locations', 'Explicitly unplaced', 'In transit', 'Difference', 'Negative locations', 'Result'], 'rows' => $rows];
     }
 
     /** @return Report */

@@ -20,7 +20,7 @@
                         <input name="accepted_quantity" size="5" inputmode="decimal" placeholder="accepted" required>
                         <input name="damaged_quantity" size="5" inputmode="decimal" placeholder="damaged">
                         <input type="date" name="arrived_on" max="{{ today()->toDateString() }}" value="{{ today()->toDateString() }}" required>
-                        <select name="stock_location_id"><option value="">Main warehouse</option>@foreach ($locations as $loc)<option value="{{ $loc->id }}">{{ $loc->name }}</option>@endforeach</select>
+                        <select name="stock_location_id" @required($locations->isNotEmpty()) aria-label="Warehouse location">@if ($locations->isEmpty())<option value="">Main warehouse (created on first receipt)</option>@endif @foreach ($locations as $loc)<option value="{{ $loc->id }}">{{ $loc->name }}</option>@endforeach</select>
                         <input name="evidence_reference" size="12" placeholder="evidence / photo ref">
                         <button class="btn btn-primary">Receive</button>
                     </form>

@@ -47,7 +47,10 @@ class Receiving
                 throw new RuntimeException('That would make '.$cumulative.' received against '.$line->quantity.' ordered; only '.bcsub((string) $line->quantity, $already, 2).' are still expected.');
             }
             $acceptedBefore = $line->received_quantity === null ? '0' : (string) $line->usable_quantity;
-            $location = $locationId ? StockLocation::where('is_active', true)->findOrFail($locationId) : StockLocations::default();
+            if (! $locationId && StockLocations::configured()) {
+                throw new RuntimeException('Choose the warehouse location the accepted units were put in.');
+            }
+            $location = $locationId ? StockLocation::where('is_active', true)->findOrFail($locationId) : StockLocations::default(); // the very first receipt sets up the main warehouse
 
             $event = SourcingArrivalEvent::create(['sourcing_lot_line_id' => $line->id, 'reference' => $reference, 'received_quantity' => $received, 'accepted_quantity' => $accepted,
                 'rejected_quantity' => $rejected, 'damaged_quantity' => $damaged, 'arrived_on' => $arrivedOn, 'stock_location_id' => $location->id,

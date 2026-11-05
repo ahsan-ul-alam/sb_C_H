@@ -12,6 +12,7 @@ use App\Services\ProjectInventory;
 use App\Services\Receiving;
 use App\Services\SalesDashboard;
 use App\Services\SalesStatus;
+use App\Services\StockLocations;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
@@ -50,10 +51,10 @@ it('runs the Premium Hoodie lot end to end with exact balances at every step', f
     $user = $s['user'];
 
     // Receiving: 300 arrive (280 accepted, 20 rejected), then 200 (all accepted).
-    Receiving::receive($s['line'], '300', '280', '0', '2026-02-10', null, 'GRN-1', null, null, $user);
+    Receiving::receive($s['line'], '300', '280', '0', '2026-02-10', StockLocations::default()->id, 'GRN-1', null, null, $user);
     expect(hoodieBalances($s))->toBe(['received' => '280.00', 'available' => '280.00', 'reserved' => '0.00', 'dispatched' => '0.00', 'delivered' => '0.00', 'returned' => '0.00', 'damaged' => '0.00'])
         ->and(Receiving::expected($s['line']->refresh()))->toBe('200.00');
-    Receiving::receive($s['line'], '200', '200', '0', '2026-02-10', null, 'GRN-2', null, null, $user);
+    Receiving::receive($s['line'], '200', '200', '0', '2026-02-10', StockLocations::default()->id, 'GRN-2', null, null, $user);
     $line = $s['line']->refresh();
     expect((string) $line->received_quantity)->toBe('500.00')->and((string) $line->usable_quantity)->toBe('480.00')->and(bcsub('500', (string) $line->usable_quantity, 2))->toBe('20.00')
         ->and(hoodieBalances($s)['available'])->toBe('480.00');
@@ -134,7 +135,7 @@ it('runs the Premium Hoodie lot end to end with exact balances at every step', f
 
 it('keeps one client\'s stock from another client\'s order', function () {
     $s = unreceivedLot(SellbeesCompany::boot($this), '50');
-    Receiving::receive($s['line'], '50', '50', '0', '2026-02-10', null, 'GRN-1', null, null, $s['user']);
+    Receiving::receive($s['line'], '50', '50', '0', '2026-02-10', StockLocations::default()->id, 'GRN-1', null, null, $s['user']);
     $s['co']->post('clients', 'sourcing.lots.bill-client', ['project_id' => $s['project']->id], $s['lot'])->assertSessionHasNoErrors();
     $otherProject = $s['co']->project($s['co']->client('Other Client'), 'Other Project');
     $s['co']->post('clients', 'product.orders.store', ['project_id' => $otherProject->id, 'reference' => 'X', 'ordered_on' => '2026-02-10', 'items' => [['product_id' => $s['product']->id, 'quantity' => '5', 'price' => '600']]]);
@@ -145,7 +146,7 @@ it('keeps one client\'s stock from another client\'s order', function () {
 
 it('flags stock without a project, low stock and stale reservations, and never creates anything itself', function () {
     $s = unreceivedLot(SellbeesCompany::boot($this), '100');
-    Receiving::receive($s['line'], '100', '100', '0', '2026-02-10', null, 'GRN-1', null, null, $s['user']);
+    Receiving::receive($s['line'], '100', '100', '0', '2026-02-10', StockLocations::default()->id, 'GRN-1', null, null, $s['user']);
     $s['lot']->update(['project_id' => null]);
     expect(InventoryExceptions::all()->pluck('type'))->toContain('Accepted stock without project attribution');
 
@@ -159,7 +160,7 @@ it('flags stock without a project, low stock and stale reservations, and never c
 it('renders every screen and exports consistent CSV, and enforces permissions', function () {
     $s = unreceivedLot(SellbeesCompany::boot($this), '120');
     $co = $s['co'];
-    Receiving::receive($s['line'], '100', '90', '2', '2026-02-10', null, 'GRN-1', 'photo-77', null, $s['user']);
+    Receiving::receive($s['line'], '100', '90', '2', '2026-02-10', StockLocations::default()->id, 'GRN-1', 'photo-77', null, $s['user']);
     foreach (['stock.overview', 'stock.projects', 'stock.movements', 'stock.receiving', 'stock.reservations', 'stock.transfers', 'stock.exceptions', 'stock.sales', 'stock.reports'] as $route) {
         $co->as('finance')->get(route($route))->assertOk();
     }
@@ -174,11 +175,11 @@ it('renders every screen and exports consistent CSV, and enforces permissions', 
     // Reads need inventory.view; the employee has none, the auditor can read but not receive or transfer.
     $co->as('employee')->get(route('stock.overview'))->assertForbidden();
     $co->as('auditor')->get(route('stock.projects'))->assertOk();
-    $co->post('auditor', 'stock.receive', ['reference' => 'Z', 'received_quantity' => '1', 'accepted_quantity' => '1', 'arrived_on' => '2026-02-10'], $s['line'])->assertForbidden();
+    $co->post('auditor', 'stock.receive', ['reference' => 'Z', 'received_quantity' => '1', 'accepted_quantity' => '1', 'arrived_on' => '2026-02-10', 'stock_location_id' => 1], $s['line'])->assertForbidden();
     $co->post('auditor', 'stock.transfers.store', [], null)->assertForbidden();
 
     // The receiving form shows its validation errors and records nothing on a bad submission.
     $co->post('clients', 'stock.receive', ['reference' => '', 'received_quantity' => 'x', 'accepted_quantity' => '1', 'arrived_on' => '2026-02-10'], $s['line'])->assertSessionHasErrors(['reference', 'received_quantity']);
-    $co->post('clients', 'stock.receive', ['reference' => 'GRN-9', 'received_quantity' => '5', 'accepted_quantity' => '5', 'arrived_on' => '2026-02-10'], $s['line'])->assertSessionHasNoErrors();
+    $co->post('clients', 'stock.receive', ['reference' => 'GRN-9', 'received_quantity' => '5', 'accepted_quantity' => '5', 'arrived_on' => '2026-02-10', 'stock_location_id' => StockLocations::default()->id], $s['line'])->assertSessionHasNoErrors();
     expect(hoodieBalances($s)['available'])->toBe('95.00');
 });

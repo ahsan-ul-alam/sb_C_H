@@ -93,15 +93,21 @@ class Inventory
                     throw new RuntimeException('Not enough stock: '.$line->description.' has '.$now[$bucket].' '.$bucket.' but '.ltrim(bcmul($delta, '-1', 2), '-').' would be taken.');
                 }
             }
-            // An on-hand change is placed where the units are; 0 states "not placed" explicitly (a transfer out of unplaced stock).
-            $locationId = $locationId === 0 ? null : ($locationId ?? StockLocations::locationFor($line, $handoverId, $deltas));
+            // Units that leave the warehouse come out of locations that really hold them (never below zero); one request can therefore become several
+            // movements, one per location, which together carry exactly the requested deltas. The first is returned.
+            $first = null;
             try {
-                return StockMovement::create(['sourcing_lot_line_id' => $line->id, 'client_order_item_id' => $item?->id, 'inventory_handover_id' => $handoverId, 'type' => $type, 'occurred_on' => BusinessDate::today(),
-                    'reason' => $reason, 'move_key' => $key, 'created_by' => $user?->id, 'stock_location_id' => $locationId, 'arrival_event_id' => $arrivalEventId]
-                    + collect($deltas)->mapWithKeys(fn ($v, $k) => ['d_'.$k => $v])->all());
+                foreach (StockLocations::plan($line, $type, $deltas, $item, $locationId) as $i => [$place, $part]) {
+                    $made = StockMovement::create(['sourcing_lot_line_id' => $line->id, 'client_order_item_id' => $item?->id, 'inventory_handover_id' => $handoverId, 'type' => $type, 'occurred_on' => BusinessDate::today(),
+                        'reason' => $reason, 'move_key' => $key && $i > 0 ? $key.'#'.$i : $key, 'created_by' => $user?->id, 'stock_location_id' => $place, 'arrival_event_id' => $arrivalEventId]
+                        + collect($part)->mapWithKeys(fn ($v, $k) => ['d_'.$k => $v])->all());
+                    $first ??= $made;
+                }
             } catch (UniqueConstraintViolationException) {
                 return null;
             }
+
+            return $first;
         });
     }
 
@@ -114,6 +120,9 @@ class Inventory
         }
         $have = (string) StockMovement::where('sourcing_lot_line_id', $line->id)->where('type', 'receipt')->sum('d_available');
         $delta = bcsub((string) $line->usable_quantity, bcadd($have, '0', 2), 2);
+        if (bccomp($delta, '0', 2) > 0 && $locationId === null && StockLocations::configured()) {
+            throw new RuntimeException('Warehouse locations are set up, so the arrival must name the location the accepted units were put in (use Inventory → Receiving).');
+        }
         if (bccomp($delta, '0', 2) !== 0) {
             self::move($line, 'receipt', ['available' => $delta], null, null, $user, 'Arrival recorded: accepted '.$line->usable_quantity.' of '.$line->quantity.' ordered', null, $locationId, $arrivalEventId);
         }

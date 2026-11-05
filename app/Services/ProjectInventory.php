@@ -67,7 +67,8 @@ class ProjectInventory
     private static function row(SourcingLotLine $line, ?InventoryHandover $h, string $attribution, $project, array $shared, string $ownership, Collection $locationNames): array
     {
         $b = Inventory::sliceBalances($line, $h?->id);
-        $locations = collect(StockLocations::slice($line, $h?->id))->filter(fn ($q) => bccomp($q, '0', 2) !== 0)
+        // Physical places are a property of the line's units, whoever holds them, so they are shown once, on the line's own row.
+        $locations = collect($h === null ? StockLocations::balances($line) : [])
             ->mapWithKeys(fn ($q, $id) => [$id === '' ? 'Not placed' : ($locationNames[(int) $id] ?? '#'.$id) => $q])->all();
         $valued = $h === null && $ownership === 'sellbees' && InventoryEngine::isValued($line->lot);
         $figures = $valued ? InventoryValuation::lineFigures($line) : null;
@@ -98,7 +99,7 @@ class ProjectInventory
         if (($f['ownership'] ?? null) && $r['ownership'] !== $f['ownership']) {
             return false;
         }
-        if (($f['location'] ?? null) && ! collect(StockLocations::slice($r['line'], $r['handover']?->id))->filter(fn ($q, $id) => (int) $id === (int) $f['location'] && bccomp($q, '0', 2) > 0)->isNotEmpty()) {
+        if (($f['location'] ?? null) && (! $r['own_slice'] || bccomp(StockLocations::onHandAt($r['line'], (int) $f['location']), '0', 2) <= 0)) {
             return false;
         }
         $available = $r['b']['available'];

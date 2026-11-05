@@ -81,9 +81,10 @@ class InventoryExceptions
         $positions = ProjectInventory::positions();
 
         return StockThreshold::with(['product', 'project', 'location'])->get()->map(function (StockThreshold $t) use ($positions) {
-            $rows = $positions->filter(fn ($r) => $r['line']->supplier_product_id === $t->supplier_product_id && (! $t->project_id || $r['project']?->id === $t->project_id));
+            $rows = $positions->filter(fn ($r) => $r['line']->supplier_product_id === $t->supplier_product_id && (! $t->project_id || $r['project']?->id === $t->project_id)
+                && (! $t->stock_location_id || $r['own_slice']));
             $qty = $rows->reduce(function ($c, $r) use ($t) {
-                $q = $t->stock_location_id ? (StockLocations::slice($r['line'], $r['handover']?->id)[(string) $t->stock_location_id] ?? '0') : $r['b']['available'];
+                $q = $t->stock_location_id ? StockLocations::onHandAt($r['line'], $t->stock_location_id) : $r['b']['available'];
 
                 return bcadd($c, $q, 2);
             }, '0');
