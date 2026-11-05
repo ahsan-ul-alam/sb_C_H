@@ -3,6 +3,7 @@
 use App\Models\AdvanceSettlement;
 use App\Models\CapitalEntry;
 use App\Models\Expense;
+use App\Models\FinancialAccount;
 use App\Models\InventoryHandover;
 use App\Models\LoanReceivable;
 use App\Models\LoanReceivableRepayment;
@@ -25,6 +26,7 @@ use App\Services\PayoutService;
 use App\Services\SourcingPayments;
 use App\Services\SupplierReturnService;
 use Illuminate\Contracts\Console\Kernel;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /*
@@ -36,6 +38,10 @@ use Illuminate\Support\Facades\DB;
 require dirname(__DIR__, 2).'/vendor/autoload.php';
 $app = require dirname(__DIR__, 2).'/bootstrap/app.php';
 $app->make(Kernel::class)->bootstrap();
+// The test process fixes its clock (Carbon::setTestNow); the workers are separate processes, so they take the same date from the environment.
+if ($now = getenv('CC_TEST_NOW')) {
+    Carbon::setTestNow($now);
+}
 
 require_once __DIR__.'/helpers.php';
 if ($problem = disposableDatabaseProblem()) {
@@ -110,7 +116,7 @@ try {
         'payment' => (function () use ($args) {
             $project = Project::findOrFail($args['project']);
 
-            return app(PaymentRecorder::class)->save(new Payment, $project, null, ['amount' => $args['amount'], 'paid_on' => $args['date'], 'method' => 'cash', 'idempotency_key' => $args['key']], null, $project->segments()->first()) !== null;
+            return app(PaymentRecorder::class)->save(new Payment, $project, null, ['amount' => $args['amount'], 'paid_on' => $args['date'], 'method' => 'cash', 'financial_account_id' => FinancialAccount::where('is_default', true)->value('id'), 'idempotency_key' => $args['key']], null, $project->segments()->first()) !== null;
         })(),
     };
     echo json_encode(['ok' => true, 'recorded' => $result]);

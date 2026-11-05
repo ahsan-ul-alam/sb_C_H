@@ -36,7 +36,7 @@ return new class extends Migration
                 $table->foreignId('order_collection_id')->constrained()->restrictOnDelete();
                 $table->unsignedBigInteger('amount');
                 $table->timestamps();
-                $table->unique(['order_refund_id', 'order_collection_id']);
+                $table->unique(['order_refund_id', 'order_collection_id'], 'refund_alloc_refund_collection_unique'); // the generated name would exceed MySQL's 64-character limit
             });
         }
         if (! Schema::hasTable('commission_adjustments')) {

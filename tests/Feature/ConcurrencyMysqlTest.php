@@ -99,7 +99,7 @@ function ccRun(string|array $operation, int $count, callable $argsFor): array
         $args = json_encode(['user' => test()->co->users['finance']->id, ...$argsFor($i), 'start' => $start]);
         // One operation for every worker, or a list with one operation per worker to race different operations against each other.
         $cmd = [PHP_BINARY, __DIR__.'/../Support/concurrency_worker.php', is_array($operation) ? $operation[$i] : $operation, $args];
-        $procs[$i] = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes[$i], null, [...getenv(), 'FINANCE_REALTIME_FROM' => '2026-11-01',
+        $procs[$i] = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes[$i], null, [...getenv(), 'CC_TEST_NOW' => '2026-11-10', 'FINANCE_REALTIME_FROM' => '2026-11-01',
             'FINANCE_SOURCING_BASIS' => 'accrual', 'FINANCE_SOURCING_ACCRUAL_FROM' => '2026-11-01', 'FINANCE_SOURCING_RECOGNITION' => 'lot_completed']);
     }
     $results = [];
