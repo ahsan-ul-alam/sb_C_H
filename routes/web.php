@@ -46,6 +46,7 @@ use App\Http\Controllers\SettingsController;
 use App\Http\Controllers\SourcingLotController;
 use App\Http\Controllers\SourcingReportController;
 use App\Http\Controllers\StatementController;
+use App\Http\Controllers\StockOperationsController;
 use App\Http\Controllers\SupplierAdvanceController;
 use App\Http\Controllers\SupplierController;
 use App\Http\Controllers\SupplierProductController;
@@ -244,6 +245,29 @@ Route::middleware('auth')->group(function () {
             Route::get('settlements/{client}', [ProductOperationsController::class, 'settlementShow'])->name('settlements.show');
         });
         Route::post('settlements/{client}', [ProductOperationsController::class, 'settlementStore'])->name('settlements.store')->middleware('can:settlement.record');
+    });
+
+    // Advanced inventory and sales screens. Reading needs inventory.view; receiving needs sourcing.manage (as the arrival it extends); transfers, locations and
+    // low-stock levels need inventory.adjust. Nothing here edits a stock balance: every write is a recorded arrival, transfer or the existing order steps.
+    Route::middleware('can:inventory.view')->prefix('stock')->name('stock.')->group(function () {
+        Route::get('/', [StockOperationsController::class, 'overview'])->name('overview');
+        Route::get('projects', [StockOperationsController::class, 'projects'])->name('projects');
+        Route::get('movements', [StockOperationsController::class, 'movements'])->name('movements');
+        Route::get('receiving', [StockOperationsController::class, 'receiving'])->name('receiving');
+        Route::post('receiving/{line}', [StockOperationsController::class, 'receive'])->name('receive')->middleware('can:sourcing.manage')->whereNumber('line');
+        Route::get('reservations', [StockOperationsController::class, 'reservations'])->name('reservations');
+        Route::get('transfers', [StockOperationsController::class, 'transfers'])->name('transfers');
+        Route::middleware('can:inventory.adjust')->group(function () {
+            Route::post('locations', [StockOperationsController::class, 'locationStore'])->name('locations.store');
+            Route::post('transfers', [StockOperationsController::class, 'transferStore'])->name('transfers.store');
+            Route::post('transfers/{transfer}/complete', [StockOperationsController::class, 'transferComplete'])->name('transfers.complete');
+            Route::post('transfers/{transfer}/cancel', [StockOperationsController::class, 'transferCancel'])->name('transfers.cancel');
+            Route::post('thresholds', [StockOperationsController::class, 'thresholdStore'])->name('thresholds.store');
+        });
+        Route::get('exceptions', [StockOperationsController::class, 'exceptions'])->name('exceptions');
+        Route::get('sales', [StockOperationsController::class, 'sales'])->name('sales');
+        Route::get('reports', [StockOperationsController::class, 'reports'])->name('reports');
+        Route::get('reports/{type}', [StockOperationsController::class, 'report'])->name('report');
     });
 
     Route::middleware('can:users.manage')->group(function () {
