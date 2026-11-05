@@ -91,14 +91,22 @@ class InventoryEngine
             if (trim($classificationSource) === '') {
                 throw new RuntimeException('State the evidence for the ownership classification (contract, resolution or signed delivery note).');
             }
-            if (InventoryEngineEnrolment::where('sourcing_lot_id', $lot->id)->exists()) {
-                throw new RuntimeException('This lot already has an enrolment proposal.');
+            $existing = InventoryEngineEnrolment::where('sourcing_lot_id', $lot->id)->lockForUpdate()->first();
+            if ($existing && $existing->status !== 'rejected') {
+                throw new RuntimeException('This lot already has an enrolment ('.$existing->status.').');
             }
             if ($reasons = self::ineligibility($lot, $ownership)) {
                 throw new RuntimeException($reasons[0]);
             }
             self::assertDate($effectiveOn);
 
+            if ($existing) { // a rejected proposal can be made again with better evidence; the earlier decisions stay in the audit log
+                $existing->update(['ownership' => $ownership, 'classification_source' => trim($classificationSource), 'effective_on' => $effectiveOn, 'status' => 'pending',
+                    'prepared_by' => $user->id, 'approved_by' => null, 'approved_at' => null, 'decision_note' => null]);
+                Audit::log('inventory.engine_reproposed', 'lot '.$lot->number, $ownership.' from '.$effectiveOn.': '.$existing->classification_source);
+
+                return $existing->refresh();
+            }
             $enrolment = InventoryEngineEnrolment::create(['sourcing_lot_id' => $lot->id, 'ownership' => $ownership, 'classification_source' => trim($classificationSource),
                 'effective_on' => $effectiveOn, 'prepared_by' => $user->id]);
             Audit::log('inventory.engine_proposed', 'lot '.$lot->number, $ownership.' from '.$effectiveOn.': '.$enrolment->classification_source);
@@ -136,7 +144,7 @@ class InventoryEngine
                 }
             }
             $enrolment->update(['status' => $approve ? 'approved' : 'rejected', 'approved_by' => $user->id, 'approved_at' => now(), 'decision_note' => trim((string) $note) ?: null]);
-            Audit::log('inventory.engine_'.($approve ? 'approved' : 'rejected'), 'lot '.$lot->number, $enrolment->ownership.' from '.$enrolment->effective_on->toDateString());
+            Audit::log('inventory.engine_'.($approve ? 'approved' : 'rejected'), 'lot '.$lot->number, $enrolment->ownership.' from '.$enrolment->effective_on->toDateString().(trim((string) $note) !== '' ? ': '.trim($note) : ''));
             if ($approve && $enrolment->ownership === 'company') {
                 InventoryValuation::syncLot($lot->id);
             }

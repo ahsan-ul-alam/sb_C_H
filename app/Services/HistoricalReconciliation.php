@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\AccountingPeriod;
 use App\Models\AccountStatement;
+use App\Models\Document;
 use App\Models\Expense;
 use App\Models\FinancialAccount;
 use App\Models\JournalEntry;
@@ -12,6 +13,7 @@ use App\Models\Payment;
 use App\Models\ReceiptClassification;
 use App\Models\ReceiptReview;
 use App\Models\SourcingLot;
+use Carbon\CarbonImmutable;
 use Illuminate\Support\Collection;
 
 /**
@@ -111,11 +113,61 @@ class HistoricalReconciliation
                 : 'The existing opening cash allocation cannot be used: it refuses a zero or negative unassigned balance. It becomes available only after receipts reach the ledger (period close or real-time posting) and the balance is positive; no balancing entry is made in the meantime.'];
     }
 
-    /** @return Collection<int, array{lot: SourcingLot, evidence: list<array{label: string, met: bool, detail: string}>, request: mixed}> */
+    /** @return Collection<int, array{lot: SourcingLot, evidence: list<array{label: string, met: bool, detail: string}>, request: mixed, documents: Collection}> */
     public static function unresolvedLots(): Collection
     {
         return SourcingLot::whereNull('ownership')->where('status', '!=', 'cancelled')->get()->map(fn (SourcingLot $lot) => ['lot' => $lot, 'evidence' => OwnershipRequests::evidence($lot),
-            'request' => $lot->ownershipRequests()->latest('id')->first()]);
+            'request' => $lot->ownershipRequests()->latest('id')->first(), 'documents' => Document::where('subject_type', 'sourcing_lot')->where('subject_id', $lot->id)->orderBy('id')->get()]);
+    }
+
+    /**
+     * The safe order for getting the historical receipts into the ledger and the cash into real accounts, under the cutover policy. Each step is derived from the data,
+     * so it cannot be ticked by hand. Nothing here closes a month, posts an entry or sets a flag: steps marked "operator" are decisions for a person.
+     *
+     * @return list<array{n: int, title: string, state: string, note: string}> state: done | next | waiting | operator
+     */
+    public static function cutoverSequence(): array
+    {
+        $receipts = self::receipts();
+        $requirements = collect(self::accountRequirements());
+        $cashNeeded = Payment::where('method', 'cash')->exists();
+        $required = $requirements->filter(fn ($r) => $r['type'] !== 'cash' || $cashNeeded);
+        $activeAccounts = FinancialAccount::where('is_active', true)->where('activation_status', 'active')->get();
+        $lastClosed = AccountingPeriod::max('month');
+        $earliest = $lastClosed ? CarbonImmutable::createFromFormat('Y-m', $lastClosed)->addMonth()->format('Y-m') : null;
+        $configured = config('finance.realtime_from') ? CarbonImmutable::parse((string) config('finance.realtime_from'))->format('Y-m') : null;
+        $months = $receipts->map(fn ($r) => $r['payment']->paid_on->format('Y-m'))->unique()->sort()->values();
+        $blockedMonths = $months->filter(fn ($m) => FinancialCompleteness::blockersForMonth($m) !== [])->values()->all();
+        $cash = self::cashPosition();
+        $unresolvedLots = SourcingLot::whereNull('ownership')->where('status', '!=', 'cancelled')->count();
+
+        $steps = [
+            ['Prepare, confirm and activate the bKash, Bank Account and (if physical cash was used) Cash in Hand accounts', $required->every(fn ($r) => $r['state'] === 'active'),
+                $required->where('state', '!=', 'active')->count().' of '.$required->count().' required account(s) are not active yet. Each needs its real identity, an opening date and a verified statement.'],
+            ['Record and verify an opening statement for every active account', $activeAccounts->isNotEmpty() && $activeAccounts->every(fn ($a) => AccountStatement::where('financial_account_id', $a->id)->where('status', 'verified')->exists()),
+                'A ledger balance is only a calculation; a verified, referenced statement is what makes an account\'s cash verified.'],
+            ['Record the owner\'s confirmation of each receipt and approve its classification', $receipts->isNotEmpty() && $receipts->every(fn ($r) => in_array($r['classification'], ['approved', 'applied'], true)),
+                $receipts->whereNotIn('classification', ['approved', 'applied'])->count().' of '.$receipts->count().' receipt(s) are not yet approved.'],
+            ['Reconcile product-sourcing receipts to their sourcing records and supplier cost', $receipts->where('awaiting_supplier_cost', true)->isEmpty() && $receipts->where('nature', 'product_sourcing')->isNotEmpty(),
+                $receipts->where('awaiting_supplier_cost', true)->count().' receipt(s) wait for a sourcing record and supplier cost; until then their month cannot be closed or verified.'],
+            ['Settle lot ownership with evidence and approval', $unresolvedLots === 0, $unresolvedLots.' lot(s) have an unknown owner; ownership-dependent actions stay blocked for them.'],
+        ];
+        $out = [];
+        $nextFound = false;
+        foreach ($steps as $i => [$title, $done, $note]) {
+            $state = $done ? 'done' : (! $nextFound ? 'next' : 'waiting');
+            $nextFound = $nextFound || ! $done;
+            $out[] = ['n' => $i + 1, 'title' => $title, 'state' => $state, 'note' => $note];
+        }
+        $allDone = collect($out)->every(fn ($s) => $s['state'] === 'done');
+        $out[] = ['n' => 6, 'title' => 'Decide the real-time cutover month (operator)', 'state' => $allDone ? 'operator' : 'waiting',
+            'note' => 'Earliest permitted: '.($earliest ?? 'any month').($lastClosed ? ' (the month after the last closed month, '.$lastClosed.')' : '').'. Currently set: '.($configured ?? 'not set').'. Setting it is a deliberate flag change made by the operator; this screen never does it.'];
+        $out[] = ['n' => 7, 'title' => 'Run finance:backfill-realtime as a dry run, review it, then --apply (operator)', 'state' => $allDone ? 'operator' : 'waiting',
+            'note' => 'Posts the receipts already recorded from the cutover month onward, once each; a repeat posts nothing. Months before the cutover are posted at close instead, never both. Do not close a month only to post receipts.'.($blockedMonths ? ' Months with unresolved completeness blockers: '.implode(', ', $blockedMonths).'.' : '')];
+        $out[] = ['n' => 8, 'title' => 'Allocate the opening cash to the real accounts (existing workflow, Board approval)', 'state' => $cash['allocation_possible'] ? 'operator' : 'waiting',
+            'note' => $cash['allocation_possible'] ? 'Possible now: enter the real balance of each account; it must equal the whole verified unassigned balance.' : 'Not possible while the unassigned balance is zero or negative ('.number_format($cash['unassigned'] / 100, 2).'); it opens only after receipts reach the ledger. Nothing is forced.'];
+
+        return $out;
     }
 
     /** @return array<string, int> */

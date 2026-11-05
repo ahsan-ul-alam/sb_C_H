@@ -19,6 +19,7 @@ use App\Http\Controllers\FinancialOverviewController;
 use App\Http\Controllers\FinancialStatementsController;
 use App\Http\Controllers\HistoricalReconciliationController;
 use App\Http\Controllers\HomeController;
+use App\Http\Controllers\InventoryEnrolmentController;
 use App\Http\Controllers\InventoryHandoverController;
 use App\Http\Controllers\InventoryLossController;
 use App\Http\Controllers\InvoiceController;
@@ -183,6 +184,11 @@ Route::middleware('auth')->group(function () {
 
         // Client handover (transfer of control): the event that turns Sellbees-owned inventory into cost of goods sold. Reading needs inventory.view, a request
         // inventory.handover.propose, and a decision the Board's inventory.handover.approve (never the person who made the request).
+        // Inventory enrolment: Finance requests (sourcing.manage), an independent Board member decides (sourcing.advance.approve, the engine's own rule).
+        Route::get('enrolment', [InventoryEnrolmentController::class, 'index'])->name('enrolment');
+        Route::post('lots/{lot}/enrolment', [InventoryEnrolmentController::class, 'store'])->name('enrolment.store')->middleware('can:sourcing.manage');
+        Route::post('enrolments/{enrolment}/decide', [InventoryEnrolmentController::class, 'decide'])->name('enrolment.decide')->middleware('can:sourcing.advance.approve');
+
         Route::get('handovers', [InventoryHandoverController::class, 'index'])->name('handovers')->middleware('can:inventory.view');
         Route::get('handovers/{handover}', [InventoryHandoverController::class, 'show'])->name('handovers.show')->middleware('can:inventory.view')->whereNumber('handover');
         Route::post('handovers', [InventoryHandoverController::class, 'store'])->name('handovers.store')->middleware('can:inventory.handover.propose');

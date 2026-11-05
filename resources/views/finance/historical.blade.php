@@ -16,6 +16,15 @@
         <div class="metric"><div class="label">Historical cash exception</div><div class="value">{{ $summary['historical_cash_exception'] ? 'Open' : 'None' }}</div></div>
     </div>
 
+    <section class="panel"><div class="panel-head"><h2>Safe posting and allocation sequence</h2><span class="sub">Derived from the data; each step needs the one before it. Nothing here closes a month or changes a flag.</span></div>
+        <div class="panel-body"><ol style="margin:0; padding-left:1.2rem">
+        @foreach ($sequence as $s)
+            <li style="margin-bottom:.5rem"><strong>{{ $s['title'] }}</strong>
+                <span class="badge {{ $s['state'] === 'done' ? 'badge-paid' : ($s['state'] === 'next' ? 'badge-partial' : ($s['state'] === 'operator' ? 'badge-archived' : 'badge-unpaid')) }}">{{ $s['state'] === 'next' ? 'next' : ($s['state'] === 'operator' ? 'operator decision' : $s['state']) }}</span>
+                <div class="muted">{{ $s['note'] }}</div></li>
+        @endforeach
+        </ol></div></section>
+
     <section class="panel"><div class="panel-head"><h2>1. Financial accounts to prepare</h2><span class="sub">No account number, opening balance or historical entry is assumed.</span></div><div class="table-wrap"><table class="table table-min-760">
         <thead><tr><th>Account</th><th>State</th><th>What is needed</th><th>Actions</th></tr></thead><tbody>
         @foreach ($requirements as $r)
@@ -107,7 +116,12 @@
             <div class="panel-body" style="border-top:1px solid var(--border)">
                 <h3><a href="{{ route('sourcing.lots.show', $lot) }}">{{ $lot->number }}</a> {{ $lot->title }}</h3>
                 <ul>@foreach ($row['evidence'] as $e)<li>{{ $e['met'] ? '✓' : '✗' }} {{ $e['label'] }} <span class="muted">— {{ $e['detail'] }}</span></li>@endforeach</ul>
-                <p class="muted">Upload supporting documents under the lot's Receiving &amp; documents tab. Ownership is irreversible, so it needs evidence and a second person's approval.</p>
+                <p class="muted">Ownership is irreversible, so it needs evidence and a second person's approval. Documents uploaded here are kept on the lot for the approver to review.</p>
+                @if ($row['documents']->isNotEmpty())<ul>@foreach ($row['documents'] as $doc)<li><a href="{{ route('sourcing.documents.download', $doc) }}">{{ $doc->name }}</a> <span class="muted">uploaded {{ $doc->created_at->format('j M Y') }}</span></li>@endforeach</ul>@endif
+                @can('sourcing.manage')
+                <form method="POST" action="{{ route('sourcing.lots.documents.store', $lot) }}" enctype="multipart/form-data" class="inline-form">@csrf
+                    <input name="name" size="22" placeholder="what is this document?" required><input type="file" name="file" accept=".pdf,.jpg,.jpeg,.png" required><button class="btn btn-sm">Upload evidence</button></form>
+                @endcan
                 @php($req = $row['request'])
                 @if ($req && $req->status === 'pending')
                     <p>Request pending: <strong>{{ $req->proposed_ownership === 'company' ? 'Sellbees-owned' : 'Client-owned' }}</strong> — {{ $req->evidence_note }}</p>

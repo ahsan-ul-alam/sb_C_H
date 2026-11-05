@@ -29,7 +29,7 @@ class HistoricalReconciliationController extends Controller
         $receipts = HistoricalReconciliation::receipts();
 
         return view('finance.historical', ['requirements' => HistoricalReconciliation::accountRequirements(), 'receipts' => $receipts, 'summary' => HistoricalReconciliation::summary($receipts),
-            'cashLines' => HistoricalReconciliation::cashLines(), 'cash' => HistoricalReconciliation::cashPosition(), 'lots' => HistoricalReconciliation::unresolvedLots(),
+            'sequence' => HistoricalReconciliation::cutoverSequence(), 'cashLines' => HistoricalReconciliation::cashLines(), 'cash' => HistoricalReconciliation::cashPosition(), 'lots' => HistoricalReconciliation::unresolvedLots(),
             'voids' => ReconciliationExceptions::voidedPayments(), 'exceptions' => ReconciliationException::orderBy('status')->orderBy('id')->get(), 'natures' => ReceiptReviews::NATURES,
             'projects' => Project::with('client:id,name')->orderBy('name')->get(['id', 'name', 'client_id']), 'accountTypes' => FinancialAccount::TYPES]);
     }

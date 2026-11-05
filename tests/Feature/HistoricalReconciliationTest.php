@@ -15,7 +15,9 @@ use App\Services\HistoricalReconciliation;
 use App\Services\ReconciliationExceptions;
 use App\Services\StatementReconciliationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Storage;
 use Tests\Support\SellbeesCompany;
 
 require_once __DIR__.'/../Support/helpers.php';
@@ -193,4 +195,36 @@ it('shows the screen to finance staff and auditors, never to employees, and show
     $co->as('employee')->get(route('finance.historical'))->assertForbidden();
     $co->post('auditor', 'finance.historical.accounts.prepare', ['type' => 'bank', 'name' => 'Bank Account'])->assertForbidden();
     expect(FinancialAccount::count())->toBe(0);
+});
+
+it('derives the posting and allocation sequence from the data and never completes a step for anyone', function () {
+    $h = historicalCompany($this);
+    $co = $h['co'];
+    $steps = collect(HistoricalReconciliation::cutoverSequence());
+    expect($steps->take(5)->pluck('state')->all())->toBe(['next', 'waiting', 'waiting', 'waiting', 'done'])                       // no lots, so ownership is trivially settled
+        ->and($steps->firstWhere('n', 6)['state'])->toBe('waiting')->and($steps->firstWhere('n', 8)['note'])->toContain('Nothing is forced');
+    expect($steps->firstWhere('n', 1)['note'])->toContain('required account');
+
+    $journals = JournalEntry::count();
+    proposeBoth($h);
+    $co->post('board', 'finance.historical.receipts.review', [], ReceiptReview::where('payment_id', $h['service']->id)->firstOrFail());
+    $co->post('board2', 'finance.historical.receipts.approve', [], ReceiptReview::where('payment_id', $h['service']->id)->firstOrFail());
+    $steps = collect(HistoricalReconciliation::cutoverSequence());
+    expect($steps->firstWhere('n', 1)['state'])->toBe('next')->and($steps->firstWhere('n', 3)['state'])->toBe('waiting')       // an earlier step still gates it
+        ->and($steps->firstWhere('n', 3)['note'])->toContain('1 of 2');                                                           // one approved, one still proposed
+    expect(JournalEntry::count())->toBe($journals);
+    $co->as('finance')->get(route('finance.historical'))->assertOk()->assertSee('Safe posting and allocation sequence')->assertSee('finance:backfill-realtime')->assertSee('Do not close a month only to post receipts');
+});
+
+it('lets authorised staff upload ownership evidence from the workbench, shows it for review, and still sets no owner', function () {
+    Storage::fake();
+    $h = historicalCompany($this);
+    $co = $h['co'];
+    $lot = SourcingLot::create(['number' => 'SL-000098', 'title' => 'Hoodie Rivo', 'status' => 'draft', 'created_by' => $co->users['finance']->id]);
+    $co->as('finance')->get(route('finance.historical'))->assertOk()->assertSee('Upload evidence')->assertSee('SL-000098');
+    $co->post('finance', 'sourcing.lots.documents.store', ['name' => 'Signed order', 'file' => UploadedFile::fake()->createWithContent('order.pdf', '%PDF-1.4 order')], $lot)->assertSessionHasNoErrors();
+    $co->post('auditor', 'sourcing.lots.documents.store', ['name' => 'x', 'file' => UploadedFile::fake()->createWithContent('x.pdf', '%PDF-1.4 x')], $lot)->assertForbidden();
+    $co->as('finance')->get(route('finance.historical'))->assertSee('Signed order');
+    expect(Document::where('subject_type', 'sourcing_lot')->where('subject_id', $lot->id)->count())->toBe(1)->and($lot->refresh()->ownership)->toBeNull();
+    $co->as('auditor')->get(route('finance.historical'))->assertOk()->assertDontSee('Upload evidence');
 });

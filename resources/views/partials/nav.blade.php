@@ -21,6 +21,7 @@
             ['Supplier Payments', 'sourcing.payments.index', 'sourcing.view', 'wallet', ['sourcing.payments.*']],
             ['Sourcing Reports', 'sourcing.reports', 'sourcing.reports', 'chart', ['sourcing.reports']],
             ['Supplier Advances', 'sourcing.advances', 'sourcing.reports', 'wallet', ['sourcing.advances*', 'sourcing.cost-recognitions*']],
+            ['Inventory Enrolment', 'sourcing.enrolment', 'sourcing.view', 'check-circle', ['sourcing.enrolment*']],
             ['Client Handovers', 'sourcing.handovers', 'inventory.view', 'layers', ['sourcing.handovers*']],
             ['Damage & Write-offs', 'sourcing.losses', 'inventory.view', 'layers', ['sourcing.losses*']],
             ['Supplier Returns', 'sourcing.supplier-returns', 'inventory.view', 'wallet', ['sourcing.supplier-returns*']],
