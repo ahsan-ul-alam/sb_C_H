@@ -20,6 +20,12 @@ class StockMovement extends Model
         return $this->belongsTo(SourcingLotLine::class, 'sourcing_lot_line_id');
     }
 
+    /** @return BelongsTo<StockLocation, $this> */
+    public function location(): BelongsTo
+    {
+        return $this->belongsTo(StockLocation::class, 'stock_location_id');
+    }
+
     /** @return BelongsTo<User, $this> */
     public function creator(): BelongsTo
     {
