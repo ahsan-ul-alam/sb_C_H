@@ -7,6 +7,7 @@ use App\Models\Client;
 use App\Models\ClientOrder;
 use App\Models\ClientOrderItem;
 use App\Models\FinancialAccount;
+use App\Models\OrderRefund;
 use App\Models\Project;
 use App\Models\SourcingLot;
 use App\Models\SourcingLotLine;
@@ -17,6 +18,7 @@ use App\Services\Audit;
 use App\Services\ClientSettlementService;
 use App\Services\Inventory;
 use App\Services\OrderFulfilment;
+use App\Services\OrderRefunds;
 use App\Services\StorageBilling;
 use App\Support\BusinessDate;
 use App\Support\Money;
@@ -202,6 +204,44 @@ class ProductOperationsController extends Controller
             $saved = OrderFulfilment::collect($order, Money::toMinor($data['amount']), $data['collected_on'], $data['reference'] ?? null, $data['idempotency_key'], $data['financial_account_id'] ?? null, $request->user());
             session()->flash($saved ? 'status' : 'warning', $saved ? 'Collection recorded: the money is held for the client.' : 'That collection was already recorded; nothing was duplicated.');
         }, 'Done.');
+    }
+
+    // ───────────── customer refunds ─────────────
+
+    public function refunds(): View
+    {
+        return view('product.refunds', ['refunds' => OrderRefund::with(['order.project.client', 'requester'])->latest('id')->limit(100)->get(), 'accounts' => FinancialAccount::where('is_active', true)->orderBy('name')->get(),
+            'refundable' => ClientOrder::where('fulfilment', 'stock')->where('delivery_status', 'delivered')->with(['collections', 'project.client'])->latest('id')->get()
+                ->map(fn ($o) => ['order' => $o, 'left' => OrderRefunds::refundable($o)])->filter(fn ($r) => $r['left'] > 0)->values()]);
+    }
+
+    public function refundStore(Request $request, ClientOrder $order): RedirectResponse
+    {
+        $d = $request->validate(['amount' => ['required', 'regex:'.Money::AMOUNT_REGEX], 'kind' => ['required', Rule::in(['return', 'no_return'])], 'reason' => ['required', 'string', 'max:255']]);
+
+        return $this->attempt(fn () => OrderRefunds::request($order, Money::toMinor($d['amount']), $d['kind'], $d['reason'], $request->user()), 'Refund requested. Someone else must approve it before it can be paid.');
+    }
+
+    public function refundDecide(Request $request, OrderRefund $refund): RedirectResponse
+    {
+        $d = $request->validate(['decision' => ['required', Rule::in(['approve', 'reject'])], 'note' => ['nullable', 'string', 'max:255']]);
+
+        return $this->attempt(fn () => OrderRefunds::decide($refund, $d['decision'] === 'approve', $d['note'] ?? null, $request->user()), 'Decision recorded.');
+    }
+
+    public function refundPay(Request $request, OrderRefund $refund): RedirectResponse
+    {
+        $d = $request->validate(['paid_on' => ['required', 'date', 'before_or_equal:today'], 'reference' => ['required', 'string', 'max:255'], 'financial_account_id' => ['required', 'exists:financial_accounts,id'], 'idempotency_key' => ['required', 'uuid']]);
+
+        return $this->attempt(function () use ($refund, $d, $request) {
+            $saved = OrderRefunds::pay($refund, $d['paid_on'], (int) $d['financial_account_id'], $d['reference'], $d['idempotency_key'], $request->user());
+            session()->flash($saved ? 'status' : 'warning', $saved ? 'Refund payment recorded against the money held for the client.' : 'That refund payment was already recorded; nothing was duplicated.');
+        }, 'Done.');
+    }
+
+    public function refundCancel(OrderRefund $refund): RedirectResponse
+    {
+        return $this->attempt(fn () => OrderRefunds::cancel($refund), 'Refund cancelled.');
     }
 
     // ───────────── client settlements ─────────────

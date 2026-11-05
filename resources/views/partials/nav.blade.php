@@ -40,6 +40,7 @@
         'Product Operations' => [
             ['Product Inventory', 'product.inventory', 'inventory.view', 'layers', ['product.inventory*']],
             ['Orders & Delivery', 'product.orders', 'inventory.view', 'invoice', ['product.orders*']],
+            ['Customer Refunds', 'product.refunds', 'inventory.view', 'wallet', ['product.refunds*']],
             ['Client Settlements', 'product.settlements', 'settlement.view', 'wallet', ['product.settlements*']],
         ],
         'Finance' => [

@@ -239,6 +239,11 @@ Route::middleware('auth')->group(function () {
             Route::post('order-items/{item}/inspect', [ProductOperationsController::class, 'itemInspect'])->name('items.inspect');
         });
         Route::post('orders/{order}/collect', [ProductOperationsController::class, 'orderCollect'])->name('orders.collect')->middleware('can:collection.record');
+        Route::get('refunds', [ProductOperationsController::class, 'refunds'])->name('refunds');
+        Route::post('orders/{order}/refunds', [ProductOperationsController::class, 'refundStore'])->name('refunds.store')->middleware('can:orders.manage');
+        Route::post('refunds/{refund}/cancel', [ProductOperationsController::class, 'refundCancel'])->name('refunds.cancel')->middleware('can:orders.manage');
+        Route::post('refunds/{refund}/decide', [ProductOperationsController::class, 'refundDecide'])->name('refunds.decide')->middleware('can:order.refund.approve');
+        Route::post('refunds/{refund}/pay', [ProductOperationsController::class, 'refundPay'])->name('refunds.pay')->middleware('can:settlement.record');
 
         Route::middleware('can:settlement.view')->group(function () {
             Route::get('settlements', [ProductOperationsController::class, 'settlements'])->name('settlements');

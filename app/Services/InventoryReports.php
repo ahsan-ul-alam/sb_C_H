@@ -23,7 +23,7 @@ class InventoryReports
         'valuation' => 'Inventory valuation', 'sales-by-project' => 'Sales by project', 'sales-by-product' => 'Sales by product', 'orders-by-status' => 'Orders by status',
         'returns-damage' => 'Returns and damage', 'reconciliation' => 'Stock versus sales reconciliation',
         'location-stock' => 'Location-wise stock', 'location-reconciliation' => 'Global stock versus locations',
-        'sales-by-channel' => 'Sales by channel', 'discounts' => 'Discounts given',
+        'sales-by-channel' => 'Sales by channel', 'discounts' => 'Discounts given', 'collections-refunds' => 'Collections and refunds', 'stock-aging' => 'Stock aging',
     ];
 
     /**
@@ -37,7 +37,7 @@ class InventoryReports
             'valuation' => self::valuation($f), 'sales-by-project' => self::salesByProject($f), 'sales-by-product' => self::salesByProduct($f), 'orders-by-status' => self::ordersByStatus($f),
             'returns-damage' => self::returnsDamage($f), 'reconciliation' => self::reconciliation($f),
             'location-stock' => self::locationStock($f), 'location-reconciliation' => self::locationReconciliation($f),
-            'sales-by-channel' => self::salesByChannel($f), 'discounts' => self::discounts($f),
+            'sales-by-channel' => self::salesByChannel($f), 'discounts' => self::discounts($f), 'collections-refunds' => self::collectionsRefunds($f), 'stock-aging' => self::stockAging($f),
             default => throw new InvalidArgumentException('Unknown report.'),
         };
     }
@@ -141,6 +141,36 @@ class InventoryReports
     {
         return ClientOrder::where('fulfilment', 'stock')->with(['items', 'collections', 'project'])
             ->when($f['from'] ?? null, fn ($q, $v) => $q->whereDate('ordered_on', '>=', $v))->when($f['to'] ?? null, fn ($q, $v) => $q->whereDate('ordered_on', '<=', $v))->orderBy('id')->get();
+    }
+
+    /** @return Report */
+    private static function collectionsRefunds(array $f): array
+    {
+        $rows = self::stockOrders($f)->filter(fn ($o) => $o->collections->isNotEmpty())->map(function ($o) {
+            $collected = (int) $o->collections->sum('amount');
+            $refunded = OrderRefunds::paid($o);
+
+            return [$o->reference, $o->project?->name, self::major($collected), self::major($refunded), self::major($collected - $refunded), self::major($o->delivery_status === 'delivered' ? max(0, $o->deliveredValue() - ($collected - $refunded)) : 0)];
+        })->values()->all();
+
+        return ['title' => self::TYPES['collections-refunds'], 'headers' => ['Order', 'Project', 'Collected (client money)', 'Refunded (paid)', 'Net held', 'Still receivable'], 'rows' => $rows];
+    }
+
+    /**
+     * Age of the available units, by days since the line's arrival (only lines with a recorded arrival date). Units are counted per unit of measure.
+     *
+     * @return Report
+     */
+    private static function stockAging(array $f): array
+    {
+        $rows = ProjectInventory::positions($f)->filter(fn ($r) => $r['own_slice'] && $r['line']->arrived_on !== null && bccomp($r['b']['available'], '0', 2) > 0)->map(function ($r) {
+            $days = (int) $r['line']->arrived_on->diffInDays(today());
+            $bucket = $days <= 30 ? '0-30 days' : ($days <= 60 ? '31-60 days' : ($days <= 90 ? '61-90 days' : 'Over 90 days'));
+
+            return [$r['line']->lot->number, $r['line']->description, $r['unit'], $r['line']->arrived_on->toDateString(), $days, $bucket, $r['b']['available']];
+        })->values()->all();
+
+        return ['title' => self::TYPES['stock-aging'], 'headers' => ['Lot', 'Product', 'Unit', 'Last arrival', 'Days', 'Age band', 'Available'], 'rows' => $rows];
     }
 
     /** @return Report */

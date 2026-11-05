@@ -8,6 +8,7 @@ use App\Models\ClientOrder;
 use App\Models\ClientSettlement;
 use App\Models\Invoice;
 use App\Models\OrderCollection;
+use App\Models\OrderRefund;
 use App\Models\Payment;
 use App\Models\ReceiptClassification;
 use App\Models\StorageCharge;
@@ -43,7 +44,13 @@ class ClientSettlementService
     /** Customer money held for the client that has not been netted or remitted. */
     public static function fundsHeld(Client $c): int
     {
-        return self::collected($c) - self::settledOut($c);
+        return self::collected($c) - self::refundedOut($c) - self::settledOut($c);
+    }
+
+    /** Customer money paid back to end customers out of the funds held (paid refunds only). */
+    public static function refundedOut(Client $c): int
+    {
+        return (int) OrderRefund::where('status', 'paid')->whereHas('order.project', fn ($q) => $q->where('client_id', $c->id))->sum('amount');
     }
 
     /**

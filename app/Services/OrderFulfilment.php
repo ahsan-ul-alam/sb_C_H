@@ -215,8 +215,8 @@ class OrderFulfilment
             }
             $o->refresh()->load('items');
             $value = $o->deliveredValue();
-            if ((int) $o->collections()->sum('amount') > $value) {
-                throw new RuntimeException('More money was collected than the order is now worth: the customer must be refunded by Finance first.');
+            if ((int) $o->collections()->sum('amount') - OrderRefunds::paid($o) > $value) {
+                throw new RuntimeException('More money was collected than the order is now worth: refund the customer first (Customer Refunds), then record the return.');
             }
             if ($o->billed_invoice_id && $o->commission > 0) {
                 OrderCommission::reduceInvoiced($o, $value > 0 ? $value : null, 'Customer return'); // refuses once the commission was paid or netted
@@ -268,7 +268,7 @@ class OrderFulfilment
                 if (AccountingService::isClosed($date)) {
                     throw new RuntimeException('That month is already closed; record it in an open month.');
                 }
-                $left = $o->deliveredValue() - (int) $o->collections()->sum('amount');
+                $left = $o->deliveredValue() - ((int) $o->collections()->sum('amount') - OrderRefunds::paid($o));
                 if ($amount > $left) {
                     throw new RuntimeException('Only '.Money::format(max(0, $left)).' of this order is still to be collected.');
                 }
@@ -291,7 +291,7 @@ class OrderFulfilment
     public static function collectionState(ClientOrder $o): array
     {
         $delivered = $o->delivery_status === 'delivered' ? $o->deliveredValue() : 0;
-        $collected = (int) $o->collections()->sum('amount');
+        $collected = (int) $o->collections()->sum('amount') - OrderRefunds::paid($o); // money still held after refunds paid back
 
         return ['delivered' => $delivered, 'collected' => $collected, 'outstanding' => max(0, $delivered - $collected),
             'state' => $delivered === 0 ? '—' : ($collected >= $delivered ? 'Collected' : ($collected > 0 ? 'Part collected' : 'Awaiting collection'))];
