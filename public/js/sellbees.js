@@ -233,7 +233,7 @@
         try { return needsConfirm(form) || new URL(form.action, location.href).pathname.indexOf('/finance') === 0; } catch (e) { return false; }
     }
     function usesAjax(form) {
-        if (form.hasAttribute('data-no-ajax') || form.method.toLowerCase() === 'get') return false;
+        if (form.hasAttribute('data-no-ajax') || (form.getAttribute('method') || 'get').toLowerCase() === 'get') return false;
         try { var p = new URL(form.action, location.href); return p.origin === location.origin && !/\/(login|logout)$/.test(p.pathname); } catch (e) { return false; }
     }
 
@@ -299,7 +299,7 @@
             setTimeout(function () { form.querySelectorAll('button[type=submit], button:not([type])').forEach(function (b) { b.disabled = true; }); if (s) s.classList.add('is-loading'); }, 0);
             return;
         }
-        if (form.method.toLowerCase() === 'get') {
+        if ((form.getAttribute('method') || 'get').toLowerCase() === 'get') {
             if (form.matches('[role=search], .filters, [data-live-form]')) {
                 event.preventDefault();
                 var params = new URLSearchParams();
