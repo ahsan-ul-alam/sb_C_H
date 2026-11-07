@@ -9,6 +9,8 @@ use App\Support\Navigation;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Tests\Support\SellbeesCompany;
 
@@ -95,6 +97,27 @@ it('caps results, ignores one-character queries, offers shortcuts when empty and
 
     $statuses = collect(range(1, 70))->map(fn () => $w['co']->as('finance')->getJson(route('search', ['q' => 'zz']))->status());
     expect($statuses->first())->toBe(200)->and($statuses->last())->toBe(429);
+});
+
+it('still answers "Client" with navigation and clients when the database has not got the SB number column yet (the production HTTP 500)', function () {
+    $w = searchWorld($this);
+    Schema::table('clients', function ($table) {
+        $table->dropUnique('clients_sb_number_unique');
+        $table->dropColumn('sb_number');
+    });
+    $response = searchAs($w, 'finance', 'Client')->assertOk();
+    expect(resultUrls($response))->toContain(route('clients.index'));
+    expect(resultUrls(searchAs($w, 'finance', 'Zenith')))->toContain(route('clients.show', $w['client']));
+});
+
+it('skips a broken group, logs it and never shows the user an error or a stack trace', function () {
+    $w = searchWorld($this);
+    Schema::drop('sourcing_lots');                                                                // a whole table missing: the Sourcing lots group fails
+    Log::spy();
+    $response = searchAs($w, 'finance', 'Zenith')->assertOk();
+    expect(resultUrls($response))->toContain(route('clients.show', $w['client']))
+        ->and($response->getContent())->not->toContain('SQLSTATE')->and($response->getContent())->not->toContain('sourcing_lots');
+    Log::shouldHaveReceived('error')->atLeast()->once();
 });
 
 it('has no duplicate navigation labels and keeps role-based menus', function () {
