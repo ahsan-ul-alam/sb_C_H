@@ -10,6 +10,7 @@ use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Facades\View;
 use Illuminate\Support\ServiceProvider;
 
@@ -33,6 +34,10 @@ class AppServiceProvider extends ServiceProvider
         });
 
         Notifier::register();
+
+        if (config('app.force_https')) {
+            URL::forceScheme('https');
+        }
 
         RateLimiter::for('client-api-ip', fn (Request $request) => Limit::perMinute(120)->by('ip:'.$request->ip()));
         RateLimiter::for('client-api-request', fn (Request $request) => Limit::perMinute(20)->by('req:'.strtok((string) $request->bearerToken(), '.')));

@@ -54,6 +54,9 @@ return [
 
     'url' => env('APP_URL', 'http://localhost'),
 
+    /** FORCE_HTTPS=true redirects plain-HTTP GET requests to HTTPS and generates https links. Off by default so local and staging keep working. */
+    'force_https' => (bool) env('FORCE_HTTPS', false),
+
     /*
     |--------------------------------------------------------------------------
     | Application Timezone

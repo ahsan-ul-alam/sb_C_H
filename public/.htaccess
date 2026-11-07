@@ -5,6 +5,10 @@
 
     RewriteEngine On
 
+    # Never serve dotfiles (.env, .git, ...), backups, dumps or logs, even if one is copied under public/. /.well-known stays reachable.
+    RewriteRule "(^|/)\.(?!well-known/)" - [F,L]
+    RewriteRule "\.(sql|bak|log|env|sqlite|zip|gz|ini|lock)$" - [F,L,NC]
+
     # Handle Authorization Header
     RewriteCond %{HTTP:Authorization} .
     RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
