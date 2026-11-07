@@ -25,3 +25,7 @@ _ide_helper.php
 Homestead.json
 Homestead.yaml
 Thumbs.db
+
+# Local tooling and Windows download markers
+/.mcp.json
+*:Zone.Identifier
