@@ -58,6 +58,9 @@ it('finds clients, projects, invoices, payments and lots by the identifiers staf
         ->and(resultUrls(searchAs($w, 'finance', 'ZEN-PAY')))->toContain(route('payments.edit', $w['payment']))
         ->and(resultUrls(searchAs($w, 'finance', 'SL-7777')))->toContain(route('sourcing.lots.show', $w['lotId']))
         ->and(resultUrls(searchAs($w, 'finance', 'Historical')))->toContain(route('finance.historical'));
+    foreach (['traders zenith', '0171 1223-344'] as $term) {                      // word order and phone formatting do not matter
+        expect(resultUrls(searchAs($w, 'finance', $term)))->toContain(route('clients.show', $w['client']));
+    }
     foreach (resultUrls(searchAs($w, 'finance', 'Zenith')) as $url) {
         $w['co']->as('finance')->get($url)->assertOk();                                           // every result opens
     }

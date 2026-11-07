@@ -81,7 +81,11 @@
         if (controller) controller.abort();
         controller = typeof AbortController === 'function' ? new AbortController() : null;
         fetch(url + '?q=' + encodeURIComponent(query), { headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, credentials: 'same-origin', signal: controller ? controller.signal : undefined })
-            .then(function (r) { if (!r.ok) throw new Error('search ' + r.status); return r.json(); })
+            .then(function (r) {
+                if (r.status === 401 || r.redirected) throw new Error('session');
+                if (!r.ok) throw new Error('search ' + r.status);
+                return r.json();
+            })
             .then(function (data) {
                 var groups = data.groups || [];
                 if (!query) {
@@ -94,7 +98,7 @@
                 if (e && e.name === 'AbortError') return;
                 list.textContent = '';
                 items = [];
-                list.appendChild(el('div', 'cmdk-empty', 'Search is unavailable right now. Use the sidebar, or try again in a moment.'));
+                list.appendChild(el('div', 'cmdk-empty', (e && e.message === 'session' ? 'Your session has expired. Reload the page and sign in again.' : 'Search is unavailable right now (' + (e && e.message ? e.message : 'network error') + '). Use the sidebar, or try again in a moment.')));
                 status.textContent = 'Search unavailable';
             });
     }

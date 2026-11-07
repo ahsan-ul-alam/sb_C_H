@@ -1,4 +1,4 @@
-{{-- Global command palette (Ctrl+K / Cmd+K). Markup only; behaviour is in public/js/command-palette.js. Results come from route('search'), already filtered by the user's permissions. --}}
+{{-- Global command palette (Ctrl+K / Cmd+K). Markup only; behaviour is in public/js/command-palette.js. Results come from route('search', [], false), already filtered by the user's permissions. --}}
 <dialog class="cmdk" id="cmdk" aria-label="Search the ERP" data-url="{{ route('search') }}">
     <div class="cmdk-box">
         <div class="cmdk-input">
