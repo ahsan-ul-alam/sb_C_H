@@ -29,7 +29,8 @@
                     <option value="">All clients</option>
                     @foreach ($clients as $client)
                         <option value="{{ $client->id }}" @selected((int) request('client') === $client->id)>
-                            {{ $client->name }}</option>
+                            {{ $client->name }}
+                        </option>
                     @endforeach
                 </select>
             </div>

@@ -47,20 +47,26 @@
         })();
     </script>
 
-    <section @class(['hero', 'is-loss' => $net['amount'] < 0, 'is-profit' => $net['amount'] > 0])>
+    <section @class(['hero', 'is-loss' => $net['status'] === 'verified' && $net['amount'] < 0, 'is-profit' => $net['status'] === 'verified' && $net['amount'] > 0])>
         <div class="kicker">Overall business profit / loss <span class="badge {{ $badge($net['status']) }}">{{ $label($net['status']) }}</span></div>
         <div class="big"><span class="cur" style="font-size:1rem;color:var(--muted)">{{ $cur }}</span> {{ $m($net['amount']) }}</div>
         <div class="sub">
-            <strong>{{ $net['amount'] < 0 ? 'Loss' : ($net['amount'] > 0 ? 'Profit' : 'Break-even') }}</strong> = verified earned revenue {{ $m($data['revenue']['verified']) }} − management expenses {{ $m($data['expenses']['total']) }}.
+            @if ($net['status'] === 'verified')
+                <strong>{{ $net['amount'] < 0 ? 'Loss' : ($net['amount'] > 0 ? 'Profit' : 'Break-even') }}</strong>
+            @else
+                <strong>{{ $net['status'] === 'incomplete' ? 'Incomplete position, not a profit or loss yet' : 'Provisional position, not a final profit or loss' }}</strong>
+            @endif
+            = verified earned revenue {{ $m($data['revenue']['verified']) }} − management expenses {{ $m($data['expenses']['total']) }}.
             Partner investment, customer and client money, supplier advances and loans are not in this figure.
             @if ($net['status'] !== 'verified')
                 <br>This result is <strong>{{ $net['status'] }}</strong>:
                 @if ($data['receipts']['provisional_service']['amount'] > 0)
                     {{ $m($data['receipts']['provisional_service']['amount']) }} of receipts look like service fees but are not classified yet, so they are not counted. If Finance confirms them the result would be {{ $m($net['if_suggested_service_accepted']) }}.
                 @endif
-                @if ($net['unrecognised_sourcing_estimate'] !== 0)
-                    Estimated sourcing margin not yet earned: {{ $m($net['unrecognised_sourcing_estimate']) }} (excluded).
+                @if ($data['sourcing']['potential_total'] !== 0)
+                    Potential sourcing margin, not earned: {{ $m($data['sourcing']['potential_total']) }} (excluded).
                 @endif
+                Money collected from customers is shown under "Where the money came from"; it is not profit.
                 See "What is not verified yet" below.
             @endif
         </div>
@@ -85,7 +91,7 @@
         <div class="metric">
             <div class="label">Product sourcing profit <span class="badge {{ $badge($status['sourcing']) }}">{{ $label($status['sourcing']) }}</span></div>
             <div class="value"><span class="cur">{{ $cur }}</span>{{ $m($data['sourcing']['recognised']) }}</div>
-            <div class="hint">Earned on settled lots only · not yet earned {{ $m($data['sourcing']['estimate_total']) }}</div>
+            <div class="hint">Earned on settled lots only · potential, not earned: {{ $m($data['sourcing']['potential_total']) }}</div>
         </div>
         <div class="metric">
             <div class="label">Available cash <span class="badge {{ $badge($status['cash']) }}">{{ $status['cash'] === 'verified' ? 'Verified' : 'Unverified' }}</span></div>
@@ -103,6 +109,40 @@
             <div class="hint">{{ $data['position']['invoices_open'] }} open invoice(s) · not included in profit</div>
         </a>
     </div>
+
+    @php $f = $data['funding']; $split = $f['collection_split']; @endphp
+    <section class="panel" style="margin-bottom:1.25rem" id="funding">
+        <div class="panel-head"><h2>Where the money came from</h2> <span class="badge {{ $f['status'] === 'verified' ? 'badge-completed' : 'badge-pending' }}">{{ $f['status'] === 'verified' ? 'Verified' : 'Unverified' }}</span></div>
+        <div class="panel-body">
+            <div class="biz-grid" style="margin-bottom:.5rem">
+                <ul class="biz-list">
+                    <li><span>Partner investment</span><span class="num">{{ $m($f['investment']) }}</span></li>
+                    <li><span>Customer collections (recorded)</span><span class="num">{{ $m($f['collections']) }}</span></li>
+                    <li class="muted"><span>· Onboarding</span><span class="num">{{ $m($split['onboarding']['amount']) }}</span></li>
+                    <li class="muted"><span>· Marketing</span><span class="num">{{ $m($split['marketing']['amount']) }}</span></li>
+                    <li class="muted"><span>· Product sourcing (client money)</span><span class="num">{{ $m($split['product_sourcing']['amount']) }}</span></li>
+                    @if ($split['other']['amount'] > 0)<li class="muted"><span>· Other or unclassified</span><span class="num">{{ $m($split['other']['amount']) }}</span></li>@endif
+                    @if ($f['other_inflows'] > 0)<li><span>Other recorded inflows ({{ implode(', ', array_keys($f['other_inflow_parts'])) }})</span><span class="num">{{ $m($f['other_inflows']) }}</span></li>@endif
+                    <li><strong>Total recorded cash inflows</strong><strong class="num">{{ $m($f['total_in']) }}</strong></li>
+                </ul>
+                <ul class="biz-list">
+                    <li><span>Operating expenses</span><span class="num">{{ $m($f['outflows']['operating']) }}</span></li>
+                    <li><span>Office purchases tagged equipment/asset</span><span class="num">{{ $m($f['outflows']['equipment']) }}</span></li>
+                    <li><span>Supplier and sourcing payments</span><span class="num">{{ $m($f['outflows']['sourcing']) }}</span></li>
+                    <li><span>Loans lent</span><span class="num">{{ $m($f['outflows']['loans']) }}</span></li>
+                    @if ($f['outflows']['partner_withdrawals'] > 0)<li><span>Partner withdrawals</span><span class="num">{{ $m($f['outflows']['partner_withdrawals']) }}</span></li>@endif
+                    @if ($f['outflows']['other'] > 0)<li><span>Other outflows</span><span class="num">{{ $m($f['outflows']['other']) }}</span></li>@endif
+                    <li><strong>Total recorded cash outflows</strong><strong class="num">{{ $m($f['total_out']) }}</strong></li>
+                    <li><strong>Provisional cash remaining</strong><strong class="num">{{ $m($f['remaining']) }}</strong></li>
+                </ul>
+            </div>
+            <p class="hint" style="color:var(--muted);font-size:.82rem;margin:0">
+                A funding explanation from recorded movements, not profit and not verified available cash. Customer collections are inflows even while their revenue classification is pending; none of them is counted as earned revenue here.
+                @if ($f['collections_not_in_ledger'] > 0) {{ $m($f['collections_not_in_ledger']) }} of collections is recorded but not yet in the ledger or any account. @endif
+                Potential sourcing margin (not earned): {{ $m($data['sourcing']['potential_total']) }}; recognised sourcing profit: {{ $m($data['sourcing']['recognised']) }}.
+            </p>
+        </div>
+    </section>
 
     <div class="biz-grid">
         <section class="panel">

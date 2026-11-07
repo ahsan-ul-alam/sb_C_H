@@ -6,6 +6,7 @@ use App\Models\AccountStatement;
 use App\Models\CapitalEntry;
 use App\Models\Expense;
 use App\Models\Invoice;
+use App\Models\JournalLine;
 use App\Models\Payment;
 use App\Models\Project;
 use App\Models\ReceiptClassification;
@@ -70,7 +71,7 @@ class BusinessDashboard
                 'if_suggested_service_accepted' => $net + $receipts['provisional_service']['amount'],
                 'unrecognised_sourcing_estimate' => $sourcing['estimate_total']],
             'investment' => $investment, 'revenue' => $revenue, 'expenses' => $expenses, 'sourcing' => $sourcing, 'cash' => $cash, 'position' => $position,
-            'receipts' => $receipts, 'status' => $status, 'unresolved' => $unresolved,
+            'receipts' => $receipts, 'status' => $status, 'unresolved' => $unresolved, 'funding' => self::funding($start, $to, $receipts, $cash),
             'chart' => self::chart($from, $to, $receipts['applied_service_rows'], $sourcing['recognised_rows']),
         ];
     }
@@ -86,14 +87,29 @@ class BusinessDashboard
         $reviews = ReceiptReview::where('status', '!=', 'rejected')->pluck('proposed_nature', 'payment_id');
         $payments = Payment::query()->whereHas('project', fn ($q) => $q->where('currency', $currency))->whereDate('paid_on', '>=', $start)->whereDate('paid_on', '<=', $to)->with('invoice.items')->get();
         $zero = fn () => ['amount' => 0, 'count' => 0, 'refs' => []];
-        $out = ['total' => $zero(), 'verified_service' => $zero(), 'provisional_service' => $zero(), 'sourcing_receipts' => $zero() + ['unapplied_amount' => 0, 'unapplied_count' => 0], 'unknown' => $zero(), 'applied_service_rows' => []];
+        $out = ['total' => $zero(), 'verified_service' => $zero(), 'provisional_service' => $zero(), 'sourcing_receipts' => $zero() + ['unapplied_amount' => 0, 'unapplied_count' => 0], 'unknown' => $zero(), 'applied_service_rows' => [], 'payment_ids' => []];
         $add = function (string $key, Payment $p) use (&$out) {
             $out[$key]['amount'] += (int) $p->amount;
             $out[$key]['count']++;
             $out[$key]['refs'][] = 'payment '.$p->id;
         };
+        $out['collections'] = array_fill_keys(['onboarding', 'marketing', 'product_sourcing', 'other'], ['amount' => 0, 'count' => 0, 'pending_amount' => 0, 'refs' => []]);
         foreach ($payments as $p) {
             $add('total', $p);
+            $out['payment_ids'][] = $p->id;
+            // Every collection is a funding inflow whatever its classification; the split below is descriptive and never makes it revenue.
+            $nature = $applied[$p->id] ?? $reviews[$p->id] ?? ReceiptReviews::suggest($p)[0];
+            $text = self::paymentText($p);
+            $bucket = match (true) {
+                $nature === 'product_sourcing' => 'product_sourcing',
+                (bool) preg_match('/onboard|joining/i', $text) => 'onboarding',
+                (bool) preg_match('/market|advert|\bads?\b/i', $text) => 'marketing',
+                default => 'other',
+            };
+            $out['collections'][$bucket]['amount'] += (int) $p->amount;
+            $out['collections'][$bucket]['count']++;
+            $out['collections'][$bucket]['refs'][] = 'payment '.$p->id;
+            $out['collections'][$bucket]['pending_amount'] += isset($applied[$p->id]) ? 0 : (int) $p->amount;
             if (isset($applied[$p->id])) {
                 if ($applied[$p->id] === 'service') {
                     $add('verified_service', $p);
@@ -104,7 +120,6 @@ class BusinessDashboard
 
                 continue;
             }
-            $nature = $reviews[$p->id] ?? ReceiptReviews::suggest($p)[0];
             if ($nature === 'service') {
                 $add('provisional_service', $p);
             } elseif ($nature === 'product_sourcing') {
@@ -117,6 +132,17 @@ class BusinessDashboard
         }
 
         return $out;
+    }
+
+    /** What the invoice or segment the payment was recorded against says: the same evidence the receipt suggestion uses. */
+    private static function paymentText(Payment $p): string
+    {
+        $text = collect($p->invoice?->items ?? [])->pluck('description')->push($p->invoice?->notes)->filter()->implode(' ');
+        if ($text === '' && ($segmentId = DB::table('payment_allocations')->where('payment_id', $p->id)->value('segment_id'))) {
+            $text = (string) DB::table('segments')->where('id', $segmentId)->value('name');
+        }
+
+        return $text;
     }
 
     /**
@@ -132,6 +158,8 @@ class BusinessDashboard
         $lots = [];
         $unresolved = 0;
         $unknownOwner = [];
+        $potential = 0;
+        $potentialLots = [];
         foreach (ProjectSourcingReport::build()['lots'] as $row) {
             $lot = $row['lot'];
             $agreed = (int) collect($row['buckets'])->except('unallocated')->sum('agreed');
@@ -142,6 +170,11 @@ class BusinessDashboard
                 $lot->status === 'completed' => 'completed_unsettled',
                 default => 'open',
             };
+            // Potential margin at the prices set on the lot (allocated or not), for any lot that is not yet earned. It is information only and is never added to profit.
+            if ($lot->status !== 'settled' && (int) $row['figures']['revenue'] > 0) {
+                $potential += (int) $row['figures']['profit'];
+                $potentialLots[] = ['number' => $lot->number, 'margin' => (int) $row['figures']['profit'], 'state' => $state];
+            }
             // A lot with no client agreement is company stock, not a sourcing result. An unknown owner is always unresolved, whatever is agreed.
             if ($agreed <= 0 && $state !== 'ownership_unknown') {
                 continue;
@@ -161,7 +194,7 @@ class BusinessDashboard
             $lots[] = ['number' => $lot->number, 'state' => $state, 'agreed' => $agreed, 'cost' => $cost, 'margin' => $margin, 'counted' => $inPeriod, 'date' => $inPeriod ? $when : null];
         }
 
-        return ['recognised' => $recognised, 'estimate_total' => $estimate, 'lots' => $lots, 'unresolved_count' => $unresolved, 'unknown_owner' => $unknownOwner,
+        return ['recognised' => $recognised, 'estimate_total' => $estimate, 'potential_total' => $potential, 'potential_lots' => $potentialLots, 'lots' => $lots, 'unresolved_count' => $unresolved, 'unknown_owner' => $unknownOwner,
             'recognised_rows' => collect($lots)->where('counted', true)->map(fn ($l) => [$l['date'], $l['margin']])->values()->all()];
     }
 
@@ -248,6 +281,62 @@ class BusinessDashboard
 
         return ['accounts' => $rows, 'verified_total' => $verifiedTotal, 'unassigned' => $unassigned, 'ledger_total' => $ledger, 'unverified_total' => $ledger - $verifiedTotal,
             'status' => $allVerified ? 'verified' : 'unverified', 'client_funds_in_ledger' => $clientFunds, 'company_cash_after_client_funds' => $verifiedTotal - $clientFunds];
+    }
+
+    /**
+     * Where the money came from and where it went, from RECORDED cash movements only. It is a funding explanation, not profit and not verified cash:
+     * partner investment and customer collections are inflows whatever their revenue classification; supplier payments, loans lent, equipment and
+     * operating expenses are outflows; transfers between accounts are left out (they net to zero); collections are counted from the payment records
+     * only, so a collection that is also journaled is never counted twice.
+     *
+     * @return array<string, mixed>
+     */
+    private static function funding(CarbonImmutable $start, CarbonImmutable $to, array $receipts, array $cash): array
+    {
+        $lines = JournalLine::query()->join('journal_entries as e', 'e.id', '=', 'journal_lines.journal_entry_id')->where('journal_lines.account', 'cash')
+            ->whereDate('e.entry_date', '>=', $start)->whereDate('e.entry_date', '<=', $to)->where('e.source_type', 'not like', 'transfer%')
+            ->get(['e.source_type as type', 'e.source_id as sid', 'journal_lines.debit as d', 'journal_lines.credit as c']);
+        $expenseIds = $lines->where('type', 'expense')->pluck('sid')->unique();
+        $expenses = Expense::whereIn('id', $expenseIds)->get(['id', 'category', 'is_asset'])->keyBy('id');
+        $loans = DB::table('loan_receivables')->where('status', 'verified')->whereIn('expense_id', $expenseIds)->pluck('expense_id')->flip();
+        $investment = 0;
+        $otherIn = 0;
+        $otherParts = [];
+        $out = array_fill_keys(['operating', 'equipment', 'sourcing', 'loans', 'partner_withdrawals', 'other'], 0);
+        foreach ($lines as $l) {
+            $type = (string) $l->type;
+            if ($type === 'capital') {
+                $investment += (int) $l->d;
+                $out['partner_withdrawals'] += (int) $l->c;
+            } elseif ($type === 'payment' || str_starts_with($type, 'payment_v') || $type === 'revenue') {
+                continue;   // customer money is counted from the payment records below
+            } elseif ($type === 'expense') {
+                $e = $expenses->get($l->sid);
+                $class = match (true) {
+                    $e === null => 'other',
+                    isset($loans[$l->sid]) => 'loans',
+                    str_starts_with((string) $e->category, 'Sourcing:') => 'sourcing',
+                    (bool) $e->is_asset => 'equipment',
+                    default => 'operating',
+                };
+                $out[$class] += (int) $l->c - (int) $l->d;   // a refund received reduces the outflow
+            } else {
+                $otherIn += (int) $l->d;
+                $otherParts[$type] = ($otherParts[$type] ?? 0) + (int) $l->d;
+                $out['other'] += (int) $l->c;
+            }
+        }
+        $collections = $receipts['total']['amount'];
+        $posted = DB::table('journal_entries')->where(fn ($q) => $q->where('source_type', 'payment')->orWhere('source_type', 'like', 'payment\_v%'))->whereIn('source_id', $receipts['payment_ids'])->pluck('source_id');
+        $notInLedger = (int) Payment::whereIn('id', $receipts['payment_ids'])->whereNotIn('id', $posted)->sum('amount');
+        $totalIn = $investment + $collections + $otherIn;
+        $totalOut = array_sum($out);
+
+        return [
+            'investment' => $investment, 'collections' => $collections, 'collection_split' => $receipts['collections'], 'other_inflows' => $otherIn, 'other_inflow_parts' => $otherParts,
+            'total_in' => $totalIn, 'outflows' => $out, 'total_out' => $totalOut, 'remaining' => $totalIn - $totalOut,
+            'collections_not_in_ledger' => $notInLedger, 'status' => ($cash['status'] === 'verified' && $notInLedger === 0) ? 'verified' : 'unverified',
+        ];
     }
 
     /** @return array<string, mixed> */

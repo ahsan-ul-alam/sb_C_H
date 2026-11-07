@@ -2,11 +2,13 @@
 
 use App\Models\Expense;
 use App\Models\FinancialAccount;
+use App\Models\Invoice;
 use App\Models\Payment;
 use App\Models\ReceiptClassification;
 use App\Models\SourcingLot;
 use App\Services\AccountingService;
 use App\Services\BusinessDashboard;
+use App\Services\Ledger;
 use App\Services\ProjectSourcingReport;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -39,6 +41,76 @@ function bdReceipt($co, int $amount, string $on, ?string $nature = null): Paymen
 
     return $p;
 }
+
+/** A collection recorded against an invoice whose line says $text (that is the evidence the dashboard splits by). */
+function bdCollection($co, int $amount, string $on, string $text): Payment
+{
+    $client = $co->client('Client '.Str::random(4));
+    $project = $co->project($client, 'P '.Str::random(3));
+    $invoice = new Invoice(['number' => 'T-'.Str::random(6), 'issued_on' => $on, 'currency' => 'BDT']);
+    $invoice->forceFill(['project_id' => $project->id, 'total' => $amount, 'amount_paid' => $amount, 'status' => 'paid'])->save();
+    $invoice->items()->create(['description' => $text, 'quantity' => 1, 'unit_price' => $amount, 'amount' => $amount, 'position' => 0]);
+    $p = new Payment(['amount' => $amount, 'paid_on' => $on, 'method' => 'cash', 'reference' => 'R'.Str::random(4)]);
+    $p->forceFill(['project_id' => $project->id, 'invoice_id' => $invoice->id, 'idempotency_key' => (string) Str::uuid()])->save();
+
+    return $p;
+}
+
+it('explains the funding like the 7 November backup: investment, collections, recorded outflows, provisional remainder, never profit', function () {
+    $co = SellbeesCompany::boot($this);
+    $co->invest('A', '26980', '2026-10-25');
+    $co->invest('B', '11317', '2026-10-25');
+    $co->invest('C', '16940', '2026-10-26');                                                   // 55,237.00
+    foreach ([10_000, 10_000] as $a) {
+        bdCollection($co, $a * 100, '2026-10-30', 'Onboarding');
+    }
+    foreach ([2_650, 2_650] as $a) {
+        bdCollection($co, $a * 100, '2026-10-31', 'Marketing Charges');
+    }
+    foreach ([7_350, 10_000, 9_200, 7_350, 19_200] as $a) {
+        bdCollection($co, $a * 100, '2026-11-01', 'Zipper Hoodie product purchase');            // 78,400.00 in all
+    }
+    $co->expense('Office', 'Operating costs', '48403', '2026-10-28');
+    $co->expense('Furniture', 'Equipment and furniture tagged asset', '22693', '2026-10-31', asset: true);
+    $co->expense('Sourcing: supplier payment', 'Lot payments', '27530', '2026-11-03');
+    $co->expense('Sourcing: Transportation', 'Lot transport', '280', '2026-11-03');
+    foreach (['8000', '500'] as $loanAmount) {
+        $loan = $co->expense('Loan', 'Loan lent', $loanAmount, '2026-11-05');
+        DB::table('loan_receivables')->insert(['borrower_name' => 'X', 'expense_id' => $loan->id, 'principal' => (int) $loanAmount * 100, 'lent_on' => '2026-11-05', 'status' => 'verified', 'created_by' => $co->users['finance']->id, 'created_at' => now(), 'updated_at' => now()]);
+    }
+
+    $d = bdAll(null, '2026-11-07');
+    $f = $d['funding'];
+    expect($f['investment'])->toBe(5_523_700)->and($f['collections'])->toBe(7_840_000)
+        ->and($f['collection_split']['onboarding']['amount'])->toBe(2_000_000)->and($f['collection_split']['marketing']['amount'])->toBe(530_000)->and($f['collection_split']['product_sourcing']['amount'])->toBe(5_310_000)
+        ->and($f['total_in'])->toBe(13_363_700)->and($f['total_out'])->toBe(10_740_600)->and($f['remaining'])->toBe(2_623_100)               // 26,231.00
+        ->and($f['outflows'])->toMatchArray(['operating' => 4_840_300, 'equipment' => 2_269_300, 'sourcing' => 2_781_000, 'loans' => 850_000])
+        ->and($f['collections_not_in_ledger'])->toBe(7_840_000)->and($f['status'])->toBe('unverified');
+    // Funding is not profit: no collection is earned revenue, the expenses are the owner-policy total, and the result is never presented as a final loss.
+    expect($d['revenue']['verified'])->toBe(0)->and($d['expenses']['total'])->toBe(7_109_600)->and($d['net_profit']['status'])->not->toBe('verified')
+        ->and($d['net_profit']['amount'])->toBe(-7_109_600);
+    $co->as('finance')->get(route('dashboard'))->assertOk()->assertSee('Where the money came from')->assertSee('Provisional cash remaining')->assertSee('Provisional position, not a final profit or loss');
+});
+
+it('shows unclassified collections as funding inflows without ever making them earned revenue, and counts nothing twice', function () {
+    $co = SellbeesCompany::boot($this);
+    $p = bdReceipt($co, 300_000, '2026-02-12');                                         // no classification, no evidence of its nature
+    $before = bdAll()['funding'];
+    expect($before['collections'])->toBe(300_000)->and($before['total_in'])->toBe(300_000)->and($before['collection_split']['other']['amount'])->toBe(300_000)
+        ->and(bdAll()['revenue']['verified'])->toBe(0)->and(bdAll()['net_profit']['status'])->toBe('incomplete');
+
+    // The same collection posted to the ledger in real time must not be counted again, and a transfer between accounts changes neither side.
+    Ledger::post('2026-02-12', 'Receipt', 'payment', $p->id, [['cash', null, 300_000, 0], ['client.funds', null, 0, 300_000]], null);
+    $cash = FinancialAccount::factory()->asDefault()->create(['name' => 'Office Cash']);
+    $bank = FinancialAccount::factory()->bank()->create(['name' => 'City Bank']);
+    $co->invest('A', '1000', '2026-02-01');
+    $mid = bdAll()['funding'];
+    AccountingService::transfer(['from' => $cash->id, 'to' => $bank->id, 'amount' => 30_000, 'date' => '2026-02-13', 'idempotency_key' => (string) Str::uuid()], $co->users['finance']);
+    $after = bdAll()['funding'];
+
+    expect($mid['collections'])->toBe(300_000)->and($mid['total_in'])->toBe(400_000)->and($mid['collections_not_in_ledger'])->toBe(0)
+        ->and($after['total_in'])->toBe($mid['total_in'])->and($after['total_out'])->toBe($mid['total_out']);
+});
 
 it('does not let partner capital change profit', function () {
     $co = SellbeesCompany::boot($this);
@@ -117,7 +189,7 @@ it('recognises sourcing margin only on settled lots with a stated owner, from th
     expect($agreed)->toBeGreaterThan(0);
 
     $open = bdAll();                                                                       // not settled: an estimate, never profit
-    expect($open['sourcing']['recognised'])->toBe(0)->and($open['sourcing']['estimate_total'])->toBe($agreed - $cost)->and($open['status']['sourcing'])->toBe('provisional');
+    expect($open['sourcing']['recognised'])->toBe(0)->and($open['sourcing']['potential_total'])->not->toBe(0)->and($open['sourcing']['estimate_total'])->toBe($agreed - $cost)->and($open['status']['sourcing'])->toBe('provisional');
 
     $lot->update(['ownership' => null, 'status' => 'settled', 'settled_at' => '2026-03-05']);   // settled but nobody knows whose it is
     expect(bdAll()['sourcing']['recognised'])->toBe(0)->and(bdAll()['sourcing']['unknown_owner'])->toContain($lot->number);
