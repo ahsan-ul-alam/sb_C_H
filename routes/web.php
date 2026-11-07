@@ -6,6 +6,7 @@ use App\Http\Controllers\AutomationController;
 use App\Http\Controllers\CapitalController;
 use App\Http\Controllers\CashAllocationController;
 use App\Http\Controllers\ClientController;
+use App\Http\Controllers\ClientProfitController;
 use App\Http\Controllers\DocumentController;
 use App\Http\Controllers\EmergencyFundController;
 use App\Http\Controllers\ExitController;
@@ -74,6 +75,17 @@ Route::middleware('auth')->group(function () {
     Route::post('notifications/read-all', [NotificationController::class, 'readAll'])->name('notifications.read-all');
     Route::post('notifications/{id}/read', [NotificationController::class, 'read'])->name('notifications.read');
 
+    // Client-borne expenses and client profitability (attribution for client reporting; never ledger postings). Each action has its own permission,
+    // so the Board can approve and the auditor can view without holding ClientHub. Registered before the clients resource so "expenses" is never read as an id.
+    Route::get('clients/{client}/expenses', [ClientProfitController::class, 'expenses'])->name('clients.expenses')->middleware('can:client.profit.view')->whereNumber('client');
+    Route::get('clients/{client}/profitability', [ClientProfitController::class, 'profitability'])->name('clients.profitability')->middleware('can:client.profit.view')->whereNumber('client');
+    Route::post('clients/{client}/expenses', [ClientProfitController::class, 'storeExpense'])->name('clients.expenses.store')->middleware('can:client.expense.record')->whereNumber('client');
+    Route::post('client-expenses/{expense}/review', [ClientProfitController::class, 'reviewExpense'])->name('clients.expenses.review')->middleware('can:client.expense.review');
+    Route::post('client-expenses/{expense}/decide', [ClientProfitController::class, 'decideExpense'])->name('clients.expenses.decide')->middleware('can:client.expense.approve');
+    Route::post('client-expenses/{expense}/reverse', [ClientProfitController::class, 'reverseExpense'])->name('clients.expenses.reverse')->middleware('can:client.expense.record');
+    Route::post('clients/{client}/profit-declarations', [ClientProfitController::class, 'declare'])->name('clients.profit.declare')->middleware('can:client.profit.declare')->whereNumber('client');
+    Route::post('profit-declarations/{declaration}/revoke', [ClientProfitController::class, 'revokeDeclaration'])->name('clients.profit.revoke')->middleware('can:client.profit.declare');
+
     // Existing ClientHub screens: admin and Finance only.
     Route::middleware('can:clienthub')->group(function () {
         Route::get('projects', [ProjectController::class, 'index'])->name('projects.index');
@@ -86,7 +98,6 @@ Route::middleware('auth')->group(function () {
         Route::resource('clients', ClientController::class);
         Route::patch('clients/{client}/archive', [ClientController::class, 'toggleArchive'])->name('clients.archive');
         Route::post('clients/{client}/verify-email', [ClientController::class, 'verifyEmail'])->name('clients.verify-email');
-
         Route::resource('clients.projects', ProjectController::class)->shallow()->except('index');
         Route::patch('projects/{project}/archive', [ProjectController::class, 'toggleArchive'])->name('projects.archive');
 

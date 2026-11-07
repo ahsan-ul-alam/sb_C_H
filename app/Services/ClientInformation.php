@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Client;
 use App\Models\ClientOrder;
+use App\Models\ClientProfitDeclaration;
 use App\Models\Invoice;
 use App\Models\OrderRefund;
 use App\Models\Payment;
@@ -158,65 +159,27 @@ class ClientInformation
     }
 
     /**
-     * Client profit: net verified sales - cost of the units sold - client-borne delivery costs - client-borne operating expenses - Sellbees commission.
-     * The ERP records the first, second and last of these. It has NO record of client-borne delivery or operating costs, so a profit figure is never given:
-     * the result is "incomplete" with the exact reasons, and the recorded components are shown separately and labelled as not being profit.
-     * The cost of units sold is what the client was billed for the lot's goods (the lot line's approved price), never the supplier price and never
-     * with freight added again; it is used only for client-owned lots whose price was approved.
+     * Client profit for the client to date, plus each project and each Finance-declared period, all from ClientProfitability (one calculation engine).
+     * "complete" only with a current Finance declaration; otherwise "incomplete" with the exact reasons and a null net profit.
      *
      * @return array<string, mixed>
      */
     private static function profitability(Client $client, Collection $projects): array
     {
-        $currency = (string) config('finance.currency');
-        $orders = self::orders($client)->filter(fn ($o) => $o->project->currency === $currency);
-        $delivered = $orders->where('delivery_status', 'delivered');
-        $refunds = OrderRefund::where('status', 'paid')->whereIn('client_order_id', $delivered->pluck('id'))->get();
-        $missing = [];
-
-        if ($projects->contains(fn ($p) => $p->currency !== $currency)) {
-            $missing[] = 'Projects in a currency other than '.$currency.' are not included in this calculation.';
-        }
-        if ($delivered->isEmpty()) {
-            $missing[] = 'No delivered end-customer sales are recorded.';
-        }
-        $net = self::netVerifiedSales($delivered, $refunds);
-
-        $cost = 0;
-        foreach ($delivered as $order) {
-            foreach ($order->items as $item) {
-                $netUnits = bcsub((string) $item->delivered_quantity, (string) $item->returned_quantity, 2);
-                $line = $item->line;
-                if ($line === null) {
-                    $missing[] = 'Order '.$order->reference.': a line has no stock lot, so its product cost is unknown.';
-                } elseif ($line->lot->ownership !== 'client') {
-                    $missing[] = 'Order '.$order->reference.': the stock came from a lot whose ownership is '.($line->lot->ownership ?? 'not verified').', so no client product cost can be attributed.';
-                } elseif ($line->approved_price === null) {
-                    $missing[] = 'Order '.$order->reference.': the lot price billed to the client for '.$line->description.' is not approved.';
-                } else {
-                    $cost += Money::multiply($netUnits, (int) $line->approved_price);
-                }
-            }
-        }
-        foreach ($refunds as $refund) {
-            $treatment = $refund->commission_treatment;
-            $neutral = $treatment === 'keep' && in_array($refund->classification, ['return_of_goods', 'delivery_fee'], true);
-            if ($treatment !== 'reduce' && ! $neutral) {
-                $missing[] = 'Refund #'.$refund->id.' ('.$refund->classification.') has no confirmed financial treatment.';
-            }
-        }
-        $missing[] = 'Client-borne delivery costs are not recorded in the ERP.';
-        $missing[] = 'Client-borne operating expenses are not recorded in the ERP.';
-
-        $commission = (int) $orders->where('status', 'successful')->sum('commission');
+        $compact = fn (array $r) => ['project_id' => $r['project_id'], 'period' => $r['period'], 'status' => $r['status'], 'net_profit_minor' => $r['net_profit_minor'], 'missing_data' => $r['missing_data'], 'figures' => $r['figures']];
+        $all = ClientProfitability::calculate($client);
+        $periods = ClientProfitDeclaration::where('client_id', $client->id)->whereNull('revoked_at')->where(fn ($q) => $q->whereNotNull('project_id')->orWhereNotNull('period_from')->orWhereNotNull('period_to'))
+            ->orderByDesc('id')->limit(12)->get();
 
         return [
-            'status' => 'incomplete', 'currency' => $currency, 'net_profit_minor' => null, 'missing_data' => array_values(array_unique($missing)),
-            'recorded_components' => [
-                'label' => 'Recorded components only. Not a profit figure: client-borne delivery and operating costs are missing.',
-                'net_verified_sales_minor' => $net['net'], 'cost_of_units_sold_minor' => $cost, 'sellbees_commission_minor' => $commission,
-                'realized' => true, 'estimates_included' => false,
-            ],
+            'status' => $all['status'], 'currency' => $all['currency'], 'net_profit_minor' => $all['net_profit_minor'], 'missing_data' => $all['missing_data'],
+            'client_net_sales_minor' => $all['figures']['net_sales_minor'], 'sold_product_cost_minor' => $all['figures']['sold_product_cost_minor'],
+            'client_borne_expenses_minor' => $all['figures']['client_borne_expenses_minor'], 'customer_compensation_minor' => $all['figures']['customer_compensation_minor'],
+            'sellbees_commission_and_fees_minor' => $all['figures']['sellbees_commission_minor'] + $all['figures']['sellbees_service_fees_minor'],
+            'unsold_inventory_cost_minor' => $all['unsold_inventory']['cost_minor'], 'unsold_lines_without_verified_cost' => $all['unsold_inventory']['lines_without_verified_cost'],
+            'figures_basis' => $all['figures']['basis'], 'declaration' => $all['declaration'], 'products' => self::bounded(collect($all['products']), self::PRODUCT_LIMIT),
+            'by_project' => self::bounded($projects->map(fn ($p) => $compact(ClientProfitability::calculate($client, $p->id))), self::LIST_LIMIT),
+            'declared_periods' => $periods->map(fn ($d) => $compact(ClientProfitability::calculate($client, $d->project_id, $d->period_from?->toDateString(), $d->period_to?->toDateString())))->all(),
         ];
     }
 

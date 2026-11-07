@@ -3,13 +3,16 @@
 use App\Mail\ClientInformationCode;
 use App\Models\Client;
 use App\Models\ClientApiIntegration;
+use App\Models\ClientExpense;
 use App\Models\ClientInfoChallenge;
 use App\Models\ClientOrder;
 use App\Models\JournalLine;
 use App\Models\Payment;
 use App\Models\StockMovement;
 use App\Services\ClientApiIntegrations;
+use App\Services\ClientExpenses;
 use App\Services\ClientInformationOtp;
+use App\Services\ClientProfitDeclarations;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -113,7 +116,7 @@ it('returns the client information once for the right code and refuses a replay'
     $code = sentCode();
 
     verifyCode($a, $id, $code)->assertOk()->assertJsonPath('success', true)->assertJsonPath('data.sb_number', $a['client']->sb_number)
-        ->assertJsonPath('data.client.name', 'Replay Co')->assertJsonPath('data.profitability.status', 'incomplete')->assertJsonPath('data.profitability.net_profit_minor', null);
+        ->assertJsonPath('data.client.name', 'Replay Co')->assertJsonPath('data.profitability.status', 'no_sales')->assertJsonPath('data.profitability.net_profit_minor', null);
     verifyCode($a, $id, $code)->assertStatus(422)->assertExactJson(['success' => false, 'message' => 'Verification failed.']);
 });
 
@@ -252,10 +255,11 @@ it('returns the invoices, payments, stock, sales and an honest incomplete profit
 
     // Profit is never invented: client-borne delivery and operating costs are not recorded in the ERP.
     expect($json['profitability']['status'])->toBe('incomplete')->and($json['profitability']['net_profit_minor'])->toBeNull()
-        ->and($json['profitability']['missing_data'])->toContain('Client-borne delivery costs are not recorded in the ERP.')
-        ->and($json['profitability']['recorded_components']['net_verified_sales_minor'])->toBe(5_500_000)
-        ->and($json['profitability']['recorded_components']['cost_of_units_sold_minor'])->toBe(100 * (int) $s['line']->fresh()->approved_price)
-        ->and($json['profitability']['recorded_components']['cost_of_units_sold_minor'])->toBeGreaterThan(0);
+        ->and($json['profitability']['missing_data'])->toContain('Finance has not declared that all client-borne expenses are recorded for this period.')
+        ->and($json['profitability']['client_net_sales_minor'])->toBe(5_500_000)
+        ->and($json['profitability']['sold_product_cost_minor'])->toBe(100 * (int) $s['line']->fresh()->approved_price)
+        ->and($json['profitability']['unsold_inventory_cost_minor'])->toBeGreaterThan(0)
+        ->and($json['profitability']['by_project']['total'])->toBe(1);
 
     // Nothing private leaves: no supplier, staff, customer contact or company profit data.
     $text = json_encode($json);
@@ -263,6 +267,39 @@ it('returns the invoices, payments, stock, sales and an honest incomplete profit
         expect(strtolower($text))->not->toContain($forbidden);
     }
     expect($order->reference)->toBe('O1');
+});
+
+it('returns the verified net profit through the API only after Finance declares, and reverts to incomplete when data changes', function () {
+    Mail::fake();
+    $s = integrationStock($this);
+    $order = refundDelivered($s);
+    $client = $s['client'];
+    $client->update(['email' => 'p@example.test']);
+    $client->forceFill(['email_verified_at' => now()])->save();
+    $made = ClientApiIntegrations::create('Profit site');
+    ClientApiIntegrations::grant($made['integration'], $client);
+    $a = ['client' => $client, 'integration' => $made['integration'], 'credential' => $made['credential']];
+    $users = $s['co']->users;
+
+    $expense = ClientExpenses::record($client, ['category' => 'delivery', 'amount' => 100_000, 'spent_on' => '2026-02-12', 'responsible_party' => 'client', 'paid_status' => 'paid',
+        'reference' => 'COURIER-9', 'allocations' => [['project_id' => $s['project']->id, 'amount' => 100_000]]], $users['finance']);
+    ClientExpenses::review($expense, $users['multi']);
+    ClientExpenses::decide($expense, true, null, $users['board']);
+    ClientProfitDeclarations::declare($client, null, null, null, array_values(array_diff(array_keys(ClientExpense::CATEGORIES), ['delivery'])), null, $users['finance']);
+
+    Carbon::setTestNow('2026-03-01 10:00:00');
+    $id = requestCode($a)->json('request_id');
+    $p = verifyCode($a, $id, sentCode())->assertOk()->json('data.profitability');
+    $cost = 100 * (int) $s['line']->fresh()->approved_price;
+    expect($p['status'])->toBe('complete')->and($p['missing_data'])->toBe([])->and($p['client_net_sales_minor'])->toBe(5_500_000)->and($p['sold_product_cost_minor'])->toBe($cost)
+        ->and($p['client_borne_expenses_minor'])->toBe(100_000)->and($p['sellbees_commission_and_fees_minor'])->toBe((int) $order->fresh()->commission)
+        ->and($p['net_profit_minor'])->toBe(5_500_000 - $cost - 100_000 - (int) $order->fresh()->commission);
+
+    ClientExpenses::reverse($expense, 'entered in error', $users['finance']);          // the data changes after the declaration
+    Carbon::setTestNow('2026-03-01 10:07:00');
+    $id = requestCode($a)->json('request_id');
+    $p = verifyCode($a, $id, sentCode())->assertOk()->json('data.profitability');
+    expect($p['status'])->toBe('incomplete')->and($p['net_profit_minor'])->toBeNull();
 });
 
 it('bounds the lists but totals the whole dataset', function () {

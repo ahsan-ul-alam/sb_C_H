@@ -147,6 +147,9 @@
                             <li><x-icon name="id-card" class="icon-sm" /> <span>{{ $client->id_type?->label() ?? 'ID' }}{{ $client->id_number ? ': '.$client->id_number : '' }}</span></li>
                         @endif
                     </ul>
+                    @can('client.profit.view')
+                        <p style="margin-top:1rem"><a class="btn btn-sm" href="{{ route('clients.profitability', $client) }}">Profitability</a> <a class="btn btn-sm" href="{{ route('clients.expenses', $client) }}">Client expenses</a></p>
+                    @endcan
                     @if ($client->notes)
                         <div class="callout" style="margin-top:1rem; white-space:pre-line">{{ $client->notes }}</div>
                     @endif
