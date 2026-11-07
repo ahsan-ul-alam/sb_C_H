@@ -6,10 +6,12 @@
         <x-slot:meta>
             {{ $invoices->total() }} {{ Str::plural('invoice', $invoices->total()) }}
             @if ($range) · Issued {{ $range->label() }} @endif
-            @if ($filterProject) · Project: <a href="{{ route('projects.show', $filterProject) }}">{{ $filterProject->name }}</a> @endif
+            @if ($filterProject) · Project: <a
+            href="{{ route('projects.show', $filterProject) }}">{{ $filterProject->name }}</a> @endif
         </x-slot:meta>
         <x-slot:actions>
-            <a href="{{ $filterProject ? route('projects.invoices.create', $filterProject) : route('invoices.start', request()->only('client')) }}" class="btn btn-primary"><x-icon name="plus" /> New invoice</a>
+            <a href="{{ $filterProject ? route('projects.invoices.create', $filterProject) : route('invoices.start', request()->only('client')) }}"
+                class="btn btn-primary"><x-icon name="plus" /> New invoice</a>
         </x-slot:actions>
     </x-page-header>
 
@@ -18,14 +20,16 @@
             @if ($filterProject) <input type="hidden" name="project" value="{{ $filterProject->id }}"> @endif
             <div class="field grow">
                 <label for="q">Search</label>
-                <input type="search" id="q" name="q" value="{{ request('q') }}" placeholder="Invoice number, client or project">
+                <input type="search" id="q" name="q" value="{{ request('q') }}"
+                    placeholder="Invoice number, client or project">
             </div>
             <div class="field">
                 <label for="client">Client</label>
                 <select id="client" name="client">
                     <option value="">All clients</option>
                     @foreach ($clients as $client)
-                        <option value="{{ $client->id }}" @selected((int) request('client') === $client->id)>{{ $client->name }}</option>
+                        <option value="{{ $client->id }}" @selected((int) request('client') === $client->id)>
+                            {{ $client->name }}</option>
                     @endforeach
                 </select>
             </div>
@@ -58,10 +62,13 @@
                 </select>
             </div>
             @if ($range?->preset === 'custom')
-                <div class="field"><label for="from">From</label><input type="date" id="from" name="from" value="{{ $range->from->toDateString() }}"></div>
-                <div class="field"><label for="to">To</label><input type="date" id="to" name="to" value="{{ $range->to->toDateString() }}"></div>
+                <div class="field"><label for="from">From</label><input type="date" id="from" name="from"
+                        value="{{ $range->from->toDateString() }}"></div>
+                <div class="field"><label for="to">To</label><input type="date" id="to" name="to"
+                        value="{{ $range->to->toDateString() }}"></div>
             @endif
-            <label class="check"><input type="checkbox" name="overdue" value="1" @checked(request()->boolean('overdue'))> Overdue only</label>
+            <label class="check"><input type="checkbox" name="overdue" value="1"
+                    @checked(request()->boolean('overdue'))> Overdue only</label>
             <button type="submit" class="btn"><x-icon name="search" class="icon-sm" /> Filter</button>
             @if ($filtered)
                 <a href="{{ route('invoices.index') }}" class="btn btn-ghost">Clear</a>
@@ -69,16 +76,26 @@
         </form>
 
         @if ($invoices->isEmpty())
-            <x-empty-state icon="invoice" message="{{ $filtered ? 'No invoices match these filters.' : 'No invoices yet. Create one from a project.' }}">
+            <x-empty-state icon="invoice"
+                message="{{ $filtered ? 'No invoices match these filters.' : 'No invoices yet. Create one from a project.' }}">
                 @unless ($filtered)
-                    <a href="{{ route('invoices.start') }}" class="btn btn-primary btn-sm"><x-icon name="plus" class="icon-sm" /> New invoice</a>
+                    <a href="{{ route('invoices.start') }}" class="btn btn-primary btn-sm"><x-icon name="plus"
+                            class="icon-sm" /> New invoice</a>
                 @endunless
             </x-empty-state>
         @else
             <div class="table-wrap">
                 <table class="table table-min-760">
                     <thead>
-                        <tr><th>Invoice / Client</th><th>Project</th><th>Issued</th><th>Due</th><th class="num">Total</th><th class="num">Remaining</th><th>Status</th></tr>
+                        <tr>
+                            <th>Invoice / Client</th>
+                            <th>Project</th>
+                            <th>Issued</th>
+                            <th>Due</th>
+                            <th class="num">Total</th>
+                            <th class="num">Remaining</th>
+                            <th>Status</th>
+                        </tr>
                     </thead>
                     <tbody>
                         @foreach ($invoices as $invoice)
@@ -87,7 +104,8 @@
                                     <a href="{{ route('invoices.show', $invoice) }}">{{ $invoice->number }}</a>
                                     <span class="secondary">{{ $invoice->project->client->name }}</span>
                                 </td>
-                                <td><a href="{{ route('projects.show', $invoice->project) }}">{{ $invoice->project->name }}</a></td>
+                                <td><a href="{{ route('projects.show', $invoice->project) }}">{{ $invoice->project->name }}</a>
+                                </td>
                                 <td class="nowrap">{{ $invoice->issued_on->format('j M Y') }}</td>
                                 <td class="nowrap">{{ $invoice->due_on?->format('j M Y') ?? '—' }}</td>
                                 <td class="num">{{ Money::format($invoice->total, $invoice->currency) }}</td>
