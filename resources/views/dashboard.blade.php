@@ -30,7 +30,7 @@
         </x-slot:actions>
     </x-page-header>
 
-    <form method="GET" action="{{ route('dashboard') }}" class="toolbar" id="dashboard-filters">
+    <form method="GET" action="{{ route('clienthub.dashboard') }}" class="toolbar" id="dashboard-filters">
         <div class="field">
             <label for="range">Period</label>
             <select id="range" name="range">

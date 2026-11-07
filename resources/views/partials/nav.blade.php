@@ -3,7 +3,8 @@
     $finance = $u->can('finance.view');
     $groups = [
         'Overview' => [
-            ['Dashboard', 'dashboard', 'clienthub', 'dashboard', ['dashboard']],
+            ['Business Dashboard', 'dashboard', 'dashboard.business', 'chart', ['dashboard']],
+            ['ClientHub Overview', 'clienthub.dashboard', 'clienthub', 'dashboard', ['clienthub.dashboard']],
             ['Finance Dashboard', 'finance.dashboard', 'finance.view', 'chart', ['finance.dashboard']],
             ['My Account', 'finance.me', 'own.view', 'users', ['finance.me']],
         ],

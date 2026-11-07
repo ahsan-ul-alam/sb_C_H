@@ -96,7 +96,7 @@ test('segment invoice can be partially paid then fully paid without double count
         ->and($totals['charges'])->toBe(1_000_000)
         ->and($segment->receivedAmount())->toBe(1_000_000);
     $this->get(route('projects.show', $project))->assertOk()->assertSee('BDT 10,000.00');
-    $this->get(route('dashboard'))->assertOk()->assertSee('10,000.00');
+    $this->get(route('clienthub.dashboard'))->assertOk()->assertSee('10,000.00');
 
     // 7. The PDF is generated from current data with the PAID stamp.
     $response = $this->get(route('invoices.pdf', [$invoice, 'download' => 1]));
@@ -172,7 +172,7 @@ test('every admin screen renders', function () {
         route('projects.invoices.create', [$project, 'segment' => $segment->id]), route('invoices.show', $invoice),
         route('invoices.edit', $invoice), route('invoices.payments.create', $invoice), route('segments.payments.create', $segment),
         route('payments.edit', $payment), route('settings.edit'), route('invoices.pdf', $invoice),
-        route('dashboard', ['currency' => 'USD', 'range' => 'last_30_days']), route('dashboard', ['range' => 'custom', 'from' => '2026-01-01', 'to' => '2026-12-31']),
+        route('clienthub.dashboard', ['currency' => 'USD', 'range' => 'last_30_days']), route('clienthub.dashboard', ['range' => 'custom', 'from' => '2026-01-01', 'to' => '2026-12-31']),
         route('projects.index'), route('projects.index', ['status' => 'active', 'q' => 'Web']), route('projects.start'),
         route('invoices.index'), route('invoices.index', ['status' => 'open', 'overdue' => 1, 'client' => $client->id]),
         route('invoices.start', ['client' => $client->id]), route('payments.index', ['range' => 'this_year', 'method' => 'cash']),
@@ -204,7 +204,7 @@ test('dashboard separates period metrics, current balances and currencies', func
     $makeInvoice($usd, 'U-1', '2026-10-05', '2026-10-01', 70_000);                // other currency
     app(PaymentRecorder::class)->save(new Payment, $bdt, $september, ['amount' => 30_000, 'paid_on' => '2026-10-02', 'method' => 'cash'], null);
 
-    $view = $this->get(route('dashboard', ['currency' => 'BDT', 'range' => 'this_month']))->assertOk()->viewData('metrics');
+    $view = $this->get(route('clienthub.dashboard', ['currency' => 'BDT', 'range' => 'this_month']))->assertOk()->viewData('metrics');
 
     expect($view['invoiced'])->toBe(50_000)        // only B-2 was issued in October
         ->and($view['received'])->toBe(30_000)     // payment dated in October

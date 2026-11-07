@@ -9,11 +9,12 @@ class HomeController extends Controller
     /**
      * Send each role to the first screen it may use.
      */
-    public function __invoke(Request $request, DashboardController $clientHub)
+    public function __invoke(Request $request, DashboardController $clientHub, BusinessDashboardController $business)
     {
         $user = $request->user();
 
         return match (true) {
+            $user->can('dashboard.business') => $business($request),
             $user->can('clienthub') => $clientHub($request),
             $user->can('finance.view') => redirect()->route('finance.dashboard'),
             $user->can('own.view') && $user->partner_id => redirect()->route('finance.me'),

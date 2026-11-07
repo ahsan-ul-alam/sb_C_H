@@ -7,6 +7,7 @@ use App\Http\Controllers\CapitalController;
 use App\Http\Controllers\CashAllocationController;
 use App\Http\Controllers\ClientController;
 use App\Http\Controllers\ClientProfitController;
+use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DocumentController;
 use App\Http\Controllers\EmergencyFundController;
 use App\Http\Controllers\ExitController;
@@ -68,6 +69,8 @@ Route::middleware('auth')->group(function () {
     Route::post('logout', [LoginController::class, 'destroy'])->name('logout');
 
     Route::get('/', HomeController::class)->name('dashboard');
+    // The ClientHub overview (invoices and collections) that used to be the home page; the home page is now the Central Business Dashboard for those who may see it.
+    Route::get('clienthub', DashboardController::class)->name('clienthub.dashboard')->middleware('can:clienthub');
 
     Route::get('notifications', [NotificationController::class, 'index'])->name('notifications.index');
     Route::get('notifications/count', [NotificationController::class, 'count'])->name('notifications.count');
