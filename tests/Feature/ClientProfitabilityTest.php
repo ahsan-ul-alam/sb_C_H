@@ -18,7 +18,7 @@ afterEach(fn () => Carbon::setTestNow());
 
 function expenseForm(array $s, array $over = []): array
 {
-    return $over + ['category' => 'delivery', 'amount' => '1000', 'spent_on' => '2026-02-12', 'responsible_party' => 'client', 'paid_status' => 'paid', 'reference' => 'COURIER-1',
+    return $over + ['category' => 'delivery', 'charge_treatment' => 'additional', 'amount' => '1000', 'spent_on' => '2026-02-12', 'responsible_party' => 'client', 'paid_status' => 'paid', 'reference' => 'COURIER-1',
         'allocations' => [['project_id' => $s['project']->id, 'amount' => (string) ($over['amount'] ?? '1000')]]];
 }
 

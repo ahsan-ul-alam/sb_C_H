@@ -7,6 +7,7 @@ use App\Models\ClientExpense;
 use App\Models\ClientExpenseEvent;
 use App\Models\ClientOrder;
 use App\Models\Expense;
+use App\Models\Invoice;
 use App\Models\Project;
 use App\Models\User;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -51,6 +52,17 @@ class ClientExpenses
                 throw new RuntimeException('An allocated order must belong to the allocated project.');
             }
         }
+        $treatment = $data['charge_treatment'] ?? 'additional';
+        if (! in_array($treatment, ['additional', 'included_in_acquisition'], true)) {
+            throw new RuntimeException('Say whether this is an additional charge or a fee already included in the acquisition cost.');
+        }
+        $sourceInvoice = ! empty($data['source_invoice_id']) ? Invoice::with('project')->find($data['source_invoice_id']) : null;
+        if (! empty($data['source_invoice_id']) && ($sourceInvoice === null || $sourceInvoice->project->client_id !== $client->id)) {
+            throw new RuntimeException('The source invoice must be an invoice of this client.');
+        }
+        if ($treatment === 'included_in_acquisition' && $sourceInvoice === null) {
+            throw new RuntimeException('A fee included in the acquisition cost must be linked to the invoice that includes it. It is kept for information and is not deducted again.');
+        }
         if (! empty($data['expense_id'])) {
             $existing = Expense::find($data['expense_id']);
             if ($existing === null || $existing->amount < $data['amount']) {
@@ -61,12 +73,12 @@ class ClientExpenses
         $key = hash('sha256', implode('|', [$client->id, $data['category'], $data['amount'], $data['spent_on'], mb_strtolower(trim($data['reference']))]));
 
         try {
-            return DB::transaction(function () use ($client, $data, $user, $key, $allocations) {
+            return DB::transaction(function () use ($client, $data, $user, $key, $allocations, $treatment, $sourceInvoice) {
                 $expense = ClientExpense::create([
                     'client_id' => $client->id, 'category' => $data['category'], 'amount' => $data['amount'], 'spent_on' => $data['spent_on'], 'responsible_party' => $data['responsible_party'],
                     'paid_status' => $data['paid_status'], 'reference' => trim($data['reference']), 'description' => $data['description'] ?? null,
                     'allocation_basis' => $data['allocation_basis'] ?? 'direct', 'allocation_note' => $data['allocation_note'] ?? null, 'expense_id' => $data['expense_id'] ?? null,
-                    'created_by' => $user->id, 'duplicate_key' => $key,
+                    'charge_treatment' => $treatment, 'source_invoice_id' => $sourceInvoice?->id, 'created_by' => $user->id, 'duplicate_key' => $key,
                 ]);
                 foreach ($allocations as $a) {
                     $expense->allocations()->create(['project_id' => $a['project_id'], 'client_order_id' => $a['client_order_id'] ?? null, 'supplier_product_id' => $a['supplier_product_id'] ?? null, 'amount' => $a['amount']]);

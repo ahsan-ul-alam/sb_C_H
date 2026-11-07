@@ -33,7 +33,7 @@ class ClientProfitController extends Controller
             'category' => ['required', 'string'], 'amount' => ['required', 'string'], 'spent_on' => ['required', 'date'],
             'responsible_party' => ['required', 'in:client,sellbees'], 'paid_status' => ['required', 'in:paid,unpaid'], 'reference' => ['required', 'string', 'max:255'],
             'description' => ['nullable', 'string', 'max:255'], 'allocation_basis' => ['nullable', 'in:direct,sales_value,units,manual'], 'allocation_note' => ['nullable', 'string', 'max:255'],
-            'expense_id' => ['nullable', 'integer'],
+            'expense_id' => ['nullable', 'integer'], 'charge_treatment' => ['required', 'in:additional,included_in_acquisition'], 'source_invoice_id' => ['nullable', 'integer'],
             'allocations' => ['required', 'array', 'min:1'], 'allocations.*.project_id' => ['required', 'integer'], 'allocations.*.client_order_id' => ['nullable', 'integer'],
             'allocations.*.supplier_product_id' => ['nullable', 'integer'], 'allocations.*.amount' => ['required', 'string'],
         ]);
@@ -71,21 +71,21 @@ class ClientProfitController extends Controller
 
     public function profitability(Request $request, Client $client): View
     {
-        $filters = $request->validate(['project_id' => ['nullable', 'integer'], 'from' => ['nullable', 'date'], 'to' => ['nullable', 'date']]);
-        $result = ClientProfitability::calculate($client, $filters['project_id'] ?? null, $filters['from'] ?? null, $filters['to'] ?? null);
+        $filters = $request->validate(['project_id' => ['nullable', 'integer'], 'from' => ['nullable', 'date'], 'to' => ['nullable', 'date'], 'currency' => ['nullable', 'string', 'size:3']]);
+        $result = ClientProfitability::calculate($client, $filters['project_id'] ?? null, $filters['from'] ?? null, $filters['to'] ?? null, $filters['currency'] ?? null);
 
         return view('clients.profitability', [
-            'client' => $client, 'result' => $result, 'filters' => $filters, 'projects' => $client->projects()->orderBy('name')->get(), 'categories' => ClientExpense::CATEGORIES,
+            'client' => $client, 'currencies' => ClientProfitability::currencies($client), 'result' => $result, 'filters' => $filters, 'projects' => $client->projects()->orderBy('name')->get(), 'categories' => ClientExpense::CATEGORIES,
             'declarations' => ClientProfitDeclaration::where('client_id', $client->id)->with('declarer')->orderByDesc('id')->limit(20)->get(),
         ]);
     }
 
     public function declare(Request $request, Client $client): RedirectResponse
     {
-        $data = $request->validate(['project_id' => ['nullable', 'integer'], 'from' => ['nullable', 'date'], 'to' => ['nullable', 'date'], 'zero' => ['nullable', 'array'],
+        $data = $request->validate(['project_id' => ['nullable', 'integer'], 'from' => ['nullable', 'date'], 'to' => ['nullable', 'date'], 'currency' => ['nullable', 'string', 'size:3'], 'zero' => ['nullable', 'array'],
             'zero.*' => ['string'], 'note' => ['nullable', 'string', 'max:255']]);
 
-        return $this->act(fn () => ClientProfitDeclarations::declare($client, $data['project_id'] ?? null, $data['from'] ?? null, $data['to'] ?? null, $data['zero'] ?? [], $data['note'] ?? null, $request->user()),
+        return $this->act(fn () => ClientProfitDeclarations::declare($client, $data['project_id'] ?? null, $data['from'] ?? null, $data['to'] ?? null, $data['zero'] ?? [], $data['note'] ?? null, $request->user(), $data['currency'] ?? null),
             'Declaration recorded. It stays valid only while the underlying transactions do not change.');
     }
 

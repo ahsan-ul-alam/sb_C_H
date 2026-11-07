@@ -28,6 +28,11 @@
                         <select id="paid_status" name="paid_status"><option value="paid">Paid</option><option value="unpaid">Unpaid</option></select></div>
                     <div class="field"><label for="reference">Supporting reference</label><input id="reference" name="reference" value="{{ old('reference') }}" required></div>
                 </div>
+                <div class="field-row">
+                    <div class="field"><label for="charge_treatment">Charge classification</label>
+                        <select id="charge_treatment" name="charge_treatment"><option value="additional">Additional charge: deducted from client profit</option><option value="included_in_acquisition">Already included in the acquisition price: information only, not deducted</option></select></div>
+                    <div class="field"><label for="source_invoice_id">Source invoice id <span class="opt">(required when included in the acquisition price)</span></label><input id="source_invoice_id" name="source_invoice_id" inputmode="numeric"></div>
+                </div>
                 <div class="field"><label for="description">Description <span class="opt">(optional)</span></label><input id="description" name="description" value="{{ old('description') }}"></div>
                 <fieldset class="field"><legend>Allocation (must add up to the amount)</legend>
                     <div class="field-row">

@@ -120,8 +120,17 @@ class ClientInformation
     /** @return array<string, mixed> */
     private static function sales(Client $client): array
     {
+        $default = (string) config('finance.currency');
+        $others = collect(ClientProfitability::currencies($client))->reject(fn ($c) => $c === $default)->values();
+
+        return self::salesIn($client, $default) + ['other_currencies' => $others->map(fn ($c) => self::salesIn($client, $c))->all(),
+            'note' => 'Each currency is reported separately in its own units; currencies are never added together and no exchange rate is assumed.'];
+    }
+
+    /** @return array<string, mixed> */
+    private static function salesIn(Client $client, string $currency): array
+    {
         $orders = self::orders($client);
-        $currency = (string) config('finance.currency');
         $inCurrency = $orders->filter(fn ($o) => $o->project->currency === $currency);
         $live = $inCurrency->where('delivery_status', '!=', 'cancelled');
         $refunds = OrderRefund::where('status', 'paid')->whereIn('client_order_id', $inCurrency->pluck('id'))->get();
@@ -139,7 +148,6 @@ class ClientInformation
             'commission_minor' => (int) $inCurrency->where('status', 'successful')->sum('commission'),
             'orders' => self::bounded($inCurrency->map(fn (ClientOrder $o) => ['reference' => $o->reference, 'ordered_on' => $o->ordered_on->toDateString(), 'project_id' => $o->project_id,
                 'status' => SalesStatus::of($o), 'net_value_minor' => (int) $o->net_value, 'commission_minor' => (int) $o->commission]), self::LIST_LIMIT),
-            'excluded_other_currency_orders' => $orders->count() - $inCurrency->count(),
         ];
     }
 
@@ -179,7 +187,10 @@ class ClientInformation
             'unsold_inventory_cost_minor' => $all['unsold_inventory']['cost_minor'], 'unsold_lines_without_verified_cost' => $all['unsold_inventory']['lines_without_verified_cost'],
             'figures_basis' => $all['figures']['basis'], 'declaration' => $all['declaration'], 'products' => self::bounded(collect($all['products']), self::PRODUCT_LIMIT),
             'by_project' => self::bounded($projects->map(fn ($p) => $compact(ClientProfitability::calculate($client, $p->id))), self::LIST_LIMIT),
-            'declared_periods' => $periods->map(fn ($d) => $compact(ClientProfitability::calculate($client, $d->project_id, $d->period_from?->toDateString(), $d->period_to?->toDateString())))->all(),
+            'declared_periods' => $periods->map(fn ($d) => $compact(ClientProfitability::calculate($client, $d->project_id, $d->period_from?->toDateString(), $d->period_to?->toDateString(), $d->currency)))->all(),
+            // Other currencies are calculated on their own, in their own units. Converted profitability needs an approved rate source and policy.
+            'other_currencies' => collect(ClientProfitability::currencies($client))->reject(fn ($c) => $c === $all['currency'])->map(fn ($c) => $compact(ClientProfitability::calculate($client, null, null, null, $c)))->values()->all(),
+            'converted_profitability' => ['status' => 'unavailable', 'reason' => 'No approved exchange-rate source and conversion policy exist; currencies are not added together.'],
         ];
     }
 

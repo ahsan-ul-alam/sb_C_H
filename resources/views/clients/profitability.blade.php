@@ -12,6 +12,8 @@
         <form method="GET" class="filters">
             <div class="field"><label for="project_id">Project</label>
                 <select id="project_id" name="project_id"><option value="">All projects</option>@foreach ($projects as $p)<option value="{{ $p->id }}" @selected(($filters['project_id'] ?? null) == $p->id)>{{ $p->name }}</option>@endforeach</select></div>
+            <div class="field"><label for="currency">Currency</label>
+                <select id="currency" name="currency">@foreach ($currencies as $c)<option value="{{ $c }}" @selected($result['currency'] === $c)>{{ $c }}</option>@endforeach</select></div>
             <div class="field"><label for="from">From</label><input type="date" id="from" name="from" value="{{ $filters['from'] ?? '' }}"></div>
             <div class="field"><label for="to">To</label><input type="date" id="to" name="to" value="{{ $filters['to'] ?? '' }}"></div>
             <button class="btn" type="submit">Show</button>
@@ -27,12 +29,14 @@
                 <p><strong>No profit figure is given.</strong> The figures below are recorded components only. Resolve:</p>
                 <ul>@foreach ($result['missing_data'] as $m)<li>{{ $m }}</li>@endforeach</ul>
             @endif
+            <p class="muted">All amounts are in {{ $result['currency'] }}. Currencies are never added together and no exchange rate is assumed: converted profitability is unavailable until an approved rate source and policy exist. Sales are dated by the actual delivery and return dates in the stock ledger.</p>
             <table class="table">
                 <tbody>
                 <tr><td>Net verified delivered sales</td><td class="num">{{ \App\Support\Money::format($f['net_sales_minor']) }}</td></tr>
                 <tr><td>Sold-unit acquisition cost</td><td class="num">- {{ \App\Support\Money::format($f['sold_product_cost_minor']) }}</td></tr>
                 <tr><td>Customer compensation (goodwill refunds)</td><td class="num">- {{ \App\Support\Money::format($f['customer_compensation_minor']) }}</td></tr>
                 <tr><td>Client-borne operating expenses (approved)</td><td class="num">- {{ \App\Support\Money::format($f['client_borne_expenses_minor']) }}</td></tr>
+                @if ($f['fees_included_in_acquisition_minor'])<tr><td class="muted">Fees already included in the acquisition price (not deducted again)</td><td class="num muted">{{ \App\Support\Money::format($f['fees_included_in_acquisition_minor']) }}</td></tr>@endif
                 <tr><td>Sellbees commission</td><td class="num">- {{ \App\Support\Money::format($f['sellbees_commission_minor']) }}</td></tr>
                 <tr><td>Sellbees service fees (storage)</td><td class="num">- {{ \App\Support\Money::format($f['sellbees_service_fees_minor']) }}</td></tr>
                 <tr><td class="strong">Net profit / loss</td><td class="num strong">{{ $result['net_profit_minor'] === null ? 'not available' : \App\Support\Money::format($result['net_profit_minor']) }}</td></tr>
@@ -62,7 +66,7 @@
             <p>Declaration for this scope and period: <strong>{{ $result['declaration']['status'] }}</strong>. Declaring confirms that every applicable client-borne expense is recorded. It is voided automatically if sales, costs, refunds, commission or expenses change afterwards.</p>
             <form method="POST" action="{{ route('clients.profit.declare', $client) }}" class="stack">
                 @csrf
-                <input type="hidden" name="project_id" value="{{ $filters['project_id'] ?? '' }}"><input type="hidden" name="from" value="{{ $filters['from'] ?? '' }}"><input type="hidden" name="to" value="{{ $filters['to'] ?? '' }}">
+                <input type="hidden" name="currency" value="{{ $result['currency'] }}"><input type="hidden" name="project_id" value="{{ $filters['project_id'] ?? '' }}"><input type="hidden" name="from" value="{{ $filters['from'] ?? '' }}"><input type="hidden" name="to" value="{{ $filters['to'] ?? '' }}">
                 @if ($result['zero_categories_needed'])
                     <fieldset class="field"><legend>These categories have no approved expense. Tick each one that genuinely had no cost:</legend>
                         @foreach ($result['zero_categories_needed'] as $c)<label class="check"><input type="checkbox" name="zero[]" value="{{ $c }}"> {{ $categories[$c] }}</label>@endforeach</fieldset>
