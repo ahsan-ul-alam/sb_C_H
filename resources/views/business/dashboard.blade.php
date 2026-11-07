@@ -18,6 +18,9 @@
         .hero .big { font-size: clamp(2rem, 5vw, 3rem); font-weight: 700; font-variant-numeric: tabular-nums; margin: .25rem 0; }
         .hero.is-loss .big { color: var(--danger); } .hero.is-profit .big { color: var(--success); }
         .hero .sub { color: var(--text-2); font-size: .9rem; max-width: 70ch; }
+        .hero-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: .75rem; margin-top: 1rem; padding-top: .8rem; border-top: 1px solid var(--border); }
+        .hero-stats span { display: block; font-size: .76rem; color: var(--muted); } .hero-stats strong { font-size: 1.1rem; font-variant-numeric: tabular-nums; } .hero-stats em { display: block; font-style: normal; font-size: .74rem; color: var(--muted); }
+        .acct { width: 100%; border-collapse: collapse; font-size: .82rem; } .acct th, .acct td { padding: .3rem .4rem; text-align: right; border-bottom: 1px solid var(--border); } .acct th:first-child, .acct td:first-child { text-align: left; } .acct th { color: var(--muted); font-weight: 600; }
         .biz-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 1rem; margin-bottom: 1.25rem; }
         @media (max-width: 1000px) { .biz-grid { grid-template-columns: minmax(0, 1fr); } }
         .biz-list { list-style: none; margin: 0; padding: 0; } .biz-list li { display: flex; justify-content: space-between; gap: 1rem; padding: .4rem 0; border-bottom: 1px solid var(--border); font-size: .9rem; }
@@ -69,6 +72,12 @@
                 Money collected from customers is shown under "Where the money came from"; it is not profit.
                 See "What is not verified yet" below.
             @endif
+        </div>
+        <div class="hero-stats">
+            <div><span>Earned onboarding and service income</span><strong>{{ $m($data['revenue']['service']) }}</strong>@if ($data['receipts']['provisional_service']['amount'] > 0)<em>+ {{ $m($data['receipts']['provisional_service']['amount']) }} awaiting classification</em>@endif</div>
+            <div><span>Earned product-sourcing margin</span><strong>{{ $m($data['sourcing']['recognised']) }}</strong><em>potential, not earned: {{ $m($data['sourcing']['potential_total']) }}</em></div>
+            <div><span>Management expenses</span><strong>{{ $m($data['expenses']['total']) }}</strong><em>incl. equipment/asset-tagged {{ $m($data['expenses']['asset_tagged']) }}</em></div>
+            <div><span>Expected closing cash</span><strong>{{ $m($data['funding']['remaining']) }}</strong><em>{{ $data['funding']['status'] === 'verified' ? 'verified' : 'from records, not verified' }}</em></div>
         </div>
     </section>
 
@@ -133,9 +142,35 @@
                     @if ($f['outflows']['partner_withdrawals'] > 0)<li><span>Partner withdrawals</span><span class="num">{{ $m($f['outflows']['partner_withdrawals']) }}</span></li>@endif
                     @if ($f['outflows']['other'] > 0)<li><span>Other outflows</span><span class="num">{{ $m($f['outflows']['other']) }}</span></li>@endif
                     <li><strong>Total recorded cash outflows</strong><strong class="num">{{ $m($f['total_out']) }}</strong></li>
-                    <li><strong>Provisional cash remaining</strong><strong class="num">{{ $m($f['remaining']) }}</strong></li>
+                    <li><strong>Expected closing cash (from records)</strong><strong class="num">{{ $m($f['remaining']) }}</strong></li>
                 </ul>
             </div>
+            <div style="overflow-x:auto;margin:.75rem 0">
+                <table class="acct">
+                    <thead><tr><th>Account</th><th>Opening</th><th>In</th><th>Out</th><th>Transfers</th><th>Expected</th><th>Actual (verified statement)</th><th>Variance</th></tr></thead>
+                    <tbody>
+                        @forelse ($data['accounts'] as $a)
+                            <tr><td>{{ $a['name'] }}<br><small style="color:var(--muted)">{{ $a['group'] }} · {{ $a['state'] }}</small></td><td>{{ $m($a['opening']) }}</td><td>{{ $m($a['inflows']) }}</td><td>{{ $m($a['outflows']) }}</td><td>{{ $m($a['transfers']) }}</td><td><strong>{{ $m($a['expected']) }}</strong></td>
+                                <td>@if ($a['actual'] === null) not verified @else {{ $m($a['actual']) }} <small>({{ $a['actual_date'] }})</small> @endif</td>
+                                <td>@if ($a['variance'] === null) — @else {{ $m($a['variance']) }}@if ($a['unexplained'] !== 0) <small>({{ $m($a['unexplained']) }} unexplained)</small>@endif @endif</td></tr>
+                        @empty
+                            <tr><td colspan="8" style="text-align:left">No cash movement is recorded against any account.</td></tr>
+                        @endforelse
+                        @if ($f['collections_not_in_ledger'] > 0)
+                            <tr><td>Customer collections recorded, not yet in any account</td><td colspan="4"></td><td><strong>{{ $m($f['collections_not_in_ledger']) }}</strong></td><td colspan="2">Expected only: where it was received is not evidenced</td></tr>
+                        @endif
+                    </tbody>
+                </table>
+                <p class="hint" style="color:var(--muted);font-size:.78rem;margin:.3rem 0 0">Actual balances appear only from a statement or cash count verified by a second person (Finance &gt; Historical Reconciliation). Nothing here is estimated as an actual balance.
+                    Proof: accounts and unassigned cash {{ $m($f['ledger_net']) }} + collections not yet recorded {{ $m($f['collections_not_in_ledger']) }} = expected closing cash {{ $m($f['remaining']) }}@if ($f['proof_difference'] !== 0), unexplained difference {{ $m($f['proof_difference']) }}@endif.</p>
+            </div>
+            <details style="margin:.5rem 0">
+                <summary style="cursor:pointer;font-weight:600">Why the result and the cash differ</summary>
+                <ul class="biz-list" style="margin-top:.5rem">
+                    @foreach ($data['bridge']['lines'] as $line)<li><span>{{ $line['label'] }}</span><span class="num">{{ $m($line['amount']) }}</span></li>@endforeach
+                    <li><strong>= Expected closing cash</strong><strong class="num">{{ $m($data['bridge']['total']) }}</strong></li>
+                </ul>
+            </details>
             <p class="hint" style="color:var(--muted);font-size:.82rem;margin:0">
                 A funding explanation from recorded movements, not profit and not verified available cash. Customer collections are inflows even while their revenue classification is pending; none of them is counted as earned revenue here.
                 @if ($f['collections_not_in_ledger'] > 0) {{ $m($f['collections_not_in_ledger']) }} of collections is recorded but not yet in the ledger or any account. @endif

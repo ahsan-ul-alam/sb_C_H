@@ -5,6 +5,8 @@ namespace App\Services;
 use App\Models\AccountStatement;
 use App\Models\CapitalEntry;
 use App\Models\Expense;
+use App\Models\ExpensePayment;
+use App\Models\FinancialAccount;
 use App\Models\Invoice;
 use App\Models\JournalLine;
 use App\Models\Payment;
@@ -54,6 +56,7 @@ class BusinessDashboard
         $position = self::position($receipts, $currency);
 
         $net = $revenue['verified'] - $expenses['total'];
+        $funding = self::funding($start, $to, $receipts, $cash);
         $unresolved = self::unresolved($receipts, $sourcing, $expenses, $cash, $position, $investment, $currency, $start, $to);
         $status = [
             'revenue' => $receipts['unknown']['count'] > 0 ? 'incomplete' : (($receipts['provisional_service']['count'] + $receipts['sourcing_receipts']['unapplied_count'] > 0 || $sourcing['unresolved_count'] > 0) ? 'provisional' : 'verified'),
@@ -71,7 +74,7 @@ class BusinessDashboard
                 'if_suggested_service_accepted' => $net + $receipts['provisional_service']['amount'],
                 'unrecognised_sourcing_estimate' => $sourcing['estimate_total']],
             'investment' => $investment, 'revenue' => $revenue, 'expenses' => $expenses, 'sourcing' => $sourcing, 'cash' => $cash, 'position' => $position,
-            'receipts' => $receipts, 'status' => $status, 'unresolved' => $unresolved, 'funding' => self::funding($start, $to, $receipts, $cash),
+            'receipts' => $receipts, 'status' => $status, 'unresolved' => $unresolved, 'funding' => $funding, 'accounts' => self::accounts($start, $to), 'bridge' => self::bridge($revenue, $expenses, $funding, $receipts, $net),
             'chart' => self::chart($from, $to, $receipts['applied_service_rows'], $sourcing['recognised_rows']),
         ];
     }
@@ -296,12 +299,15 @@ class BusinessDashboard
         $lines = JournalLine::query()->join('journal_entries as e', 'e.id', '=', 'journal_lines.journal_entry_id')->where('journal_lines.account', 'cash')
             ->whereDate('e.entry_date', '>=', $start)->whereDate('e.entry_date', '<=', $to)->where('e.source_type', 'not like', 'transfer%')
             ->get(['e.source_type as type', 'e.source_id as sid', 'journal_lines.debit as d', 'journal_lines.credit as c']);
-        $expenseIds = $lines->where('type', 'expense')->pluck('sid')->unique();
+        // A later payment of an already-recorded unpaid expense is the same cost, classified by its expense (it must not show as an unexplained "other" outflow).
+        $paidExpense = ExpensePayment::whereIn('id', $lines->where('type', 'expense_payment')->pluck('sid')->unique())->pluck('expense_id', 'id');
+        $expenseIds = $lines->where('type', 'expense')->pluck('sid')->merge($paidExpense->values())->unique();
         $expenses = Expense::whereIn('id', $expenseIds)->get(['id', 'category', 'is_asset'])->keyBy('id');
         $loans = DB::table('loan_receivables')->where('status', 'verified')->whereIn('expense_id', $expenseIds)->pluck('expense_id')->flip();
         $investment = 0;
         $otherIn = 0;
         $otherParts = [];
+        $otherOutParts = [];
         $out = array_fill_keys(['operating', 'equipment', 'sourcing', 'loans', 'partner_withdrawals', 'other'], 0);
         foreach ($lines as $l) {
             $type = (string) $l->type;
@@ -310,11 +316,12 @@ class BusinessDashboard
                 $out['partner_withdrawals'] += (int) $l->c;
             } elseif ($type === 'payment' || str_starts_with($type, 'payment_v') || $type === 'revenue') {
                 continue;   // customer money is counted from the payment records below
-            } elseif ($type === 'expense') {
-                $e = $expenses->get($l->sid);
+            } elseif ($type === 'expense' || ($type === 'expense_payment' && $paidExpense->has($l->sid))) {
+                $expenseId = $type === 'expense' ? $l->sid : $paidExpense[$l->sid];
+                $e = $expenses->get($expenseId);
                 $class = match (true) {
                     $e === null => 'other',
-                    isset($loans[$l->sid]) => 'loans',
+                    isset($loans[$expenseId]) => 'loans',
                     str_starts_with((string) $e->category, 'Sourcing:') => 'sourcing',
                     (bool) $e->is_asset => 'equipment',
                     default => 'operating',
@@ -324,6 +331,9 @@ class BusinessDashboard
                 $otherIn += (int) $l->d;
                 $otherParts[$type] = ($otherParts[$type] ?? 0) + (int) $l->d;
                 $out['other'] += (int) $l->c;
+                if ((int) $l->c > 0) {
+                    $otherOutParts[$type] = ($otherOutParts[$type] ?? 0) + (int) $l->c;
+                }
             }
         }
         $collections = $receipts['total']['amount'];
@@ -334,9 +344,80 @@ class BusinessDashboard
 
         return [
             'investment' => $investment, 'collections' => $collections, 'collection_split' => $receipts['collections'], 'other_inflows' => $otherIn, 'other_inflow_parts' => $otherParts,
-            'total_in' => $totalIn, 'outflows' => $out, 'total_out' => $totalOut, 'remaining' => $totalIn - $totalOut,
+            'total_in' => $totalIn, 'outflows' => $out, 'other_outflow_parts' => $otherOutParts, 'total_out' => $totalOut, 'remaining' => $totalIn - $totalOut,
+            'ledger_net' => (int) $lines->sum('d') - (int) $lines->sum('c'),
+            // Proof: expected closing cash = what the ledger holds for the period + collections recorded but not yet in it. Anything else is an unexplained difference.
+            'proof_difference' => ($totalIn - $totalOut) - ((int) $lines->sum('d') - (int) $lines->sum('c') + $notInLedger),
             'collections_not_in_ledger' => $notInLedger, 'status' => ($cash['status'] === 'verified' && $notInLedger === 0) ? 'verified' : 'unverified',
         ];
+    }
+
+    /**
+     * Per account: opening + inflows - outflows +/- transfers = expected closing, from the journal's cash lines, then the newest VERIFIED statement and the
+     * variance to it. An account with no verified statement has no actual balance: it is shown as "not verified", never estimated. Cash that no entry
+     * assigns to an account is its own row.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private static function accounts(CarbonImmutable $start, CarbonImmutable $to): array
+    {
+        $lines = JournalLine::query()->join('journal_entries as e', 'e.id', '=', 'journal_lines.journal_entry_id')->where('journal_lines.account', 'cash')
+            ->whereDate('e.entry_date', '<=', $to)->get(['journal_lines.financial_account_id as aid', 'e.entry_date as day', 'e.source_type as type', 'journal_lines.debit as d', 'journal_lines.credit as c'])
+            ->groupBy(fn ($l) => $l->aid ?? 0);
+        $statements = StatementReconciliationService::latestVerified()->keyBy('financial_account_id');
+        $groups = ['cash' => 'Cash in Hand', 'petty' => 'Cash in Hand', 'mobile' => 'bKash / mobile banking', 'bank' => 'Bank'];
+        $row = function (?FinancialAccount $a, string $name, string $group) use ($lines, $start, $statements) {
+            $mine = $lines->get($a?->id ?? 0, collect());
+            $before = $mine->filter(fn ($l) => substr((string) $l->day, 0, 10) < $start->toDateString());
+            $within = $mine->filter(fn ($l) => substr((string) $l->day, 0, 10) >= $start->toDateString());
+            $isTransfer = fn ($l) => str_starts_with((string) $l->type, 'transfer');
+            $in = (int) $within->reject($isTransfer)->sum('d');
+            $out = (int) $within->reject($isTransfer)->sum('c');
+            $transfers = (int) $within->filter($isTransfer)->sum('d') - (int) $within->filter($isTransfer)->sum('c');
+            $opening = (int) $before->sum('d') - (int) $before->sum('c');
+            $statement = $a ? $statements->get($a->id) : null;
+            $position = $statement ? StatementReconciliationService::position($statement) : null;
+
+            return ['name' => $name, 'group' => $group, 'active' => $a ? ($a->is_active && $a->activation_status === 'active') : false, 'opening' => $opening, 'inflows' => $in, 'outflows' => $out,
+                'transfers' => $transfers, 'expected' => $opening + $in - $out + $transfers,
+                'actual' => $statement ? (int) $statement->statement_balance : null, 'actual_date' => $statement?->statement_date->toDateString(),
+                'variance' => $position ? $position['statement'] - $position['ledger'] : null, 'unexplained' => $position['unexplained'] ?? null,
+                'state' => $position === null ? 'not verified: a statement or count is needed' : ($position['unexplained'] === 0 ? 'verified and reconciled' : 'verified, difference to explain')];
+        };
+        $rows = FinancialAccount::orderByDesc('is_default')->orderBy('name')->get()->map(fn ($a) => $row($a, $a->name, $groups[$a->type] ?? 'Cash in Hand'))->all();
+        $unassigned = $row(null, 'Not assigned to any account', 'Unassigned');
+        if ($lines->has(0)) {
+            $rows[] = $unassigned;
+        }
+
+        return $rows;
+    }
+
+    /**
+     * Why the result and the money differ, as an exact walk from the net result to expected closing cash. The lines add up to the funding figure to the paisa
+     * (the identity is asserted in tests), so nothing is left to guess.
+     *
+     * @return array{lines: list<array{label: string, amount: int}>, total: int}
+     */
+    private static function bridge(array $revenue, array $expenses, array $funding, array $receipts, int $net): array
+    {
+        $o = $funding['outflows'];
+        $product = $receipts['collections']['product_sourcing']['amount'];
+        $lines = [
+            ['Net business result (revenue earned minus management expenses)', $net],
+            ['+ Partner investment (capital, not income)', $funding['investment']],
+            ['+ Client money received for products (not revenue)', $product],
+            ['+ Other collections not counted as revenue (pending classification or earned later)', $funding['collections'] - $product - $revenue['service']],
+            ['+ Other recorded inflows', $funding['other_inflows']],
+            ['− Supplier and sourcing payments (stock or advances; cost only when the margin is earned)', -$o['sourcing']],
+            ['− Loans lent (a receivable, not an expense)', -$o['loans']],
+            ['− Partner withdrawals and other outflows', -($o['partner_withdrawals'] + $o['other'])],
+            ['− Expenses paid in cash but outside the management-expense total', -($o['operating'] + $o['equipment'] - $expenses['total'])],
+            ['− Sourcing margin already in the result (its cash is inside client money above)', -$revenue['sourcing']],
+        ];
+        $lines = array_map(fn ($l) => ['label' => $l[0], 'amount' => (int) $l[1]], $lines);
+
+        return ['lines' => $lines, 'total' => (int) array_sum(array_column($lines, 'amount'))];
     }
 
     /** @return array<string, mixed> */

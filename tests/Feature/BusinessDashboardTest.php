@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\Expense;
+use App\Models\ExpensePayment;
 use App\Models\FinancialAccount;
 use App\Models\Invoice;
 use App\Models\Payment;
@@ -10,6 +11,7 @@ use App\Services\AccountingService;
 use App\Services\BusinessDashboard;
 use App\Services\Ledger;
 use App\Services\ProjectSourcingReport;
+use App\Services\StatementReconciliationService;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
@@ -89,7 +91,7 @@ it('explains the funding like the 7 November backup: investment, collections, re
     // Funding is not profit: no collection is earned revenue, the expenses are the owner-policy total, and the result is never presented as a final loss.
     expect($d['revenue']['verified'])->toBe(0)->and($d['expenses']['total'])->toBe(7_109_600)->and($d['net_profit']['status'])->not->toBe('verified')
         ->and($d['net_profit']['amount'])->toBe(-7_109_600);
-    $co->as('finance')->get(route('dashboard'))->assertOk()->assertSee('Where the money came from')->assertSee('Provisional cash remaining')->assertSee('Provisional position, not a final profit or loss');
+    $co->as('finance')->get(route('dashboard'))->assertOk()->assertSee('Where the money came from')->assertSee('Expected closing cash')->assertSee('Provisional position, not a final profit or loss');
 });
 
 it('shows unclassified collections as funding inflows without ever making them earned revenue, and counts nothing twice', function () {
@@ -224,4 +226,92 @@ it('shows the business dashboard only to those allowed to see company profit', f
     $co->as('clients')->get(route('dashboard'))->assertOk()->assertDontSee('Overall business profit / loss');     // client management keeps the ClientHub overview
     $co->as('employee')->get(route('dashboard'))->assertForbidden();
     $co->as('finance')->get(route('clienthub.dashboard'))->assertOk();
+});
+
+it('separates a BDT 350 cash balance from a BDT 150 loss (the owner example), with every taka bridged', function () {
+    $co = SellbeesCompany::boot($this);
+    foreach (['A' => '200', 'B' => '150', 'C' => '150'] as $code => $amount) {
+        $co->invest($code, $amount, '2026-02-01');                                           // partner investment 500
+    }
+    foreach (range(1, 5) as $i) {
+        bdReceipt($co, 1_000, '2026-02-03', 'service');                                      // onboarding 5 x 10 = 50
+    }
+    $projects = [];
+    foreach (range(1, 5) as $i) {
+        bdReceipt($co, 10_000, '2026-02-04', 'product_sourcing');                            // product collections 5 x 100 = 500
+        $projects[] = $co->project($co->client('Buyer '.$i), 'Buy '.$i)->id;
+    }
+    // One settled, client-owned lot: 5 pieces at 80 (delivery included), each agreed with a client at 100.
+    $supplier = DB::table('suppliers')->insertGetId(['name' => 'Supplier', 'is_active' => 1, 'created_at' => now(), 'updated_at' => now()]);
+    $lot = DB::table('sourcing_lots')->insertGetId(['number' => 'SL-T01', 'title' => 'Example', 'status' => 'settled', 'allocation_basis' => 'value', 'pricing_method' => 'fixed', 'pricing_value' => 0,
+        'ownership' => 'client', 'settled_at' => '2026-02-28 10:00:00', 'created_by' => $co->users['finance']->id, 'created_at' => now(), 'updated_at' => now()]);
+    $line = DB::table('sourcing_lot_lines')->insertGetId(['sourcing_lot_id' => $lot, 'supplier_id' => $supplier, 'description' => 'Item', 'unit' => 'pcs', 'quantity' => 5, 'usable_quantity' => 5,
+        'unit_price' => 8_000, 'received_quantity' => 5, 'arrived_on' => '2026-02-10', 'position' => 1, 'created_at' => now(), 'updated_at' => now()]);
+    foreach ($projects as $projectId) {
+        DB::table('sourcing_allocations')->insert(['sourcing_lot_id' => $lot, 'sourcing_lot_line_id' => $line, 'project_id' => $projectId, 'kind' => 'sale', 'description' => 'Item', 'quantity' => 1,
+            'unit_price' => 10_000, 'created_by' => $co->users['finance']->id, 'created_at' => now(), 'updated_at' => now()]);
+    }
+    $co->expense('Sourcing: supplier payment', 'Supplier cost including delivery', '400', '2026-02-10');   // supplier cost 400
+    $co->expense('Office', 'Operating expense', '300', '2026-02-12');                                     // operating expense 300
+
+    $d = bdAll();
+    expect($d['investment']['net'])->toBe(50_000)->and($d['revenue']['service'])->toBe(5_000)->and($d['receipts']['collections']['product_sourcing']['amount'])->toBe(50_000)
+        ->and($d['sourcing']['recognised'])->toBe(10_000)                                    // earned margin 100: agreed 500 - cost 400, cost counted once
+        ->and($d['revenue']['verified'])->toBe(15_000)                                       // gross earnings before operating expense: 150
+        ->and($d['expenses']['total'])->toBe(30_000)->and($d['net_profit']['amount'])->toBe(-15_000)         // net loss 150
+        ->and($d['funding']['total_in'])->toBe(105_000)->and($d['funding']['total_out'])->toBe(70_000)->and($d['funding']['remaining'])->toBe(35_000)   // expected cash 350
+        ->and($d['funding']['outflows']['sourcing'])->toBe(40_000)->and($d['funding']['proof_difference'])->toBe(0)
+        ->and($d['bridge']['total'])->toBe($d['funding']['remaining']);                      // the walk from the loss to the cash is exact
+    expect($d['funding']['remaining'])->not->toBe($d['net_profit']['amount']);
+});
+
+it('keeps account balances honest: expected from the ledger, actual only from a verified statement, transfers neutral, opening carried', function () {
+    $co = SellbeesCompany::boot($this);
+    $cash = FinancialAccount::factory()->asDefault()->create(['name' => 'Office Cash']);
+    $bank = FinancialAccount::factory()->bank()->create(['name' => 'City Bank']);
+    $co->invest('A', '1000', '2026-02-01');                                                   // 1,000.00 into the default account
+    AccountingService::transfer(['from' => $cash->id, 'to' => $bank->id, 'amount' => 30_000, 'date' => '2026-02-05', 'idempotency_key' => (string) Str::uuid()], $co->users['finance']);
+    Carbon::setTestNow('2026-03-01 10:00:00');
+    $statement = StatementReconciliationService::record($bank, ['statement_date' => '2026-02-10', 'statement_balance' => 25_000, 'reference' => 'Bank statement 10 Feb'], $co->users['finance']);
+    StatementReconciliationService::decide($statement, true, $co->users['board']);
+
+    $feb = collect(bdAll('2026-02-01', '2026-02-28')['accounts'])->keyBy('name');
+    expect($feb['Office Cash']['expected'])->toBe(70_000)->and($feb['Office Cash']['inflows'])->toBe(100_000)->and($feb['Office Cash']['transfers'])->toBe(-30_000)
+        ->and($feb['Office Cash']['actual'])->toBeNull()->and($feb['Office Cash']['state'])->toContain('not verified')           // no statement: never an estimated "actual"
+        ->and($feb['City Bank']['expected'])->toBe(30_000)->and($feb['City Bank']['transfers'])->toBe(30_000)
+        ->and($feb['City Bank']['actual'])->toBe(25_000)->and($feb['City Bank']['variance'])->toBe(-5_000)->and($feb['City Bank']['unexplained'])->toBe(5_000);
+    $d = bdAll('2026-02-01', '2026-02-28');
+    expect($d['funding']['total_in'])->toBe(100_000)->and($d['funding']['total_out'])->toBe(0)                              // the transfer is neither inflow nor outflow
+        ->and(collect($d['accounts'])->sum('expected'))->toBe(100_000)->and($d['cash']['status'])->toBe('unverified');
+
+    $mar = collect(bdAll('2026-03-01', '2026-03-31')['accounts'])->keyBy('name');                                          // March opens with February's closing
+    expect($mar['Office Cash']['opening'])->toBe(70_000)->and($mar['Office Cash']['expected'])->toBe(70_000)->and($mar['City Bank']['opening'])->toBe(30_000);
+});
+
+it('classifies loans, later expense payments, supplier refunds and loan repayments correctly and counts nothing twice', function () {
+    $co = SellbeesCompany::boot($this);
+    $co->invest('A', '1000', '2026-02-01');
+    $loan = $co->expense('Loan', 'Loan lent', '300', '2026-02-02');
+    DB::table('loan_receivables')->insert(['borrower_name' => 'X', 'expense_id' => $loan->id, 'principal' => 30_000, 'lent_on' => '2026-02-02', 'status' => 'verified', 'created_by' => $co->users['finance']->id, 'created_at' => now(), 'updated_at' => now()]);
+    Ledger::post('2026-02-20', 'Loan repaid', 'loan_receivable_repayment', 1, [['cash', null, 5_000, 0], ['assets.loans_receivable', null, 0, 5_000]], null);
+    $supplier = $co->expense('Sourcing: supplier payment', 'Advance to a supplier', '400', '2026-02-03');
+    $refund = (new Expense)->forceFill(['category' => 'Sourcing: supplier payment', 'description' => 'Supplier refund', 'amount' => 10_000, 'spent_on' => '2026-02-09', 'status' => 'verified',
+        'created_by' => $co->users['finance']->id, 'reverses_id' => $supplier->id, 'correction_type' => 'refund_received', 'payment_status' => 'paid', 'paid_amount' => 10_000]);
+    $refund->save();
+    Ledger::post('2026-02-09', 'Supplier refund', 'expense', $refund->id, [['cash', null, 10_000, 0], ['expense', null, 0, 10_000]], null);
+    // An unpaid operating cost recorded earlier and paid later: the cost is counted once (at its expense date) and its cash once (when paid).
+    $unpaid = (new Expense)->forceFill(['category' => 'Office', 'description' => 'Bill paid later', 'amount' => 20_000, 'spent_on' => '2026-02-04', 'status' => 'verified', 'created_by' => $co->users['finance']->id,
+        'payment_status' => 'unpaid', 'paid_amount' => 0]);
+    $unpaid->save();
+    $payment = (new ExpensePayment)->forceFill(['expense_id' => $unpaid->id, 'amount' => 20_000, 'paid_on' => '2026-02-15', 'idempotency_key' => (string) Str::uuid(), 'created_by' => $co->users['finance']->id]);
+    $payment->save();
+    Ledger::post('2026-02-15', 'Paid bill', 'expense_payment', $payment->id, [['liabilities', null, 20_000, 0], ['cash', null, 0, 20_000]], null);
+
+    $d = bdAll();
+    $f = $d['funding'];
+    expect($f['outflows']['loans'])->toBe(30_000)->and($f['outflows']['sourcing'])->toBe(30_000)                       // 400 paid, 100 refunded
+        ->and($f['outflows']['operating'])->toBe(20_000)->and($f['outflows']['other'])->toBe(0)->and($f['other_inflows'])->toBe(5_000)  // repayment is an inflow, not income
+        ->and($d['expenses']['total'])->toBe(20_000)                                          // loans, supplier money and the refund are not office costs
+        ->and($d['net_profit']['amount'])->toBe(-20_000)->and($f['remaining'])->toBe(100_000 + 5_000 - 80_000)
+        ->and($f['proof_difference'])->toBe(0)->and($d['bridge']['total'])->toBe($f['remaining']);
 });
