@@ -45,6 +45,7 @@ use App\Http\Controllers\ReportController;
 use App\Http\Controllers\ResolutionController;
 use App\Http\Controllers\RevenueController;
 use App\Http\Controllers\RevenueEventController;
+use App\Http\Controllers\SearchController;
 use App\Http\Controllers\SegmentController;
 use App\Http\Controllers\SettingsController;
 use App\Http\Controllers\SourcingLotController;
@@ -70,6 +71,8 @@ Route::middleware('auth')->group(function () {
 
     Route::get('/', HomeController::class)->name('dashboard');
     // The ClientHub overview (invoices and collections) that used to be the home page; the home page is now the Central Business Dashboard for those who may see it.
+    // Global command palette (Ctrl+K): authenticated, rate limited, each result group guarded by the permission of the screen it opens.
+    Route::get('search', SearchController::class)->name('search')->middleware('throttle:60,1');
     Route::get('clienthub', DashboardController::class)->name('clienthub.dashboard')->middleware('can:clienthub');
 
     Route::get('notifications', [NotificationController::class, 'index'])->name('notifications.index');

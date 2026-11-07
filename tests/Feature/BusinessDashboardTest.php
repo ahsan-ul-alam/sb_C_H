@@ -220,10 +220,10 @@ it('shows the business dashboard only to those allowed to see company profit', f
     $co = SellbeesCompany::boot($this);
     $co->invest('A', '1000', '2026-02-01');
 
-    $co->as('finance')->get(route('dashboard'))->assertOk()->assertSee('Overall business profit / loss')->assertSee('Total investment');
-    $co->as('board')->get(route('dashboard'))->assertOk()->assertSee('Overall business profit / loss');
-    $co->as('auditor')->get(route('dashboard'))->assertOk()->assertSee('Overall business profit / loss');
-    $co->as('clients')->get(route('dashboard'))->assertOk()->assertDontSee('Overall business profit / loss');     // client management keeps the ClientHub overview
+    $co->as('finance')->get(route('dashboard'))->assertOk()->assertSee('Overall Business Position')->assertSee('Customer Collections');
+    $co->as('board')->get(route('dashboard'))->assertOk()->assertSee('Overall Business Position');
+    $co->as('auditor')->get(route('dashboard'))->assertOk()->assertSee('Overall Business Position');
+    $co->as('clients')->get(route('dashboard'))->assertOk()->assertDontSee('Overall Business Position');     // client management keeps the ClientHub overview
     $co->as('employee')->get(route('dashboard'))->assertForbidden();
     $co->as('finance')->get(route('clienthub.dashboard'))->assertOk();
 });

@@ -43,6 +43,9 @@
             <button type="button" id="nav-toggle" aria-controls="sidebar" aria-expanded="false"><x-icon name="menu" /><span class="sr-only">Open navigation menu</span></button>
             <span class="brand-name">{{ $brandName }}</span>
             <span class="spacer"></span>
+            <button type="button" class="topbar-search" data-cmdk-open aria-haspopup="dialog" aria-label="Search the ERP">
+                <x-icon name="search" /> <span class="topbar-search-label">Search</span> <kbd data-cmdk-hint>Ctrl K</kbd>
+            </button>
             <div class="notif">
                 <button type="button" id="notif-bell" class="notif-bell" aria-haspopup="true" aria-expanded="false" aria-controls="notif-panel" aria-label="Notifications"
                         data-count-url="{{ route('notifications.count') }}" data-feed-url="{{ route('notifications.feed') }}"
@@ -113,6 +116,8 @@
 
 <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="false"></div>
 
+@include('partials.command-palette')
+
 <script>
     window.__errors = @json($errors->messages());
 
@@ -175,6 +180,7 @@
     });
 </script>
 <script src="{{ asset('js/sellbees.js') }}?v={{ filemtime(public_path('js/sellbees.js')) }}" defer></script>
+<script src="{{ asset('js/command-palette.js') }}?v={{ filemtime(public_path('js/command-palette.js')) }}" defer></script>
 <div id="page-scripts">@stack('scripts')</div>
 </body>
 </html>
