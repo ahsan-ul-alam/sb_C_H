@@ -75,7 +75,7 @@ class BusinessDashboard
             'net_profit' => ['amount' => $net, 'status' => $overall,
                 'if_suggested_service_accepted' => $net + $receipts['provisional_service']['amount'],
                 'unrecognised_sourcing_estimate' => $sourcing['estimate_total']],
-            'investment' => $investment, 'revenue' => $revenue, 'expenses' => $expenses, 'sourcing' => $sourcing, 'cash' => $cash, 'position' => $position, 'fund' => $fund,
+            'investment' => $investment, 'revenue' => $revenue, 'expenses' => $expenses, 'sourcing' => $sourcing, 'cash' => $cash, 'position' => $position, 'fund' => $fund, 'reconciliation' => CashReconciliation::snapshot(),
             'receipts' => $receipts, 'status' => $status, 'unresolved' => $unresolved, 'funding' => $funding, 'accounts' => self::accounts($start, $to), 'bridge' => self::bridge($revenue, $expenses, $funding, $receipts, $net),
             'chart' => self::chart($from, $to, $receipts['applied_service_rows'], $sourcing['recognised_rows']),
         ];
@@ -432,9 +432,7 @@ class BusinessDashboard
      */
     private static function fundPosition(array $cash, array $position, string $currency, CarbonImmutable $to): array
     {
-        $ids = Payment::whereHas('project', fn ($q) => $q->where('currency', $currency))->whereDate('paid_on', '<=', $to)->pluck('id');
-        $posted = DB::table('journal_entries')->where(fn ($q) => $q->where('source_type', 'payment')->orWhere('source_type', 'like', 'payment_v%'))->whereIn('source_id', $ids)->pluck('source_id');
-        $unjournaled = (int) Payment::whereIn('id', $ids)->whereNotIn('id', $posted)->sum('amount');
+        $unjournaled = CashReconciliation::collectionsNotJournaled($currency, $to->toDateString());
         $available = $cash['ledger_total'] + $unjournaled;
         $balance = FinancialStatements::position();
 

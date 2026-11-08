@@ -42,8 +42,10 @@
             <div class="form-grid">
                 <div class="field"><label>Account</label><select name="financial_account_id" required>@foreach ($rows as $r)<option value="{{ $r['account']->id }}">{{ $r['account']->name }}</option>@endforeach</select></div>
                 <div class="field"><label>Statement date</label><input type="date" name="statement_date" max="{{ today()->toDateString() }}" required></div>
+                <div class="field"><label>Time of the balance (optional)</label><input type="time" name="cutoff_time"></div>
                 <div class="field"><label>Balance on the statement</label><input name="statement_balance" inputmode="decimal" required></div>
-                <div class="field"><label>Reference (statement no., screenshot id, count sheet)</label><input name="reference" required></div>
+                <div class="field"><label>Evidence</label><select name="evidence"><option value="statement">Bank / bKash statement or count sheet</option><option value="owner_confirmed">Owner's written confirmation (not an independent statement)</option></select></div>
+                <div class="field"><label>Reference (statement no., screenshot id, count sheet, or the owner's confirmation)</label><input name="reference" required></div>
                 <div class="field full"><label>Notes</label><input name="notes"></div>
             </div>
             <p class="muted" style="margin-top:.8rem">Reconciling items (amount added to the statement balance to reach the books; use a minus sign for a payment not yet cleared):</p>

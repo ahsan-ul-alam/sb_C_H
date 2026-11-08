@@ -37,6 +37,7 @@ class StatementController extends Controller
         $data = $request->validate([
             'financial_account_id' => ['required', 'exists:financial_accounts,id'], 'statement_date' => ['required', 'date', 'before_or_equal:today'],
             'statement_balance' => ['required', 'regex:'.self::SIGNED_AMOUNT], 'reference' => ['required', 'string', 'max:191'], 'notes' => ['nullable', 'string', 'max:191'],
+            'evidence' => ['nullable', 'in:statement,owner_confirmed'], 'cutoff_time' => ['nullable', 'date_format:H:i'],
             'items' => ['nullable', 'array', 'max:10'], 'items.*.kind' => ['nullable', 'string'], 'items.*.amount' => ['nullable', 'regex:'.self::SIGNED_AMOUNT], 'items.*.description' => ['nullable', 'string', 'max:191'],
         ]);
         $items = collect($data['items'] ?? [])->filter(fn ($i) => trim((string) ($i['amount'] ?? '')) !== '')
@@ -45,6 +46,7 @@ class StatementController extends Controller
         return $this->attempt(fn () => StatementReconciliationService::record(FinancialAccount::findOrFail($data['financial_account_id']), [
             'statement_date' => $data['statement_date'], 'statement_balance' => $this->signed($data['statement_balance']),
             'reference' => $data['reference'], 'notes' => $data['notes'] ?? null, 'items' => $items,
+            'evidence' => $data['evidence'] ?? 'statement', 'cutoff_time' => $data['cutoff_time'] ?? null,
         ], $request->user()), 'Recorded; a second person must verify it against the real statement.');
     }
 

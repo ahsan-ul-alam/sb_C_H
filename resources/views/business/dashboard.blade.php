@@ -141,9 +141,28 @@
 
         <h2 class="sr-only">Details on request</h2>
         <div class="bo-details">
+            @php($rc = $data['reconciliation'])
+            <details class="bo-detail" id="d-reconcile" open><summary>Cash reconciliation <small>ERP expected vs actual money</small></summary>
+                <div class="body"><ul class="bo-rows">
+                    <li><span>ERP expected cash ({{ $rc['expected_as_of'] }})</span><span class="n">{{ $m($rc['expected']) }}</span></li>
+                    @if ($rc['status'] === 'not_verified')
+                        <li><span>Actual cash + bank + bKash</span><span class="n">Not Verified</span></li>
+                        <li><span class="t">Unreconciled cash difference</span><span class="n t">Not Verified</span></li>
+                    @else
+                        <li><span>Actual cash + bank + bKash ({{ $rc['evidence'] === 'owner_confirmed' ? 'owner-confirmed, not statement-verified' : 'statement-verified' }})</span><span class="n">{{ $m($rc['actual']) }}</span></li>
+                        <li><span class="t">Unreconciled cash difference (actual − expected)</span><span class="n t">{{ $rc['sign'] }}{{ $m(abs($rc['difference'])) }}</span></li>
+                    @endif
+                    <li><span class="m">{{ $rc['bangla'] }}</span><span class="n m">{{ $rc['direction'] }}</span></li>
+                    <li><span class="m">Status</span><span class="n m">{{ $rc['status'] === 'not_verified' ? 'Not Verified' : ($rc['status'] === 'reconciled' ? 'Reconciled' : 'Unreconciled') }}</span></li>
+                    @if ($rc['cutoff'])<li><span class="m">As of</span><span class="n m">{{ $rc['cutoff'] }}@if ($rc['cutoff_at']) {{ $rc['cutoff_at']->format('H:i') }}@endif</span></li>@endif
+                    @foreach ($rc['statements'] as $st)
+                        <li><span class="m">{{ $st['account'] }}: {{ $st['evidence'] === 'owner_confirmed' ? 'owner-confirmed' : 'statement' }} · {{ $st['reference'] }}@if ($st['verified_by']) · verified by {{ $st['verified_by'] }}@endif</span><span class="n m">{{ $m($st['balance']) }}</span></li>
+                    @endforeach
+                </ul><p class="bo-note">@if ($rc['reason']){{ $rc['reason'] }} @endif The difference is an unresolved reconciliation difference, not a transaction: it is never booked as expense, loss, revenue, profit, loan, supplier payment or capital, and it does not touch the profit figures. Balances come from account statements verified by a second person (Finance &gt; Account Statements); owner-reported figures are shown as owner-confirmed until a statement backs them.</p></div></details>
+
             <details class="bo-detail" id="d-fund" open><summary>Fund / asset position <small>cash, receivables and net assets are different things</small></summary>
                 <div class="body"><ul class="bo-rows">
-                    <li><span class="t">Available cash</span><span class="n t">{{ $m($data['fund']['available_cash']) }}</span></li>
+                    <li><span class="t">Available cash (ERP expected, not verified)</span><span class="n t">{{ $m($data['fund']['available_cash']) }}</span></li>
                     <li><span>+ Loans receivable (lent out, recoverable, not spendable)</span><span class="n">{{ $m($data['fund']['loans_receivable']) }}</span></li>
                     <li><span class="t">Cash + loans receivable</span><span class="n t">{{ $m($data['fund']['cash_plus_receivables']) }}</span></li>
                     <li><span class="t">Total net assets (all assets less liabilities)</span><span class="n t">{{ $m($data['fund']['total_net_assets']) }}</span></li>

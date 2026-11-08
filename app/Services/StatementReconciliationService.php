@@ -8,6 +8,7 @@ use App\Models\JournalLine;
 use App\Models\StatementReconcilingItem;
 use App\Models\User;
 use App\Support\Money;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
@@ -44,6 +45,9 @@ class StatementReconciliationService
         if ($data['statement_date'] > today()->toDateString()) {
             throw new RuntimeException('A statement cannot be dated in the future.');
         }
+        if (! in_array($data['evidence'] ?? 'statement', ['statement', 'owner_confirmed'], true)) {
+            throw new RuntimeException('Evidence must be a statement or the owner\'s confirmation.');
+        }
         $items = array_values(array_filter($data['items'] ?? [], fn ($i) => (int) $i['amount'] !== 0));
         foreach ($items as $item) {
             if (! array_key_exists($item['kind'], StatementReconcilingItem::KINDS) || trim((string) $item['description']) === '') {
@@ -59,6 +63,8 @@ class StatementReconciliationService
             $statement = AccountStatement::create([
                 'financial_account_id' => $account->id, 'statement_date' => $data['statement_date'], 'statement_balance' => $data['statement_balance'],
                 'reference' => trim($data['reference']), 'notes' => $data['notes'] ?? null, 'created_by' => $user->id,
+                'evidence' => $data['evidence'] ?? 'statement',
+                'cutoff_at' => ! empty($data['cutoff_time']) ? Carbon::parse($data['statement_date'].' '.$data['cutoff_time']) : null,
             ]);
             foreach ($items as $item) {
                 $statement->items()->create(['kind' => $item['kind'], 'amount' => (int) $item['amount'], 'description' => trim($item['description'])]);

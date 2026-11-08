@@ -12,12 +12,17 @@ class AccountStatement extends Model
 
     protected function casts(): array
     {
-        return ['statement_date' => 'date', 'verified_at' => 'datetime', 'statement_balance' => 'integer'];
+        return ['statement_date' => 'date', 'verified_at' => 'datetime', 'cutoff_at' => 'datetime', 'statement_balance' => 'integer'];
     }
 
     public function account(): BelongsTo
     {
         return $this->belongsTo(FinancialAccount::class, 'financial_account_id');
+    }
+
+    public function verifier(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'verified_by');
     }
 
     public function items(): HasMany
