@@ -77,8 +77,8 @@ class ProjectController extends Controller
         $project->load('client');
 
         $segments = $project->segments()
-            ->withSum('allocations', 'amount')
-            ->with(['allocations.payment.invoice'])
+            ->withSum(['allocations' => fn ($q) => $q->whereHas('payment')], 'amount')
+            ->with(['allocations' => fn ($q) => $q->whereHas('payment')->with('payment.invoice')])   // a voided payment's allocation is kept in the database but not listed here
             ->orderBy('id')
             ->get();
 

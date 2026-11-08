@@ -68,7 +68,7 @@ class PaymentController extends Controller
         return view('payments.choose', [
             'project' => $project->load('client'),
             'invoices' => $project->invoices()->open()->latest('issued_on')->get(),
-            'segments' => $project->segments()->withSum('allocations', 'amount')->orderBy('id')->get(),
+            'segments' => $project->segments()->withSum(['allocations' => fn ($q) => $q->whereHas('payment')], 'amount')->orderBy('id')->get(),
         ]);
     }
 

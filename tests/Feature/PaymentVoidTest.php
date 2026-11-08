@@ -13,6 +13,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Tests\Support\SellbeesCompany;
 
@@ -182,6 +183,42 @@ it('re-checks the guards at approval time: a posting that appeared after the pro
 
     $co->post('board', 'finance.payment-voids.decide', ['decision' => 'approve'], PaymentVoidRequest::sole())->assertSessionHas('error');
     expect(Payment::count())->toBe(2)->and(PaymentVoidRequest::sole()->status)->toBe('pending');
+});
+
+it('shows the segment balances on the project and payment-choice pages without the voided allocation', function () {
+    [$co, $project, , , , $target] = voidFixture($this);
+    $choose = fn () => $co->as('finance')->get(route('projects.payments.choose', $project))->assertOk()->getContent();
+    $show = fn () => $co->as('finance')->get(route('projects.show', $project))->assertOk()->getContent();
+    expect($choose())->toContain('4,765.50')->and($show())->toContain('5,234.50');
+
+    $co->voidPayment($target);
+
+    expect($choose())->toContain('6,000.00')->not->toContain('4,765.50')
+        ->and($show())->toContain('6,000.00')->not->toContain('5,234.50');
+});
+
+it('leaves cash, invoice, segment and project totals unchanged when a void is rejected', function () {
+    [$co, $project, $segment, $invoice, , $target] = voidFixture($this);
+    $snapshot = fn () => [Payment::sum('amount'), $invoice->refresh()->amount_paid, $invoice->status->value, $project->totals(), $segment->receivedAmount(),
+        ProjectFinancialService::for($project)['payments_received'], DB::table('journal_entries')->count()];
+    $before = $snapshot();
+
+    $co->post('finance', 'payments.void-requests.store', ['reason' => 'Duplicate', 'evidence' => 'TRX-5'], $target)->assertSessionHasNoErrors();
+    expect($snapshot())->toBe($before);   // a pending proposal changes nothing either
+    $co->post('board', 'finance.payment-voids.decide', ['decision' => 'reject', 'note' => 'Received'], PaymentVoidRequest::sole())->assertSessionHasNoErrors();
+
+    expect($snapshot())->toBe($before)->and(Payment::withVoided()->whereKey($target->id)->value('voided_at'))->toBeNull();
+});
+
+it('does not record a second payment when the key of a voided payment is resubmitted', function () {
+    [$co, , $segment] = voidFixture($this);
+    $key = (string) Str::uuid();
+    $co->paySegment($segment, '100', '2026-11-05', $key)->assertSessionHasNoErrors();
+    $paid = Payment::where('idempotency_key', $key)->sole();
+    $co->voidPayment($paid);
+
+    $co->paySegment($segment, '100', '2026-11-05', $key);   // the same form submitted again
+    expect(Payment::withVoided()->where('idempotency_key', $key)->count())->toBe(1)->and(Payment::count())->toBe(2);
 });
 
 it('leaves every other payment and record untouched when one payment is voided', function () {
