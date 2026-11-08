@@ -48,7 +48,10 @@ if (! function_exists('pfLoadBackup')) {
         $cash = [1 => 1637000, 2 => 1106700, 3 => 2698000, 4 => -198600, 5 => -800000, 6 => 25000, 7 => -4591700, 8 => -280000, 9 => -290000, 10 => -50000, 11 => -394300, 12 => -50000, 13 => -140000,
             14 => -600000, 15 => -28000, 16 => -50000, 17 => -80000, 18 => -1035000, 21 => 57000, 22 => -2153000, 23 => 1800000, 24 => -50000];
         foreach ($cash as $id => $net) {
-            DB::table('journal_entries')->insert(['id' => $id, 'entry_date' => $id === 24 ? '2026-11-08' : '2026-11-01', 'memo' => 'backup '.$id, 'source_type' => 'backup', 'source_id' => $id, 'created_at' => $now, 'updated_at' => $now]);
+            // Entries 5 and 16 are the original disbursements of the two loans (expenses #2 and #14), exactly as in the backup.
+            $type = in_array($id, [5, 16], true) ? 'expense' : 'backup';
+            $source = $id === 5 ? 2 : ($id === 16 ? 14 : $id);
+            DB::table('journal_entries')->insert(['id' => $id, 'entry_date' => $id === 24 ? '2026-11-08' : '2026-11-01', 'memo' => 'backup '.$id, 'source_type' => $type, 'source_id' => $source, 'created_at' => $now, 'updated_at' => $now]);
             DB::table('journal_lines')->insert([
                 ['journal_entry_id' => $id, 'account' => 'cash', 'debit' => max($net, 0), 'credit' => max(-$net, 0)],
                 ['journal_entry_id' => $id, 'account' => $net > 0 ? 'equity.opening' : 'expense', 'debit' => max(-$net, 0), 'credit' => max($net, 0)],

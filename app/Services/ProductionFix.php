@@ -4,23 +4,32 @@ namespace App\Services;
 
 use App\Enums\InvoiceStatus;
 use App\Models\Invoice;
+use App\Models\ReconciliationException;
+use App\Models\User;
+use App\Support\Money;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use RuntimeException;
 
 /**
- * TEMPORARY. The logic behind `php artisan sellbees:production-fix`, a one-time, owner-approved production repair. It is removed together with the command once the
- * repair has succeeded (see the deployment notes); nothing else in the application refers to it.
+ * TEMPORARY. The logic behind `php artisan sellbees:production-fix`, a one-time, owner-approved OPERATIONAL CUTOVER of the production ERP. It is removed together with the
+ * command once it has succeeded (see the deployment notes); nothing else in the application refers to it.
  *
- * What it may change (and only with --apply, and only after every guard below passes): the DERIVED invoice totals (amount paid / status, recalculated from the
- * payments by the invoice's own method) and the client SB-number counter (raised, never lowered, to the highest number in use). It never touches a payment, a
- * journal, an invoice total, a loan, an account statement or a supplier record, and it never creates a void: the two erroneous Suchona Mart receipts (#8 and #13)
- * are voided only through the existing Finance-proposes / different-Board-member-approves workflow; here they are merely reported as PENDING or APPROVED.
+ * It reports TWO independent results:
+ *   TECHNICAL CUTOVER        COMPLETE | BLOCKED   the database is sound and the ERP can be operated. Only genuine technical failures block it: a schema or migration gap,
+ *                            a non-InnoDB table, a dangling foreign key, an unbalanced or doubled journal entry, a verified expense or capital entry that never reached the ledger,
+ *                            a malformed SB number, or records that are not what the owner's decisions were made about.
+ *   FINANCIAL RECONCILIATION COMPLETE | PENDING   the historical financial questions are answered with evidence. They NEVER block the cutover: the two erroneous receipts
+ *                            (#8, #13) awaiting the Payment Void workflow, the unreconciled cash difference, account statements, receipts and lots still to be verified.
  *
- * Guards: default read-only preview; --apply needs the database name and the state fingerprint printed by the preview; exact record and amount preconditions that fail
- * closed; a database advisory lock; a before/after hash of every financial amount that must be identical; and a permanent marker in the audit log that makes a
- * successful run impossible to repeat. The marker is written only when the whole repair is complete (both voids approved and every figure as expected).
+ * What --apply may change: the DERIVED invoice totals (amount paid / status, recalculated by the invoice's own method), the SB-number counter (raised, never lowered), and it REGISTERS
+ * the open historical items in the existing reconciliation-exceptions register (status "legacy review", visible on Finance > Historical Reconciliation, resolvable only by a second person
+ * with evidence). It never touches a payment, journal, invoice total, loan, statement, receipt, expense or supplier record, never creates or approves a void, never marks anything
+ * verified, and never posts a balancing entry. A before/after hash of every financial amount must be identical or the run rolls back.
+ *
+ * The permanent marker in the audit log certifies the TECHNICAL cutover only. It says in so many words that financial reconciliation is not certified.
  */
 class ProductionFix
 {
@@ -37,10 +46,10 @@ class ProductionFix
 
     private const ERRONEOUS = [8, 13];
 
-    /** invoice id => [project, total]: unchanged by this repair. */
+    /** invoice id => [project, total]: unchanged by this cutover. */
     private const INVOICES = [4 => [2, 1_000_000], 6 => [2, 1_920_000], 10 => [2, 2_904_000]];
 
-    /** @return object|null the marker of a successful run */
+    /** @return object|null the marker of a successful technical cutover */
     public static function marker(): ?object
     {
         return DB::table('audit_logs')->where('action', self::MARKER)->orderBy('id')->first();
@@ -72,6 +81,8 @@ class ProductionFix
         $check('Every table uses InnoDB', $engine === [], implode(', ', $engine));
         $orphans = self::orphans();
         $check('No row points at a missing parent (foreign keys consistent)', $orphans === [], implode('; ', $orphans));
+        $check('Every journal entry balances and none is posted twice', IntegrityGate::ledgerBlockers() === [], implode('; ', IntegrityGate::ledgerBlockers()));
+        $check('Every verified expense and capital entry reached the ledger', IntegrityGate::sourceBlockers() === [], implode('; ', IntegrityGate::sourceBlockers()));
 
         $voids = [];
         $invoices = [];
@@ -82,8 +93,8 @@ class ProductionFix
             foreach (self::ERRONEOUS as $id) {
                 $voids[$id] = self::voidState($id);
             }
-            $unexpected = self::unexpectedVoids();
-            $check('No other payment is voided or has a void request', $unexpected === [], implode('; ', $unexpected));
+            $improper = self::improperVoids();
+            $check('No payment is voided outside the approved workflow', $improper === [], implode('; ', $improper));
             $drift = self::invoiceDrift();
             foreach (self::INVOICES as $id => $_) {
                 $invoice = Invoice::find($id);
@@ -95,32 +106,24 @@ class ProductionFix
         $check('Client SB numbers are present, unique and well formed', $sb['blockers'] === [], implode('; ', $sb['blockers']));
 
         $cash = $schemaReady ? CashReconciliation::snapshot() : null;
-        $outstanding = [];
-        foreach ($voids as $id => $v) {
-            if ($v['state'] !== 'APPROVED') {
-                $outstanding[] = 'Payment #'.$id.' void: '.$v['state'].' ('.$v['next'].')';
-            }
-        }
-        if ($cash !== null && $cash['status'] === 'not_verified') {
-            $outstanding[] = 'Actual cash balance: Not Verified ('.$cash['reason'].')';
-        } elseif ($cash !== null && $cash['evidence'] === 'owner_confirmed') {
-            $outstanding[] = 'Actual cash balance is owner-confirmed only; no independent bank/bKash statement backs it yet';
-        }
+        $marker = self::marker();
+        $technical = $marker !== null ? 'COMPLETE' : ($blockers === [] ? 'READY' : 'BLOCKED');
+        $outstanding = self::outstanding($voids, $cash, $schemaReady);
 
         return [
-            'database' => DB::connection()->getDatabaseName(), 'applied' => self::marker() !== null, 'checks' => $checks, 'blockers' => $blockers, 'voids' => $voids, 'invoices' => $invoices,
-            'drift' => $drift, 'sb_drift' => $sb['drift'], 'cash' => $cash, 'loans' => self::loanTotals(), 'outstanding' => $outstanding,
-            'complete' => $blockers === [] && $drift === [] && $sb['drift'] === null && self::fullyCorrected($voids, $invoices),
+            'database' => DB::connection()->getDatabaseName(), 'applied' => $marker !== null, 'checks' => $checks, 'blockers' => $blockers, 'voids' => $voids, 'invoices' => $invoices,
+            'drift' => $drift, 'sb_drift' => $sb['drift'], 'cash' => $cash, 'loans' => self::loanTotals(), 'outstanding' => $outstanding, 'technical' => $technical,
+            'financial' => $outstanding === [] && self::fullyCorrected($voids, $invoices) ? 'COMPLETE' : 'PENDING',
             'fingerprint' => $schemaReady ? self::fingerprint() : null,
         ];
     }
 
     /**
-     * Apply the authorised technical repairs. Throws (changing nothing) unless every guard holds.
+     * Complete the technical cutover. Throws (changing nothing) unless every guard holds. Historical financial exceptions never prevent it.
      *
-     * @return array{status: string, report: array<string, mixed>, repaired: list<string>}
+     * @return array{technical: string, financial: string, report: array<string, mixed>, repaired: list<string>, registered: int}
      */
-    public static function apply(string $expectDatabase, string $fingerprint): array
+    public static function apply(string $expectDatabase, string $fingerprint, string $operatorEmail): array
     {
         if ($expectDatabase === '' || $expectDatabase !== DB::connection()->getDatabaseName()) {
             throw new RuntimeException('The database name does not match: pass --expect-database=<the database the preview printed>.');
@@ -128,21 +131,27 @@ class ProductionFix
         if ($fingerprint === '') {
             throw new RuntimeException('Pass --fingerprint=<the value the preview printed>: it proves the state being repaired is the state that was reviewed.');
         }
+        $operator = User::where('email', $operatorEmail)->first();
+        if (! $operator || ! $operator->hasPermission('reconcile.review')) {
+            throw new RuntimeException('Pass --as=<email of the Finance or Board user running this>: every action is attributed to that person.');
+        }
 
-        return self::withLock(function () use ($fingerprint): array {
+        return self::withLock(function () use ($fingerprint, $operator): array {
             if (self::marker() !== null) {
-                throw new RuntimeException('This one-time repair has already been applied successfully. It will not run again.');
+                throw new RuntimeException('This one-time cutover has already been completed. It will not run again.');
             }
             $report = self::report();
             if ($report['blockers'] !== []) {
-                throw new RuntimeException("Refused: the preconditions do not hold.\n- ".implode("\n- ", $report['blockers']));
+                throw new RuntimeException("Refused: technical preconditions do not hold.\n- ".implode("\n- ", $report['blockers']));
             }
             if ($report['fingerprint'] !== $fingerprint) {
                 throw new RuntimeException('Refused: the database changed since the preview (fingerprint mismatch). Run the preview again and review it.');
             }
 
             $repaired = [];
-            DB::transaction(function () use (&$repaired, $report): void {
+            $registered = 0;
+            Auth::setUser($operator);   // every audit line below carries the person who ran it
+            DB::transaction(function () use (&$repaired, &$registered, $report, $operator): void {
                 $before = self::financialHash();
                 foreach ($report['drift'] as $d) {
                     $invoice = Invoice::whereKey($d['id'])->lockForUpdate()->firstOrFail();
@@ -155,24 +164,100 @@ class ProductionFix
                     $repaired[] = 'SB counter '.$report['sb_drift']['last_value'].' -> '.$report['sb_drift']['max'];
                     Audit::log('production_fix.sb_counter_raised', 'sb_number_sequence', end($repaired));
                 }
+                $registered = self::registerLegacyReview($operator, $report);
                 if (self::financialHash() !== $before) {
-                    throw new RuntimeException('A financial amount changed during the repair: rolled back.');
+                    throw new RuntimeException('A financial amount changed during the cutover: rolled back.');
                 }
                 if (self::invoiceDrift() !== []) {
                     throw new RuntimeException('Invoice totals still differ from their payments after the rebuild: rolled back.');
                 }
+                $cutoff = today()->toDateString();
+                Audit::log('production_fix.owner_confirmed', 'Suchona Mart receipts', 'OWNER-CONFIRMED, NOT BANK-VERIFIED. Cutoff '.$cutoff.'; recorded by '.$operator->email.'. Valid receipts: #7 '.self::money(1_000_000).' onboarding, #9 '.self::money(920_000).' product and marketing, #14 '.self::money(2_904_000).' another product lot. Erroneous receipts: #8 '.self::money(1_000_000).' and #13 '.self::money(1_920_000).', kept and counted until voided through the Payment Void workflow (Finance request, different Board member approval).');
+                Audit::log(self::MARKER, self::VERSION, 'TECHNICAL CUTOVER COMPLETE at cutoff '.$cutoff.' by '.$operator->email.'. Financial reconciliation is NOT certified by this marker and remains pending: '.$registered.' historical item(s) registered for legacy review. Fingerprint '.$report['fingerprint'].'. Repaired: '.($repaired === [] ? 'nothing to rebuild' : implode(' | ', $repaired)));
             });
 
             $after = self::report();
-            $status = $after['complete'] ? 'SUCCESS' : 'PENDING';
-            if ($status === 'SUCCESS') {
-                Audit::log(self::MARKER, self::VERSION, 'fingerprint '.$fingerprint.'; repaired: '.($repaired === [] ? 'nothing to rebuild' : implode(' | ', $repaired)));
-            } else {
-                Audit::log('production_fix.partial', self::VERSION, 'technical repairs applied; outstanding: '.implode(' | ', $after['outstanding']));
-            }
 
-            return ['status' => $status, 'report' => $after, 'repaired' => $repaired];
+            return ['technical' => 'COMPLETE', 'financial' => $after['financial'], 'report' => $after, 'repaired' => $repaired, 'registered' => $registered];
         });
+    }
+
+    /**
+     * Put every historical open item in the existing reconciliation-exceptions register so it stays visible until a second person resolves it with evidence. Registering
+     * only records that the item exists. Safe to repeat.
+     *
+     * @param  array<string, mixed>  $report
+     */
+    private static function registerLegacyReview(User $operator, array $report): int
+    {
+        $new = ReconciliationExceptions::register($operator);
+        $open = function (string $key, string $subject, ?int $amount, string $detail, string $evidence) use ($operator, &$new): void {
+            $row = ReconciliationException::firstOrCreate(['key' => $key], ['type' => 'legacy_review', 'subject' => $subject, 'amount' => $amount,
+                'detail' => 'LEGACY REVIEW (operational cutover '.today()->toDateString().'; not verified, never counted as verified): '.$detail, 'evidence_required' => $evidence, 'opened_by' => $operator->id]);
+            if ($row->wasRecentlyCreated) {
+                $new++;
+                Audit::log('reconciliation.exception_opened', $key, $subject);
+            }
+        };
+        foreach ($report['voids'] as $id => $v) {
+            if ($v['state'] !== 'APPROVED') {
+                $amount = self::PAYMENTS[$id][2];
+                $open('cutover:payment_void:'.$id, 'Payment #'.$id.' ('.self::money($amount).') confirmed by the owner as never received', $amount,
+                    'The owner confirmed this receipt does not exist. The payment is kept and still counted until its void is approved. Current state: '.$v['state'].' ('.$v['next'].').',
+                    'A Finance void request on the payment citing the owner\'s written confirmation (and a bank or bKash statement if one exists), approved by a different Board member.');
+            }
+        }
+        $cash = $report['cash'];
+        if ($cash === null || $cash['status'] !== 'reconciled' || $cash['evidence'] !== 'statement_verified') {
+            $open('cutover:cash_difference', 'Unreconciled cash difference (actual cash vs ERP expected cash)', $cash['difference'] ?? null,
+                'The owner-confirmed actual balance is kept separate from the ERP expected cash; the signed difference is shown live on the Business Dashboard. It is an unresolved reconciliation difference, never an expense, loss, revenue, profit, loan, supplier payment or capital.',
+                'Verified bank and bKash statements and a cash count for the same cutoff, with every difference explained item by item. No balancing entry is made.');
+        }
+
+        return $new;
+    }
+
+    /**
+     * What is still unresolved financially. Never a technical blocker.
+     *
+     * @param  array<int, array{state: string, next: string}>  $voids
+     * @param  array<string, mixed>|null  $cash
+     * @return list<string>
+     */
+    private static function outstanding(array $voids, ?array $cash, bool $schemaReady): array
+    {
+        $items = [];
+        foreach ($voids as $id => $v) {
+            if ($v['state'] !== 'APPROVED') {
+                $items[] = 'Payment #'.$id.' void: '.$v['state'].' ('.$v['next'].')';
+            }
+        }
+        if ($cash !== null && $cash['status'] === 'not_verified') {
+            $items[] = 'Actual cash balance: Not Verified ('.$cash['reason'].')';
+        } elseif ($cash !== null) {
+            if ($cash['evidence'] === 'owner_confirmed') {
+                $items[] = 'Actual cash balance is owner-confirmed only; no independent bank/bKash statement backs it yet';
+            }
+            if ($cash['difference'] !== 0) {
+                $items[] = 'Unreconciled cash difference of '.$cash['sign'].self::money(abs((int) $cash['difference'])).' ('.$cash['direction'].')';
+            }
+        }
+        foreach (IntegrityGate::statementBlockers() as $b) {
+            $items[] = 'Statement difference (blocks period close and profit allocation until explained): '.$b;
+        }
+        if ($schemaReady || Schema::hasTable('reconciliation_exceptions')) {
+            $open = ReconciliationException::where('status', 'open')->count();
+            if ($open > 0) {
+                $items[] = $open.' historical review item(s) open (Finance > Historical Reconciliation)';
+            }
+        }
+
+        return $items;
+    }
+
+    private static function money(int $minor): string
+    {
+        return Money::format($minor, config('finance.currency'));
     }
 
     /** @template T @param  callable(): T  $run @return T */
@@ -256,25 +341,22 @@ class ProductionFix
                 $problems[] = 'valid payment #'.$id.' is voided or has a void request';
             }
         }
-        foreach (self::ERRONEOUS as $id) {
-            if (self::voidState($id)['state'] === 'INVALID') {
-                $problems[] = 'payment #'.$id.' is voided without an approved request';
-            }
-        }
 
         return $problems;
     }
 
-    /** @return list<string> */
-    private static function unexpectedVoids(): array
+    /**
+     * A payment voided without an approved request. A payment voided properly through the workflow (a later, ordinary piece of business) is not a problem.
+     *
+     * @return list<string>
+     */
+    private static function improperVoids(): array
     {
-        $known = array_keys(self::PAYMENTS);
         $found = [];
-        foreach (DB::table('payments')->whereNotNull('voided_at')->whereNotIn('id', $known)->pluck('id') as $id) {
-            $found[] = 'payment #'.$id.' is voided';
-        }
-        foreach (DB::table('payment_void_requests')->whereNotIn('payment_id', $known)->pluck('payment_id') as $id) {
-            $found[] = 'payment #'.$id.' has a void request';
+        foreach (DB::table('payments')->whereNotNull('voided_at')->pluck('id') as $id) {
+            if (! DB::table('payment_void_requests')->where('payment_id', $id)->where('status', 'approved')->exists()) {
+                $found[] = 'payment #'.$id.' is voided without an approved request';
+            }
         }
 
         return $found;
@@ -372,7 +454,7 @@ class ProductionFix
             && $six['status'] === 'partial' && $six['paid'] === 920_000 && $six['balance'] === 1_000_000;
     }
 
-    /** Every financial amount and link, excluding only what this repair may change (invoice amount paid / status) and a void's stamp. Identical before and after, or the run is rolled back. */
+    /** Every financial amount and link, excluding only what this cutover may change (invoice amount paid / status) and a void's stamp. Identical before and after, or the run is rolled back. */
     private static function financialHash(): string
     {
         $parts = [];
@@ -382,8 +464,9 @@ class ProductionFix
             'journal_entries' => ['id', 'entry_date', 'source_type', 'source_id'], 'journal_lines' => ['id', 'journal_entry_id', 'account', 'debit', 'credit', 'financial_account_id'],
             'expenses' => ['id', 'amount', 'status', 'category', 'spent_on'], 'capital_entries' => ['id', 'partner_id', 'amount', 'status'],
             'loan_receivables' => ['id', 'principal', 'status', 'expense_id'], 'loan_receivable_repayments' => ['id', 'amount', 'status'],
-            'account_statements' => ['id', 'financial_account_id', 'statement_balance', 'status', 'verified_by'], 'supplier_payments' => ['id', 'amount', 'expense_id'],
-            'sourcing_lots' => ['id', 'status', 'ownership', 'project_id'],
+            'account_statements' => ['id', 'financial_account_id', 'statement_balance', 'status', 'verified_by', 'evidence'], 'supplier_payments' => ['id', 'amount', 'expense_id'],
+            'sourcing_lots' => ['id', 'status', 'ownership', 'project_id'], 'receipt_classifications' => ['id', 'payment_id', 'nature'], 'receipt_reviews' => ['id', 'payment_id', 'status'],
+            'payment_void_requests' => ['id', 'payment_id', 'status'],
         ] as $table => $columns) {
             if (Schema::hasTable($table)) {
                 $parts[$table] = DB::table($table)->orderBy('id')->get($columns)->map(fn ($r) => array_map(fn ($v) => $v === null ? null : (string) $v, (array) $r))->all();

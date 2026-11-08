@@ -13,11 +13,12 @@ use RuntimeException;
 class SellbeesProductionFix extends Command
 {
     protected $signature = 'sellbees:production-fix
-        {--apply : Apply the authorised technical repairs. Without it the command only previews and changes nothing}
+        {--apply : Complete the technical cutover. Without it the command only previews and changes nothing}
         {--expect-database= : The database name the preview printed (required with --apply)}
-        {--fingerprint= : The state fingerprint the preview printed (required with --apply)}';
+        {--fingerprint= : The state fingerprint the preview printed (required with --apply)}
+        {--as= : Email of the Finance or Board user running this; every action is attributed to them (required with --apply)}';
 
-    protected $description = 'ONE-TIME, owner-approved production repair. Default is a read-only preview. Never voids, deletes or rewrites a payment; refuses to run twice.';
+    protected $description = 'ONE-TIME, owner-approved operational cutover. Default is a read-only preview. Reports TECHNICAL CUTOVER and FINANCIAL RECONCILIATION separately; never voids, verifies or rewrites a financial record; refuses to run twice.';
 
     public function handle(): int
     {
@@ -26,7 +27,7 @@ class SellbeesProductionFix extends Command
         }
 
         try {
-            $result = ProductionFix::apply((string) $this->option('expect-database'), (string) $this->option('fingerprint'));
+            $result = ProductionFix::apply((string) $this->option('expect-database'), (string) $this->option('fingerprint'), (string) $this->option('as'));
         } catch (RuntimeException $e) {
             $this->error($e->getMessage());
 
@@ -36,13 +37,11 @@ class SellbeesProductionFix extends Command
         foreach ($result['repaired'] ?: ['nothing needed rebuilding'] as $line) {
             $this->line('  '.$line);
         }
+        $this->line('  '.$result['registered'].' historical item(s) registered for legacy review (Finance > Historical Reconciliation)');
         $this->body($result['report']);
-        if ($result['status'] === 'SUCCESS') {
-            $this->info('SUCCESS: every authorised repair is complete. The execution marker is recorded; this command will not run again.');
-            $this->line('Next: verify the checklist, then remove the command (see the deployment notes).');
-        } else {
-            $this->warn('TECHNICAL REPAIRS APPLIED, BUT THE REPAIR IS NOT COMPLETE (not SUCCESS). No execution marker was written; run again after the outstanding items below are done.');
-        }
+        $this->results($result['report']);
+        $this->line('The execution marker is recorded for the TECHNICAL cutover only. This command will not run again. It does not certify financial reconciliation.');
+        $this->line('Next: verify the checklist, then remove the command (see the deployment notes).');
 
         return self::SUCCESS;
     }
@@ -52,17 +51,26 @@ class SellbeesProductionFix extends Command
         $report = ProductionFix::report();
         $this->warn('PREVIEW ONLY: nothing is changed.');
         if ($report['applied']) {
-            $this->info('This one-time repair was already applied successfully; --apply will refuse. Showing the current verification only.');
+            $this->info('The technical cutover was already completed; --apply will refuse. Showing the current verification only.');
         }
         $this->body($report);
-        if ($report['blockers'] === []) {
+        $this->results($report);
+        if ($report['technical'] === 'READY') {
             $this->line('');
-            $this->line('To apply: php artisan sellbees:production-fix --apply --expect-database='.$report['database'].' --fingerprint='.$report['fingerprint']);
-        } else {
-            $this->error('Blocked: --apply would refuse until every check above passes.');
+            $this->line('To apply: php artisan sellbees:production-fix --apply --expect-database='.$report['database'].' --fingerprint='.$report['fingerprint'].' --as=<your email>');
+        } elseif ($report['technical'] === 'BLOCKED') {
+            $this->error('Blocked: --apply would refuse until every technical check above passes.');
         }
 
-        return $report['blockers'] === [] ? self::SUCCESS : self::FAILURE;
+        return $report['technical'] === 'BLOCKED' ? self::FAILURE : self::SUCCESS;
+    }
+
+    /** @param array<string, mixed> $report */
+    private function results(array $report): void
+    {
+        $this->line('');
+        $this->line('TECHNICAL CUTOVER: '.($report['technical'] === 'READY' ? 'NOT YET APPLIED (all checks pass)' : $report['technical']));
+        $this->line('FINANCIAL RECONCILIATION: '.$report['financial'].($report['financial'] === 'PENDING' ? ' (historical items stay visible; they do not block operating the ERP)' : ''));
     }
 
     /** @param array<string, mixed> $report */
