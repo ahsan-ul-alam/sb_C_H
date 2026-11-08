@@ -135,10 +135,24 @@ class OrderFulfilment
     }
 
     /** Packing is optional: an order can be dispatched straight after it is confirmed. */
-    public static function dispatch(ClientOrder $order, User $user, ?string $courier = null, ?string $tracking = null): void
+    /**
+     * The delivery charge is recorded ONCE, here (or taken from the order as entered when it was created); delivery reuses it and never deducts it again.
+     *
+     * @param  array{amount?: ?int, bearer?: ?string, status?: ?string}  $charge
+     */
+    public static function dispatch(ClientOrder $order, User $user, ?string $courier = null, ?string $tracking = null, array $charge = []): void
     {
-        self::locked($order, function (ClientOrder $o) use ($user, $courier, $tracking) {
+        self::locked($order, function (ClientOrder $o) use ($user, $courier, $tracking, $charge) {
             self::expect($o, 'confirmed', 'packed');
+            $bearer = $charge['bearer'] ?? $o->delivery_charge_bearer;
+            $status = $charge['status'] ?? $o->delivery_charge_status;
+            if (! in_array($bearer, ['client', 'sellbees', 'customer'], true) || ! in_array($status, ['payable', 'paid_by_sellbees', 'courier_deducted'], true)) {
+                throw new RuntimeException('Choose who bears the delivery charge and how it is settled.');
+            }
+            if ($o->delivery_charge_recorded_at !== null) {
+                throw new RuntimeException('The delivery charge of this order is already recorded.');
+            }
+            $o->update(['delivery_charge' => max(0, (int) ($charge['amount'] ?? $o->delivery_charge)), 'delivery_charge_bearer' => $bearer, 'delivery_charge_status' => $status, 'delivery_charge_recorded_at' => now()]);
             foreach ($o->items as $item) {
                 Inventory::move($item->line, 'dispatch', ['reserved' => bcmul((string) $item->quantity, '-1', 2), 'dispatched' => (string) $item->quantity], 'dsp:'.$item->id, $item, $user);
             }
@@ -181,7 +195,9 @@ class OrderFulfilment
 
                 return;
             }
-            $o->update(['delivery_status' => 'delivered', 'net_value' => $total, 'delivered_at' => now()]);
+            $o->update(['delivery_status' => 'delivered', 'delivered_at' => now()]);
+            // The commission base is the successful sales less the client-borne delivery charge recorded at dispatch (its share for what was delivered).
+            $o->update(['net_value' => $o->refresh()->load('items')->commissionBase()]);
             self::earnCommission($o->refresh());
             Audit::log('order.delivered', 'order '.$o->id, 'value '.$total);
         });
@@ -257,7 +273,7 @@ class OrderFulfilment
                 throw new RuntimeException('More money was collected than the order is now worth: refund the customer first (Customer Refunds), then record the return.');
             }
             // The commission base is the delivered value less any paid refund that already lowered it, so a return never undoes (or repeats) that correction.
-            $base = max(0, $value - OrderRefunds::baseReduction($o));
+            $base = max(0, $o->commissionBase() - OrderRefunds::baseReduction($o));
             if ($o->billed_invoice_id && $o->commission > 0 && $base !== (int) $o->net_value) {
                 OrderCommission::reduceInvoiced($o, $base > 0 ? $base : null, 'Customer return'); // refuses once the commission was paid or netted
             } elseif ($o->commission > 0 && ! $o->billed_invoice_id) {
@@ -265,6 +281,28 @@ class OrderFulfilment
             }
             $o->update(['net_value' => $base]);
             Audit::log('order.returned', 'order '.$o->id, 'delivered value now '.$value);
+        });
+    }
+
+    /**
+     * Courier charges of an unsuccessful delivery and of a return, kept apart from the delivery charge. Each is recorded once (a recorded figure is never overwritten),
+     * only against an order that failed or has returned units. Nothing is refunded or deducted here: the amounts feed the client statement.
+     */
+    public static function recordUnsuccessfulCharges(ClientOrder $order, int $failedCharge, int $returnCharge, User $user): void
+    {
+        self::locked($order, function (ClientOrder $o) use ($failedCharge, $returnCharge, $user) {
+            if ($failedCharge < 0 || $returnCharge < 0 || $failedCharge + $returnCharge <= 0) {
+                throw new RuntimeException('Enter the courier charge actually incurred.');
+            }
+            $hasReturn = $o->items->contains(fn (ClientOrderItem $i) => bccomp((string) $i->returned_quantity, '0', 2) > 0);
+            if ($failedCharge > 0 && ($o->delivery_status !== 'failed' || $o->failed_delivery_charge > 0)) {
+                throw new RuntimeException('A failed-delivery charge can be recorded once, on a failed order.');
+            }
+            if ($returnCharge > 0 && (! $hasReturn || $o->return_charge > 0)) {
+                throw new RuntimeException('A return charge can be recorded once, on an order with returned units.');
+            }
+            $o->update(['failed_delivery_charge' => $failedCharge > 0 ? $failedCharge : $o->failed_delivery_charge, 'return_charge' => $returnCharge > 0 ? $returnCharge : $o->return_charge]);
+            Audit::log('order.courier_charges', 'order '.$o->id, 'failed '.$failedCharge.' return '.$returnCharge.' by '.$user->name);
         });
     }
 
@@ -320,7 +358,7 @@ class OrderFulfilment
                 if (AccountingService::isClosed($date)) {
                     throw new RuntimeException('That month is already closed; record it in an open month.');
                 }
-                $left = $o->deliveredValue() - ((int) $o->collections()->sum('amount') - OrderRefunds::paid($o));
+                $left = $o->collectibleValue() - ((int) $o->collections()->sum('amount') - OrderRefunds::paid($o));
                 if ($amount > $left) {
                     throw new RuntimeException('Only '.Money::format(max(0, $left)).' of this order is still to be collected.');
                 }
@@ -342,7 +380,7 @@ class OrderFulfilment
     /** @return array{delivered: int, collected: int, outstanding: int, state: string} */
     public static function collectionState(ClientOrder $o): array
     {
-        $delivered = $o->delivery_status === 'delivered' ? $o->deliveredValue() : 0;
+        $delivered = $o->delivery_status === 'delivered' ? $o->collectibleValue() : 0;
         $collected = (int) $o->collections()->sum('amount') - OrderRefunds::paid($o); // money still held after refunds paid back
 
         return ['delivered' => $delivered, 'collected' => $collected, 'outstanding' => max(0, $delivered - $collected),

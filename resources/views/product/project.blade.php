@@ -1,4 +1,5 @@
 @use('App\Services\ProjectInventory')
+@use('App\Support\Money')
 <x-layout :title="$project->name.' — inventory & orders'">
     <x-page-header :title="$project->name">
         <x-slot:meta>{{ $project->client->name }} · this project's own stock and orders. Stock of another project is never shown or used here; quantities come from the stock ledger and orders from the order records.</x-slot:meta>
@@ -8,6 +9,33 @@
         </x-slot:actions>
     </x-page-header>
 
+    @php($e = $economics)
+    <section class="panel">
+        <div class="panel-head"><h2>Client financial performance</h2><span class="sub">Worked out by the server from the orders; nothing here is entered by hand and nothing is posted.</span></div>
+        <div class="panel-body"><div class="stat-grid">
+            @foreach ([['Client product investment', $e['investment']], ['Gross successful sales', $e['gross_sales']], ['Delivery charges deducted (once)', $e['delivery_charges']], ['Net successful sales', $e['net_sales']], ['Sellbees commission', $e['commission']], ['Investment recovered through successful sales', $e['investment_recovered']], ['Client product profit', $e['client_profit']], ['Client settlement entitlement', $e['entitlement']]] as [$label, $amount])
+                <div class="stat"><span class="stat-label">{{ $label }}</span><span class="stat-value">{{ Money::format($amount) }}</span></div>
+            @endforeach
+        </div>
+        <p class="muted" style="margin-top:.6rem">The client's product cost was paid at sourcing, so it is not deducted from what is payable; it is deducted once, only to show profit. Sold-unit cost: {{ Money::format($e['cost_of_sold']) }}; investment still to recover (unsold stock and unrecovered cost): {{ Money::format($e['investment_unrecovered']) }}.@if ($e['refund_reductions'] > 0) Refunds that reduced sales: {{ Money::format($e['refund_reductions']) }}.@endif @if ($e['unsuccessful_charges'] > 0) Courier charges on unsuccessful deliveries and returns (client-borne): {{ Money::format($e['unsuccessful_charges']) }}.@endif</p>
+        @foreach ($e['notes'] as $n)<p class="muted">⚠ {{ $n }}</p>@endforeach
+        <div class="stat-grid" style="margin-top:.6rem">
+            @foreach ([['Client settlement entitlement (all projects of this client)', $e['client']['entitlement']], ['Already settled to the client', $e['client']['settled']], ['Other deductions applied at settlement', $e['client']['deductions_applied']], ['Outstanding client settlement', $e['client']['outstanding']], ['Cash available to pay now', $e['client']['cash_available']], ['Earned but not yet in hand (e.g. courier remittance pending)', $e['client']['pending_remittance']]] as [$label, $amount])
+                <div class="stat"><span class="stat-label">{{ $label }}</span><span class="stat-value">{{ Money::format($amount) }}</span></div>
+            @endforeach
+        </div></div>
+    </section>
+
+    <section class="panel">
+        <div class="panel-head"><h2>Sellbees earnings</h2><span class="sub">Separate figures, never added together here.</span></div>
+        <div class="panel-body"><div class="stat-grid">
+            <div class="stat"><span class="stat-label">Sourcing margin (lot view; income only under the existing sourcing rules)</span><span class="stat-value">{{ Money::format($e['sourcing_margin']) }}</span></div>
+            <div class="stat"><span class="stat-label">Commission earned on successful deliveries</span><span class="stat-value">{{ Money::format($e['commission']) }}</span></div>
+            <div class="stat"><span class="stat-label">of which invoiced to the client</span><span class="stat-value">{{ Money::format($e['commission_invoiced']) }}</span></div>
+            <div class="stat"><span class="stat-label">Estimate on orders not yet delivered (not earned)</span><span class="stat-value">{{ Money::format($e['commission_estimate']) }}</span></div>
+        </div></div>
+    </section>
+
     <section class="panel">
         <div class="panel-head"><h2>Inventory</h2></div>
         <div class="panel-body">
@@ -16,6 +44,7 @@
                     @foreach (['received' => 'Received (accepted)', 'available' => 'Available', 'reserved' => 'Reserved', 'dispatched' => 'Dispatched', 'delivered' => 'Delivered', 'returned' => 'Returned, awaiting inspection', 'damaged' => 'Damaged', 'rejected' => 'Rejected at receiving'] as $k => $label)
                         <div class="stat"><span class="stat-label">{{ $label }} ({{ $unit }})</span><span class="stat-value">{{ $u[$k] }}</span></div>
                     @endforeach
+                    <div class="stat"><span class="stat-label">Remaining with Sellbees ({{ $unit }})</span><span class="stat-value">{{ bcadd(bcadd($u['available'], $u['reserved'], 2), $u['returned'], 2) }}</span></div>
                 </div>
             @empty
                 <p class="muted">No stock has been received for this project yet.</p>

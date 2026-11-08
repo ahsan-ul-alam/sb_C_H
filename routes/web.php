@@ -74,7 +74,7 @@ Route::middleware('auth')->group(function () {
     // The ClientHub overview (invoices and collections) that used to be the home page; the home page is now the Central Business Dashboard for those who may see it.
     // Global command palette (Ctrl+K): authenticated, rate limited, each result group guarded by the permission of the screen it opens.
     Route::get('search', SearchController::class)->name('search')->middleware('throttle:60,1');
-    Route::get('clienthub', DashboardController::class)->name('clienthub.dashboard')->middleware('can:clienthub');
+    Route::get('clienthub', DashboardController::class)->name('clienthub.dashboard')->middleware(['can:clienthub', 'cross.project']);
 
     Route::get('notifications', [NotificationController::class, 'index'])->name('notifications.index');
     Route::get('notifications/count', [NotificationController::class, 'count'])->name('notifications.count');
@@ -84,17 +84,17 @@ Route::middleware('auth')->group(function () {
 
     // Client-borne expenses and client profitability (attribution for client reporting; never ledger postings). Each action has its own permission,
     // so the Board can approve and the auditor can view without holding ClientHub. Registered before the clients resource so "expenses" is never read as an id.
-    Route::get('clients/{client}/expenses', [ClientProfitController::class, 'expenses'])->name('clients.expenses')->middleware('can:client.profit.view')->whereNumber('client');
-    Route::get('clients/{client}/profitability', [ClientProfitController::class, 'profitability'])->name('clients.profitability')->middleware('can:client.profit.view')->whereNumber('client');
-    Route::post('clients/{client}/expenses', [ClientProfitController::class, 'storeExpense'])->name('clients.expenses.store')->middleware('can:client.expense.record')->whereNumber('client');
-    Route::post('client-expenses/{expense}/review', [ClientProfitController::class, 'reviewExpense'])->name('clients.expenses.review')->middleware('can:client.expense.review');
-    Route::post('client-expenses/{expense}/decide', [ClientProfitController::class, 'decideExpense'])->name('clients.expenses.decide')->middleware('can:client.expense.approve');
-    Route::post('client-expenses/{expense}/reverse', [ClientProfitController::class, 'reverseExpense'])->name('clients.expenses.reverse')->middleware('can:client.expense.record');
-    Route::post('clients/{client}/profit-declarations', [ClientProfitController::class, 'declare'])->name('clients.profit.declare')->middleware('can:client.profit.declare')->whereNumber('client');
-    Route::post('profit-declarations/{declaration}/revoke', [ClientProfitController::class, 'revokeDeclaration'])->name('clients.profit.revoke')->middleware('can:client.profit.declare');
+    Route::get('clients/{client}/expenses', [ClientProfitController::class, 'expenses'])->name('clients.expenses')->middleware(['can:client.profit.view', 'cross.project'])->whereNumber('client');
+    Route::get('clients/{client}/profitability', [ClientProfitController::class, 'profitability'])->name('clients.profitability')->middleware(['can:client.profit.view', 'cross.project'])->whereNumber('client');
+    Route::post('clients/{client}/expenses', [ClientProfitController::class, 'storeExpense'])->name('clients.expenses.store')->middleware(['can:client.expense.record', 'cross.project'])->whereNumber('client');
+    Route::post('client-expenses/{expense}/review', [ClientProfitController::class, 'reviewExpense'])->name('clients.expenses.review')->middleware(['can:client.expense.review', 'cross.project']);
+    Route::post('client-expenses/{expense}/decide', [ClientProfitController::class, 'decideExpense'])->name('clients.expenses.decide')->middleware(['can:client.expense.approve', 'cross.project']);
+    Route::post('client-expenses/{expense}/reverse', [ClientProfitController::class, 'reverseExpense'])->name('clients.expenses.reverse')->middleware(['can:client.expense.record', 'cross.project']);
+    Route::post('clients/{client}/profit-declarations', [ClientProfitController::class, 'declare'])->name('clients.profit.declare')->middleware(['can:client.profit.declare', 'cross.project'])->whereNumber('client');
+    Route::post('profit-declarations/{declaration}/revoke', [ClientProfitController::class, 'revokeDeclaration'])->name('clients.profit.revoke')->middleware(['can:client.profit.declare', 'cross.project']);
 
     // Existing ClientHub screens: admin and Finance only.
-    Route::middleware('can:clienthub')->group(function () {
+    Route::middleware(['can:clienthub', 'cross.project'])->group(function () {
         Route::get('projects', [ProjectController::class, 'index'])->name('projects.index');
         Route::get('projects/new', [ProjectController::class, 'start'])->name('projects.start');
         Route::get('invoices', [InvoiceController::class, 'index'])->name('invoices.index');
@@ -127,7 +127,7 @@ Route::middleware('auth')->group(function () {
     });
 
     // Suppliers & Sourcing. Every write route carries its own permission; reads need sourcing.view.
-    Route::middleware('can:sourcing.view')->prefix('sourcing')->name('sourcing.')->group(function () {
+    Route::middleware(['can:sourcing.view', 'cross.project'])->prefix('sourcing')->name('sourcing.')->group(function () {
         Route::get('/', [SourcingReportController::class, 'overview'])->name('overview');
         Route::get('reports', [SourcingReportController::class, 'reports'])->name('reports')->middleware('can:sourcing.reports');
         Route::get('payments', [SourcingReportController::class, 'payments'])->name('payments.index');
@@ -261,6 +261,7 @@ Route::middleware('auth')->group(function () {
             Route::post('orders/{order}/pack', [ProductOperationsController::class, 'orderPack'])->name('orders.pack');
             Route::post('orders/{order}/dispatch', [ProductOperationsController::class, 'orderDispatch'])->name('orders.dispatch');
             Route::post('orders/{order}/deliver', [ProductOperationsController::class, 'orderDeliver'])->name('orders.deliver');
+            Route::post('orders/{order}/courier-charges', [ProductOperationsController::class, 'orderCourierCharges'])->name('orders.courier-charges');
             Route::post('orders/{order}/fail', [ProductOperationsController::class, 'orderFail'])->name('orders.fail');
             Route::post('orders/{order}/cancel', [ProductOperationsController::class, 'orderCancel'])->name('orders.cancel');
             Route::post('orders/{order}/return', [ProductOperationsController::class, 'orderReturn'])->name('orders.return');

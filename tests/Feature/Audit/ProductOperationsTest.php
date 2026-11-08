@@ -4,6 +4,7 @@ use App\Models\AccountingPeriod;
 use App\Models\Allocation;
 use App\Models\Client;
 use App\Models\ClientOrder;
+use App\Models\ClientOrderItem;
 use App\Models\ClientSettlement;
 use App\Models\Expense;
 use App\Models\Invoice;
@@ -22,7 +23,9 @@ use App\Services\ClientSettlementService;
 use App\Services\FinancialStatements;
 use App\Services\Inventory;
 use App\Services\LotFinancials;
+use App\Services\OrderCommission;
 use App\Services\OrderFulfilment;
+use App\Services\ProjectEconomics;
 use App\Services\ProjectStockAllocation;
 use App\Services\StorageBilling;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -41,7 +44,7 @@ afterEach(fn () => Carbon::setTestNow());
  *
  * @return array{co: SellbeesCompany, client: Client, project: Project, product: SupplierProduct, lot: SourcingLot, line: SourcingLotLine}
  */
-function clientStock(SellbeesCompany $co, string $qty = '100', ?string $received = null, ?string $accepted = null, string $clientName = 'Client Stock', string $price = '120', string $arrivedOn = '2026-02-10'): array
+function clientStock(SellbeesCompany $co, string $qty = '100', ?string $received = null, ?string $accepted = null, string $clientName = 'Client Stock', string $price = '120', string $arrivedOn = '2026-02-10', string $profit = '20', string $deliveryCost = '1000'): array
 {
     $co->post('clients', 'sourcing.suppliers.store', ['name' => 'Supplier '.Str::random(4), 'phone' => '017'])->assertSessionHasNoErrors();
     $supplier = Supplier::latest('id')->first();
@@ -51,10 +54,10 @@ function clientStock(SellbeesCompany $co, string $qty = '100', ?string $received
     $project = $co->project($client, 'P'.Str::random(3));
     $co->post('clients', 'sourcing.lots.store', [
         'supplier_id' => $supplier->id,
-        'delivery_cost' => '1000',
+        'delivery_cost' => $deliveryCost,
         'submission_key' => (string) Str::uuid(),
         'project_id' => $project->id,
-        'items' => [['product_id' => $product->id, 'quantity' => $qty, 'profit' => '20']],
+        'items' => [['product_id' => $product->id, 'quantity' => $qty, 'profit' => $profit]],
     ])->assertSessionHasNoErrors();
     $lot = SourcingLot::latest('id')->first();
     $line = $lot->lines()->first();
@@ -644,9 +647,27 @@ it('limits users to their assigned projects and bound client, enforced on pages 
     $this->actingAs($co->users['super'])->post(route('users.access', $staff), ['project_ids' => [$s['project']->id]])->assertSessionHas('status');
     $this->actingAs($co->users['super'])->post(route('users.access', $clientUser), ['client_id' => $other['client']->id])->assertSessionHas('status');
 
-    // Unrestricted legacy user: sees both, as before.
+    $staff->refresh();                                                                   // the administrator changed it through another request
+    $clientUser->refresh();
+
+    // A user explicitly granted all projects (as existing Client Management users are by the migration) sees both.
     $this->actingAs($legacy)->get(route('product.projects.show', $s['project']))->assertOk();
     $this->actingAs($legacy)->get(route('product.projects.show', $other['project']))->assertOk();
+
+    // Staff with neither a grant nor an assignment get NO project access at all.
+    $plain = SellbeesCompany::user('plain@audit.test', 'client_management');
+    $plain->forceFill(['all_projects' => false])->save();
+    $this->actingAs($plain)->get(route('product.projects.show', $s['project']))->assertForbidden();
+    $this->actingAs($plain)->get(route('product.orders'))->assertOk()->assertDontSee('MINE')->assertDontSee('RIVAL');
+    $this->actingAs($plain)->post(route('product.orders.confirm', $mine))->assertForbidden();
+
+    // Sourcing, handover, loss, enrolment, ClientHub and search never reach a project-limited user's other projects.
+    foreach (['sourcing.overview', 'sourcing.lots.index', 'sourcing.handovers', 'sourcing.losses', 'sourcing.enrolment', 'sourcing.supplier-returns', 'projects.index', 'clients.index'] as $page) {
+        expect($this->actingAs($staff)->get(route($page))->status())->toBe(403, $page);
+        expect($this->actingAs($plain)->get(route($page))->status())->toBe(403, $page);
+        $this->actingAs($legacy)->get(route($page))->assertOk();                          // a user granted all projects keeps every legitimate screen
+    }
+    $this->actingAs($staff)->getJson(route('search', ['q' => $other['product']->name]))->assertOk()->assertDontSee($other['project']->name);
 
     // Assigned staff: own project only, everywhere.
     $this->actingAs($staff)->get(route('product.projects.show', $s['project']))->assertOk()->assertSee('MINE');
@@ -657,7 +678,7 @@ it('limits users to their assigned projects and bound client, enforced on pages 
     $this->actingAs($staff)->get(route('product.inventory.show', $other['line']))->assertForbidden();
     $this->actingAs($staff)->get(route('stock.projects'))->assertOk()->assertDontSee($other['product']->name);
     foreach (['stock.overview', 'stock.movements', 'stock.reports', 'product.settlements', 'product.refunds'] as $page) {
-        $this->actingAs($staff)->get(route($page))->assertForbidden();                    // pages that mix projects
+        expect($this->actingAs($staff)->get(route($page))->status())->toBe(403, $page);                    // pages that mix projects
     }
     foreach (['confirm', 'pack', 'dispatch', 'cancel', 'collect', 'refunds'] as $action) {
         $route = $action === 'refunds' ? 'product.refunds.store' : 'product.orders.'.$action;
@@ -682,4 +703,127 @@ it('limits users to their assigned projects and bound client, enforced on pages 
 
     // Allocation workflow respects project access too.
     $this->actingAs($staff)->post(route('stock.allocations.store'), ['line_id' => $other['line']->id, 'project_id' => $other['project']->id, 'quantity' => '1', 'reason' => 'x'])->assertForbidden();
+});
+
+// ───────────── the owner's mug example: delivery charge once, commission base, client profit vs settlement ─────────────
+
+/** Place, confirm, dispatch (recording the delivery charge once) and optionally deliver one order. */
+function mugOrder(SellbeesCompany $co, array $s, string $ref, string $qty, string $charge, string $bearer = 'client', string $status = 'payable', bool $deliver = true, string $price = '10'): ClientOrder
+{
+    placeOrder($co, $s['project'], $s['product'], $qty, $price, $ref)->assertSessionMissing('error');
+    $o = ClientOrder::where('reference', $ref)->firstOrFail();
+    orderStep($co, 'confirm', $o)->assertSessionMissing('error');
+    orderStep($co, 'dispatch', $o, ['delivery_charge' => $charge, 'delivery_charge_bearer' => $bearer, 'delivery_charge_status' => $status])->assertSessionMissing('error');
+    if ($deliver) {
+        orderStep($co, 'deliver', $o)->assertSessionMissing('error');
+    }
+
+    return $o->refresh();
+}
+
+function mugClient(SellbeesCompany $co): array
+{
+    $co->post('finance', 'finance.orders.rates', ['default_percent' => '1'])->assertSessionHasNoErrors();
+
+    return clientStock($co, '10', price: '3', profit: '2', deliveryCost: '0');   // supplier BDT 3, client BDT 5, 10 mugs
+}
+
+it('works the owner\'s mug example to the paisa, with each figure counted once', function () {
+    $co = bootProduct($this);
+    $s = mugClient($co);
+    $e = ProjectEconomics::for($s['project']);
+    expect($e['investment'])->toBe(5_000)->and($e['sourcing_margin'])->toBe(2_000);                  // client pays 10 x 5 = 50.00; margin 50 - 30 = 20.00
+
+    // One mug: 10.00 sold, 1.00 delivery, 9.00 commission base, 0.09 commission, 8.91 to the client, 3.91 profit.
+    $one = mugOrder($co, $s, 'MUG-1', '1', '1');
+    expect($one->net_value)->toBe(900)->and($one->commission)->toBe(9)->and($one->rate_bps)->toBe(100);
+    $e = ProjectEconomics::for($s['project']);
+    expect([$e['gross_sales'], $e['delivery_charges'], $e['net_sales'], $e['commission'], $e['entitlement'], $e['cost_of_sold'], $e['client_profit']])->toBe([1_000, 100, 900, 9, 891, 500, 391]);
+
+    // All ten: 100.00 gross, 10.00 delivery, 90.00 base, 0.90 commission, 89.10 to the client, 50.00 recovered, 39.10 profit.
+    mugOrder($co, $s, 'MUG-9', '9', '9');
+    $e = ProjectEconomics::for($s['project']);
+    expect($e['gross_sales'])->toBe(10_000)->and($e['delivery_charges'])->toBe(1_000)->and($e['net_sales'])->toBe(9_000)->and($e['commission'])->toBe(90)
+        ->and($e['entitlement'])->toBe(8_910)->and($e['investment_recovered'])->toBe(5_000)->and($e['cost_of_sold'])->toBe(5_000)->and($e['client_profit'])->toBe(3_910)
+        ->and($e['investment_unrecovered'])->toBe(0)->and($e['sourcing_margin'])->toBe(2_000)->and($e['units_sold'])->toBe('10.00')
+        ->and($e['sourcing_margin'] + $e['commission'])->toBe(2_090)                                  // 20.00 + 0.90 = 20.90, two separate figures
+        ->and($e['notes'])->toBe([]);
+    // Every order reconciles to the project, and the project to the client.
+    expect(collect($e['rows'])->sum('net'))->toBe($e['net_sales'])->and(collect($e['rows'])->sum('commission'))->toBe($e['commission'])->and(collect($e['rows'])->sum('entitlement'))->toBe($e['entitlement'])
+        ->and($e['client']['entitlement'])->toBe(8_910)->and($e['client']['settled'])->toBe(0)->and($e['client']['outstanding'])->toBe(8_910);
+    $b = Inventory::balances($s['line']);
+    expect($b['delivered'])->toBe('10.00')->and($b['available'])->toBe('0.00')->and(Inventory::reconciles($s['line']))->toBeTrue();
+
+    // The project page shows it, and server-calculated profit is not typed in by staff.
+    $page = $co->as('clients')->get(route('product.projects.show', $s['project']))->assertOk();
+    $page->assertSee('Client product profit')->assertSee('39.10')->assertSee('89.10')->assertSee('Sellbees earnings')->assertSee('0.90');
+});
+
+it('records the delivery charge once, never deducts it again at delivery, and never collects what the courier kept', function () {
+    $co = bootProduct($this);
+    $s = mugClient($co);
+    $o = mugOrder($co, $s, 'COD-1', '8', '8', 'client', 'courier_deducted');      // 80.00 sold, courier keeps 8.00 before remitting 72.00
+    expect($o->delivery_charge)->toBe(800)->and($o->delivery_charge_recorded_at)->not->toBeNull()->and($o->net_value)->toBe(7_200)->and($o->commission)->toBe(72);
+    orderStep($co, 'dispatch', $o, ['delivery_charge' => '99'])->assertSessionHas('error');                   // already dispatched: no second recording
+    expect($o->refresh()->delivery_charge)->toBe(800);
+
+    $collect = fn (string $amount) => $co->post('clients', 'product.orders.collect', ['amount' => $amount, 'collected_on' => '2026-02-11', 'idempotency_key' => (string) Str::uuid()], $o);
+    $collect('72.01')->assertSessionHas('error');                                                             // the courier's 8.00 is not owed to Sellbees
+    $collect('72')->assertSessionMissing('error');
+    $state = OrderFulfilment::collectionState($o->refresh()->load('items'));
+    expect($state['outstanding'])->toBe(0)->and($state['state'])->toBe('Collected');
+
+    $e = ProjectEconomics::for($s['project']);
+    expect($e['entitlement'])->toBe(7_128)                                                                  // 72.00 - 0.72, the charge deducted once
+        ->and($e['client']['cash_available'])->toBe(7_128)->and($e['client']['pending_remittance'])->toBe(0);    // held 72.00 - commission 0.72 netted
+
+    // Charges borne by Sellbees, or paid by the customer on top, are never deducted from the sale or the commission base.
+    $sb = mugOrder($co, $s, 'SB-1', '2', '5', 'sellbees', price: '10');
+    expect($sb->net_value)->toBe(2_000)->and($sb->commission)->toBe(20);
+});
+
+it('shares the delivery charge over what was delivered and keeps commission exact through partial delivery and returns', function () {
+    $co = bootProduct($this);
+    $s = mugClient($co);
+    $o = mugOrder($co, $s, 'PD-1', '10', '10', deliver: false);
+    $item = $o->items()->first();
+    orderStep($co, 'deliver', $o, ['delivered' => [$item->id => '6']])->assertSessionMissing('error');
+    $o->refresh()->load('items');
+    expect($o->eligibleDeliveryCharge($o->deliveredValue()))->toBe(600)->and($o->net_value)->toBe(5_400)->and($o->commission)->toBe(54);   // 60.00 - 6.00 = 54.00 -> 0.54
+
+    orderStep($co, 'return', $o, ['returned' => [$item->id => '2']])->assertSessionMissing('error');
+    $o->refresh();
+    expect($o->net_value)->toBe(3_600)->and($o->commission)->toBe(36);                                    // 40.00 - 4.00 = 36.00 -> 0.36, reversed once
+    orderStep($co, 'return', $o, ['returned' => [$item->id => '5']])->assertSessionHas('error');         // more than was delivered
+    expect($o->refresh()->commission)->toBe(36);
+    $e = ProjectEconomics::for($s['project']);
+    expect([$e['gross_sales'], $e['delivery_charges'], $e['net_sales'], $e['commission'], $e['units_sold']])->toBe([4_000, 400, 3_600, 36, '4.00']);
+    expect($o->items()->first()->delivered_quantity)->toEqual(6);
+});
+
+it('earns no commission on a failed delivery, records its courier charge once, and charges the client for it only when client-borne', function () {
+    $co = bootProduct($this);
+    $s = mugClient($co);
+    $o = mugOrder($co, $s, 'FD-1', '4', '4', deliver: false);
+    orderStep($co, 'fail', $o)->assertSessionMissing('error');
+    $o->refresh();
+    expect($o->delivery_status)->toBe('failed')->and($o->commission)->toBe(0)->and($o->billed_invoice_id)->toBeNull();
+
+    $charges = fn (array $d) => $co->post('clients', 'product.orders.courier-charges', $d, $o);
+    $charges(['return_charge' => '3'])->assertSessionHas('error');                                       // no returned units on this order
+    $charges(['failed_delivery_charge' => '2.50'])->assertSessionMissing('error');
+    $charges(['failed_delivery_charge' => '9'])->assertSessionHas('error');                              // recorded once, never overwritten
+    expect($o->refresh()->failed_delivery_charge)->toBe(250);
+
+    $e = ProjectEconomics::for($s['project']);
+    expect($e['net_sales'])->toBe(0)->and($e['commission'])->toBe(0)->and($e['unsuccessful_charges'])->toBe(250)->and($e['entitlement'])->toBe(-250)->and($e['units_sold'])->toBe('0.00');
+});
+
+it('rounds commission half-up in whole paisa and keeps a zero rate valid', function () {
+    expect(OrderCommission::commission(901, 100))->toBe(9)->and(OrderCommission::commission(950, 100))->toBe(10)->and(OrderCommission::commission(949, 100))->toBe(9)
+        ->and(OrderCommission::commission(900, 0))->toBe(0)->and(OrderCommission::commission(9_000, 100))->toBe(90);
+    $o = new ClientOrder(['delivery_charge' => 100, 'delivery_charge_bearer' => 'client']);
+    $o->setRelation('items', collect([new ClientOrderItem(['quantity' => '3', 'unit_price' => 333, 'unit_discount' => 0])]));   // 9.99 ordered, 1.00 charge
+    expect($o->orderedValue())->toBe(999)->and($o->eligibleDeliveryCharge(333))->toBe(33)->and($o->eligibleDeliveryCharge(666))->toBe(67)->and($o->eligibleDeliveryCharge(999))->toBe(100);
+    // Shares of one charge never add up to more than the charge: 33 + 67 = 100.
 });

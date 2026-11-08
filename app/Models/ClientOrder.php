@@ -16,6 +16,43 @@ class ClientOrder extends Model
             'confirmed_at' => 'datetime', 'packed_at' => 'datetime', 'dispatched_at' => 'datetime', 'delivered_at' => 'datetime'];
     }
 
+    /** Value of every unit ordered (the base the delivery charge is shared over). */
+    public function orderedValue(): int
+    {
+        return (int) $this->items->sum(fn (ClientOrderItem $i) => $i->amount());
+    }
+
+    /**
+     * The part of the delivery charge that is deducted from a successful sale of $successValue. The charge is recorded once for the whole order and shared over
+     * the order's lines in proportion to value, so a partial delivery or a return carries exactly its share (half-up, never more than the charge). A charge
+     * borne by Sellbees or paid by the customer on top is never deducted from the sale.
+     */
+    public function eligibleDeliveryCharge(int $successValue): int
+    {
+        $ordered = $this->orderedValue();
+        if ((int) $this->delivery_charge <= 0 || $this->delivery_charge_bearer !== 'client' || $ordered <= 0 || $successValue <= 0) {
+            return 0;
+        }
+
+        return min((int) $this->delivery_charge, (int) bcadd(bcdiv(bcmul((string) $this->delivery_charge, (string) min($successValue, $ordered), 0), (string) $ordered, 4), '0.5', 0));
+    }
+
+    /** What commission is worked out on: successful product sales (delivered and not returned) less the eligible client-borne delivery charge. */
+    public function commissionBase(): int
+    {
+        $sales = $this->deliveredValue();
+
+        return max(0, $sales - $this->eligibleDeliveryCharge($sales));
+    }
+
+    /** The customer money Sellbees can actually receive for the order: a charge the courier kept before remitting is never collected, so never owed. */
+    public function collectibleValue(): int
+    {
+        $sales = $this->deliveredValue();
+
+        return $this->delivery_charge_status === 'courier_deducted' ? max(0, $sales - $this->eligibleDeliveryCharge($sales)) : $sales;
+    }
+
     /**
      * What the screens call the order's fulfilment state. The stored delivery_status stays one of the workflow steps; partial delivery and partial or
      * full return are read from the lines, so no second status can drift from the quantities.

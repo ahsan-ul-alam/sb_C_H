@@ -22,6 +22,7 @@ use App\Services\ClientSettlementService;
 use App\Services\Inventory;
 use App\Services\OrderFulfilment;
 use App\Services\OrderRefunds;
+use App\Services\ProjectEconomics;
 use App\Services\ProjectInventory;
 use App\Services\ProjectStockAllocation;
 use App\Services\StorageBilling;
@@ -210,6 +211,7 @@ class ProductOperationsController extends Controller
         $visible = $request->user()->accessibleProjectIds();
 
         return view('product.project', [
+            'economics' => ProjectEconomics::for($project),
             'allocations' => StockAllocation::with(['line.lot.project', 'project', 'creator'])->whereNull('cancelled_at')
                 ->where(fn ($q) => $q->where('project_id', $project->id)->orWhereIn('sourcing_lot_line_id', $homeLineIds))->latest('id')->get(),
             'homeLines' => SourcingLotLine::with('lot')->whereIn('id', $homeLineIds)->get()->map(fn ($l) => ['line' => $l, 'free' => bcadd(ProjectStockAllocation::remaining($l, $project->id), '0', 2)])->filter(fn ($r) => bccomp($r['free'], '0', 2) > 0)->values(),
@@ -256,9 +258,11 @@ class ProductOperationsController extends Controller
 
     public function orderDispatch(Request $request, ClientOrder $order): RedirectResponse
     {
-        $d = $request->validate(['courier' => ['nullable', 'string', 'max:80'], 'tracking_reference' => ['nullable', 'string', 'max:120']]);
+        $d = $request->validate(['courier' => ['nullable', 'string', 'max:80'], 'tracking_reference' => ['nullable', 'string', 'max:120'], 'delivery_charge' => ['nullable', 'regex:'.Money::AMOUNT_REGEX],
+            'delivery_charge_bearer' => ['nullable', Rule::in(['client', 'sellbees', 'customer'])], 'delivery_charge_status' => ['nullable', Rule::in(['payable', 'paid_by_sellbees', 'courier_deducted'])]]);
+        $charge = array_filter(['amount' => ($d['delivery_charge'] ?? '') !== '' ? Money::toMinor($d['delivery_charge']) : null, 'bearer' => $d['delivery_charge_bearer'] ?? null, 'status' => $d['delivery_charge_status'] ?? null], fn ($v) => $v !== null);
 
-        return $this->attempt(fn () => OrderFulfilment::dispatch($order, $request->user(), $d['courier'] ?? null, $d['tracking_reference'] ?? null), 'Order dispatched.');
+        return $this->attempt(fn () => OrderFulfilment::dispatch($order, $request->user(), $d['courier'] ?? null, $d['tracking_reference'] ?? null, $charge), 'Order dispatched. The delivery charge is now recorded and is not deducted again at delivery.');
     }
 
     public function orderDeliver(Request $request, ClientOrder $order): RedirectResponse
@@ -267,6 +271,13 @@ class ProductOperationsController extends Controller
         $delivered = collect($data['delivered'] ?? [])->filter(fn ($v) => $v !== null && $v !== '')->all();
 
         return $this->attempt(fn () => OrderFulfilment::deliver($order, $delivered, $request->user()), 'Delivery confirmed. Commission is calculated on what was delivered.');
+    }
+
+    public function orderCourierCharges(Request $request, ClientOrder $order): RedirectResponse
+    {
+        $d = $request->validate(['failed_delivery_charge' => ['nullable', 'regex:'.Money::AMOUNT_REGEX], 'return_charge' => ['nullable', 'regex:'.Money::AMOUNT_REGEX]]);
+
+        return $this->attempt(fn () => OrderFulfilment::recordUnsuccessfulCharges($order, Money::toMinor($d['failed_delivery_charge'] ?? 0), Money::toMinor($d['return_charge'] ?? 0), $request->user()), 'Courier charge recorded.');
     }
 
     public function orderFail(Request $request, ClientOrder $order): RedirectResponse

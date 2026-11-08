@@ -76,7 +76,8 @@ class SearchController extends Controller
         $hasSbNumber = Schema::hasColumn('clients', 'sb_number');
         $clientColumns = $hasSbNumber ? ['name', 'sb_number', 'mobile', 'mobile_alt'] : ['name', 'mobile', 'mobile_alt'];
 
-        if ($user->can('clienthub')) {
+        $global = $user->seesAllProjects(); // a project-limited user's search never reaches other projects' clients, projects or lots
+        if ($global && $user->can('clienthub')) {
             $safe('Clients', fn () => Client::query()->where(fn (Builder $q) => $q->where(fn (Builder $n) => $all($n, $clientColumns))->orWhere('mobile', 'like', $escape($phone))->orWhere('mobile_alt', 'like', $escape($phone)))
                 ->orderBy('name')->limit(self::LIMIT)->get(array_merge(['id', 'name', 'mobile', 'archived_at'], $hasSbNumber ? ['sb_number'] : []))
                 ->map(fn (Client $c) => ['title' => $c->name, 'subtitle' => trim(($c->sb_number ?? '').' · '.$c->mobile.($c->archived_at ? ' · archived' : ''), ' ·'), 'url' => route('clients.show', $c)])->all());
@@ -90,7 +91,7 @@ class SearchController extends Controller
                 ->orderByDesc('paid_on')->limit(self::LIMIT)->get(['id', 'project_id', 'reference', 'amount', 'paid_on'])
                 ->map(fn (Payment $p) => ['title' => $p->reference, 'subtitle' => ($p->project?->name ?? '').' · '.Money::format((int) $p->amount, $p->project?->currency).' · '.$p->paid_on->format('j M Y'), 'url' => route('payments.edit', $p)])->all());
         }
-        if ($user->can('sourcing.view')) {
+        if ($global && $user->can('sourcing.view')) {
             $safe('Sourcing lots', fn () => SourcingLot::query()->where(fn (Builder $q) => $all($q, ['number', 'title']))
                 ->orderByDesc('id')->limit(self::LIMIT)->get(['id', 'number', 'title', 'status'])
                 ->map(fn (SourcingLot $l) => ['title' => $l->number, 'subtitle' => $l->title.' · '.$l->statusLabel(), 'url' => route('sourcing.lots.show', $l)])->all());

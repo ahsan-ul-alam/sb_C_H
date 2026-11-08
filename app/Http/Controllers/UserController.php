@@ -30,7 +30,11 @@ class UserController extends Controller
      */
     public function access(Request $request, User $user): RedirectResponse
     {
-        $data = $request->validate(['client_id' => ['nullable', 'exists:clients,id'], 'project_ids' => ['nullable', 'array'], 'project_ids.*' => ['exists:projects,id']]);
+        $data = $request->validate(['client_id' => ['nullable', 'exists:clients,id'], 'project_ids' => ['nullable', 'array'], 'project_ids.*' => ['exists:projects,id'], 'all_projects' => ['nullable', 'boolean']]);
+        $all = $request->boolean('all_projects');
+        if ($all && (! empty($data['client_id']) || ! empty($data['project_ids']))) {
+            return back()->with('error', 'Either grant all projects, or bind a client / assign projects, not both.');
+        }
         if ($user->id === $request->user()->id) {
             return back()->with('error', 'You cannot change your own project access.');
         }
@@ -41,13 +45,13 @@ class UserController extends Controller
         if (! empty($data['client_id']) && Project::whereIn('id', $projectIds)->where('client_id', '!=', $data['client_id'])->exists()) {
             return back()->with('error', 'A user bound to a client can only be assigned that client\'s projects.');
         }
-        DB::transaction(function () use ($user, $data, $projectIds, $request) {
-            $user->forceFill(['client_id' => $data['client_id'] ?? null])->save();
+        DB::transaction(function () use ($user, $data, $projectIds, $request, $all) {
+            $user->forceFill(['client_id' => $data['client_id'] ?? null, 'all_projects' => $all])->save();
             DB::table('project_user')->where('user_id', $user->id)->delete();
             foreach ($projectIds as $id) {
                 DB::table('project_user')->insert(['user_id' => $user->id, 'project_id' => $id, 'created_by' => $request->user()->id, 'created_at' => now(), 'updated_at' => now()]);
             }
-            Audit::log('user.access_updated', $user->email, 'client '.($data['client_id'] ?? '-').' projects '.implode(',', $projectIds));
+            Audit::log('user.access_updated', $user->email, 'all '.($all ? 'yes' : 'no').' client '.($data['client_id'] ?? '-').' projects '.implode(',', $projectIds));
         });
 
         return back()->with('status', 'Project access saved.');

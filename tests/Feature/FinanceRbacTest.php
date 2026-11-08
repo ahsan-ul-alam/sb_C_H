@@ -15,6 +15,7 @@ use App\Services\ProfitAllocator;
 require_once __DIR__.'/../Support/helpers.php';
 use Database\Seeders\DatabaseSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
 
@@ -29,6 +30,7 @@ function multiUser(string $name, array $roles, ?string $partnerCode = null): Use
     $user = User::create(['name' => $name, 'email' => $name.'@x.test', 'password' => 'password-123',
         'partner_id' => $partnerCode ? Partner::firstWhere('code', $partnerCode)->id : null]);
     $user->setRoles($roles);
+    $user->forceFill(['all_projects' => in_array('client_management', $roles, true)])->save();   // Client Management is cross-project by an explicit grant
 
     return $user;
 }
@@ -66,7 +68,7 @@ it('lets a flexible three-founder team run an expense and an allocation without 
     $c = multiUser('pc', ['board_member', 'partner', 'finance'], 'C');
 
     // A records an expense; A cannot verify it, B (Board) can, and it is posted on verification.
-    $this->actingAs($a)->post(route('finance.expenses.store'), ['submission_key' => (string) \Illuminate\Support\Str::uuid(), 'category' => 'Rent', 'description' => 'Office', 'amount' => '500', 'spent_on' => today()->toDateString()]);
+    $this->actingAs($a)->post(route('finance.expenses.store'), ['submission_key' => (string) Str::uuid(), 'category' => 'Rent', 'description' => 'Office', 'amount' => '500', 'spent_on' => today()->toDateString()]);
     $expense = Expense::first();
     $this->actingAs($a)->post(route('finance.expenses.decide', $expense), ['decision' => 'verify'])->assertSessionHas('error');
     expect($expense->fresh()->status)->toBe('pending');

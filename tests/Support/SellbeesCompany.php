@@ -73,6 +73,10 @@ class SellbeesCompany
     {
         $user = User::create(['name' => explode('@', $email)[0], 'email' => $email, 'password' => 'password-123']);
         $user->setRoles($roles);
+        // Client Management staff are cross-project by an explicit grant (the migration gives existing ones the same); tests that exercise limits switch it off.
+        if (in_array('client_management', $roles, true)) {
+            $user->forceFill(['all_projects' => true])->save();
+        }
 
         return $user;
     }

@@ -74,15 +74,15 @@ class User extends Authenticatable
     }
 
     /**
-     * The project ids this user may see, or null for all of them. Management roles see everything. Otherwise a user bound to a client sees only that
-     * client's projects (narrowed to the assigned ones if any are assigned), and a user with assignments sees only those. A user with neither keeps the access
-     * the role always gave, so nobody is locked out until an administrator assigns them.
+     * The project ids this user may see, or null for all of them. Management roles, and staff an administrator has explicitly granted `all_projects`, see everything.
+     * Otherwise a user bound to a client sees only that client's projects (narrowed to the assigned ones if any are assigned), and everyone else sees only the projects
+     * they are assigned to: with no assignment they see none.
      *
      * @return list<int>|null
      */
     public function accessibleProjectIds(): ?array
     {
-        if ($this->hasRole(...self::CROSS_PROJECT_ROLES)) {
+        if ($this->hasRole(...self::CROSS_PROJECT_ROLES) || (bool) $this->all_projects) {
             return null;
         }
         $assigned = DB::table('project_user')->where('user_id', $this->id)->pluck('project_id')->map(fn ($id) => (int) $id)->all();
@@ -90,7 +90,7 @@ class User extends Authenticatable
             return Project::where('client_id', $this->client_id)->when($assigned !== [], fn ($q) => $q->whereIn('id', $assigned))->pluck('id')->map(fn ($id) => (int) $id)->all();
         }
 
-        return $assigned === [] ? null : $assigned;
+        return $assigned;
     }
 
     public function seesAllProjects(): bool
