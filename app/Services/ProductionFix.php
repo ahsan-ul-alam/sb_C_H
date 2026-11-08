@@ -4,9 +4,11 @@ namespace App\Services;
 
 use App\Enums\InvoiceStatus;
 use App\Models\Invoice;
+use App\Models\Payment;
 use App\Models\ReconciliationException;
 use App\Models\User;
 use App\Support\Money;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -36,6 +38,13 @@ class ProductionFix
     public const VERSION = 'production-fix-2026-11';
 
     public const MARKER = 'production_fix.applied';
+
+    public const BASELINE_MARKER = 'production_fix.baseline_applied';
+
+    public const CONFIRMATION = 'I AUTHORIZE THE IRREVERSIBLE LEGACY BASELINE CUTOVER';
+
+    /** The journal source of the one-time Legacy Opening Balance Adjustment (unique per source, so it can be posted only once). */
+    public const BASELINE_SOURCE = 'legacy_cash_baseline';
 
     private const LOCK = 'sellbees:production-fix';
 
@@ -109,13 +118,27 @@ class ProductionFix
         $marker = self::marker();
         $technical = $marker !== null ? 'COMPLETE' : ($blockers === [] ? 'READY' : 'BLOCKED');
         $outstanding = self::outstanding($voids, $cash, $schemaReady);
+        // Financial reconciliation is complete when the duplicate receipts are corrected, the invoices read as confirmed, and the cash balances at the cutoff. The evidence behind the
+        // actual balance (owner-confirmed or statement-verified) is reported separately and is never upgraded.
+        $financial = self::fullyCorrected($voids, $invoices) && $cash !== null && $cash['status'] === 'reconciled' && IntegrityGate::statementBlockers() === [];
 
         return [
             'database' => DB::connection()->getDatabaseName(), 'applied' => $marker !== null, 'checks' => $checks, 'blockers' => $blockers, 'voids' => $voids, 'invoices' => $invoices,
             'drift' => $drift, 'sb_drift' => $sb['drift'], 'cash' => $cash, 'loans' => self::loanTotals(), 'outstanding' => $outstanding, 'technical' => $technical,
-            'financial' => $outstanding === [] && self::fullyCorrected($voids, $invoices) ? 'COMPLETE' : 'PENDING',
+            'financial' => $financial ? 'COMPLETE' : 'PENDING', 'evidence' => $cash['evidence'] ?? null, 'baseline_applied' => self::baselineMarker() !== null,
             'fingerprint' => $schemaReady ? self::fingerprint() : null,
         ];
+    }
+
+    /** @return object|null the marker of the one-time financial baseline */
+    public static function baselineMarker(): ?object
+    {
+        return DB::table('audit_logs')->where('action', self::BASELINE_MARKER)->orderBy('id')->first();
+    }
+
+    private static function corrected(string $state): bool
+    {
+        return in_array($state, ['APPROVED', 'AUTHORIZED'], true);
     }
 
     /**
@@ -125,16 +148,7 @@ class ProductionFix
      */
     public static function apply(string $expectDatabase, string $fingerprint, string $operatorEmail): array
     {
-        if ($expectDatabase === '' || $expectDatabase !== DB::connection()->getDatabaseName()) {
-            throw new RuntimeException('The database name does not match: pass --expect-database=<the database the preview printed>.');
-        }
-        if ($fingerprint === '') {
-            throw new RuntimeException('Pass --fingerprint=<the value the preview printed>: it proves the state being repaired is the state that was reviewed.');
-        }
-        $operator = User::where('email', $operatorEmail)->first();
-        if (! $operator || ! $operator->hasPermission('reconcile.review')) {
-            throw new RuntimeException('Pass --as=<email of the Finance or Board user running this>: every action is attributed to that person.');
-        }
+        $operator = self::guardApply($expectDatabase, $fingerprint, $operatorEmail);
 
         return self::withLock(function () use ($fingerprint, $operator): array {
             if (self::marker() !== null) {
@@ -182,6 +196,318 @@ class ProductionFix
         });
     }
 
+    /** The checks every --apply shares: the right database, the reviewed state, and a named Finance or Board operator to attribute every action to. */
+    private static function guardApply(string $expectDatabase, string $fingerprint, string $operatorEmail): User
+    {
+        if ($expectDatabase === '' || $expectDatabase !== DB::connection()->getDatabaseName()) {
+            throw new RuntimeException('The database name does not match: pass --expect-database=<the database the preview printed>.');
+        }
+        if ($fingerprint === '') {
+            throw new RuntimeException('Pass --fingerprint=<the value the preview printed>: it proves the state being repaired is the state that was reviewed.');
+        }
+        $operator = User::where('email', $operatorEmail)->first();
+        if (! $operator || ! $operator->hasPermission('reconcile.review')) {
+            throw new RuntimeException('Pass --as=<email of the Finance or Board user running this>: every action is attributed to that person.');
+        }
+
+        return $operator;
+    }
+
+    /**
+     * The exact plan of the one-time financial baseline for the given inputs, and every reason it cannot be applied. Read-only. In preview the optional inputs may be missing;
+     * with $strict (--apply) every input is required.
+     *
+     * @param  array<string, mixed>  $in
+     * @return array<string, mixed>
+     */
+    public static function baselinePlan(array $in, bool $strict = false): array
+    {
+        $problems = [];
+        $currency = (string) config('finance.currency');
+        $plan = ['cutoff_at' => null, 'cutoff_date' => null, 'owner_cash' => null, 'supplied_expected' => null, 'expected_before' => null, 'voids' => [], 'void_total' => 0, 'expected_after' => null,
+            'adjustment' => null, 'backup' => null, 'ledger_cash_before' => null];
+
+        if (DB::table('journal_entries')->where('source_type', self::BASELINE_SOURCE)->exists()) {
+            $problems[] = 'the Legacy Opening Balance Adjustment has already been posted; it can be posted only once';
+        }
+        $cutoffText = trim((string) ($in['cutoff'] ?? ''));
+        $cutoff = null;
+        if ($cutoffText !== '') {
+            try {
+                $cutoff = Carbon::createFromFormat('Y-m-d H:i', $cutoffText);
+                $cutoff = $cutoff && $cutoff->format('Y-m-d H:i') === $cutoffText ? $cutoff : null;
+            } catch (\Throwable) {
+                $cutoff = null;
+            }
+            if ($cutoff === null) {
+                $problems[] = '--cutoff must look like 2026-11-08 12:00 (the date and time the owner\'s balance is true)';
+            } elseif ($cutoff->isFuture()) {
+                $problems[] = 'the cutoff is in the future';
+            }
+        } elseif ($strict) {
+            $problems[] = '--cutoff is required';
+        }
+        foreach (['owner_cash' => '--owner-cash', 'expected_cash' => '--expected-cash'] as $key => $flag) {
+            $raw = trim((string) ($in[$key] ?? ''));
+            if ($raw === '') {
+                $strict ? $problems[] = $flag.' is required' : null;
+            } elseif (! preg_match(Money::AMOUNT_REGEX, $raw)) {
+                $problems[] = $flag.' must be an amount such as 49000 or 49000.00';
+            } else {
+                $plan[$key === 'owner_cash' ? 'owner_cash' : 'supplied_expected'] = Money::toMinor($raw);
+            }
+        }
+
+        if ($cutoff !== null && ! $cutoff->isFuture() && Schema::hasColumn('payments', 'voided_at')) {
+            $date = $cutoff->toDateString();
+            $plan['cutoff_at'] = $cutoff->format('Y-m-d H:i');
+            $plan['cutoff_date'] = $date;
+            try {
+                AccountingService::assertOpen($date, 'the baseline adjustment');
+            } catch (RuntimeException $e) {
+                $problems[] = $e->getMessage();
+            }
+            $lastCash = DB::table('journal_entries as e')->join('journal_lines as l', 'l.journal_entry_id', '=', 'e.id')->where('l.account', 'cash')->max('e.entry_date');
+            $lastPayment = DB::table('payments')->whereNull('voided_at')->max('paid_on');
+            foreach (['a journal cash entry' => $lastCash, 'a customer payment' => $lastPayment] as $what => $latest) {
+                if ($latest !== null && substr((string) $latest, 0, 10) > $date) {
+                    $problems[] = 'the ERP has '.$what.' dated '.substr((string) $latest, 0, 10).', after the cutoff date: the owner\'s balance cannot be compared with it';
+                }
+            }
+            $plan['ledger_cash_before'] = (int) Ledger::debitBalance('cash');
+            $plan['expected_before'] = CashReconciliation::expectedCash($currency, $date);
+            foreach (self::ERRONEOUS as $id) {
+                $state = self::voidState($id)['state'];
+                $payment = DB::table('payments')->where('id', $id)->first();
+                if (self::corrected($state)) {
+                    continue;
+                }
+                if (! $payment || in_array($state, ['REJECTED', 'INVALID'], true)) {
+                    $problems[] = 'payment #'.$id.' is '.$state.': the Board decided otherwise or the record is not as expected; the correction stops';
+
+                    continue;
+                }
+                if (substr((string) $payment->paid_on, 0, 10) > $date) {
+                    $problems[] = 'payment #'.$id.' is dated after the cutoff';
+                }
+                $plan['voids'][$id] = (int) $payment->amount;
+            }
+            $plan['void_total'] = (int) array_sum($plan['voids']);
+            $plan['expected_after'] = $plan['expected_before'] - $plan['void_total'];
+            if ($plan['owner_cash'] !== null) {
+                $plan['adjustment'] = $plan['owner_cash'] - $plan['expected_after'];
+            }
+            if ($plan['supplied_expected'] !== null && $plan['supplied_expected'] !== $plan['expected_after']) {
+                $problems[] = 'the expected cash after the corrections is '.self::money($plan['expected_after']).', not the '.self::money($plan['supplied_expected']).' you supplied: the correction stops';
+            }
+        }
+
+        $backup = self::checkBackup(isset($in['backup']) && $in['backup'] !== '' ? (string) $in['backup'] : null);
+        $plan['backup'] = $backup['info'];
+        if ($backup['problem'] !== null && ($strict || ! empty($in['backup']))) {
+            $problems[] = $backup['problem'];
+        }
+        if ($strict) {
+            if (mb_strlen(trim((string) ($in['authorization'] ?? ''))) < 20) {
+                $problems[] = '--owner-authorization must say who authorized this, when and how (at least 20 characters)';
+            }
+            if (($in['confirm'] ?? null) !== self::CONFIRMATION) {
+                $problems[] = '--confirm must be exactly: '.self::CONFIRMATION;
+            }
+        }
+        $plan['problems'] = $problems;
+
+        return $plan;
+    }
+
+    /**
+     * Apply the one-time financial baseline: (1) the two duplicate receipts are voided by an EXPLICIT, attributed administrative correction (never presented as a Board approval),
+     * (2) every invoice, segment and total is recalculated by the application's own methods, (3) the difference between the reconstructed historical cash and the owner-confirmed
+     * actual cash is posted ONCE as a balanced Legacy Opening Balance Adjustment (Dr cash / Cr opening equity: never revenue, profit, expense, loan, supplier payment or partner
+     * capital), and (4) the original figures, the bridge and the authorization are recorded permanently. Everything is one transaction; any failed check rolls it all back.
+     *
+     * @param  array<string, mixed>  $in
+     * @return array{technical: string, financial: string, report: array<string, mixed>, plan: array<string, mixed>, repaired: list<string>}
+     */
+    public static function applyBaseline(array $in): array
+    {
+        $operator = self::guardApply((string) ($in['database'] ?? ''), (string) ($in['fingerprint'] ?? ''), (string) ($in['operator'] ?? ''));
+
+        return self::withLock(function () use ($in, $operator): array {
+            if (self::baselineMarker() !== null) {
+                throw new RuntimeException('The one-time financial baseline has already been applied. It will not run again.');
+            }
+            $report = self::report();
+            if ($report['blockers'] !== []) {
+                throw new RuntimeException("Refused: technical preconditions do not hold.\n- ".implode("\n- ", $report['blockers']));
+            }
+            if ($report['fingerprint'] !== (string) $in['fingerprint']) {
+                throw new RuntimeException('Refused: the database changed since the preview (fingerprint mismatch). Run the preview again and review it.');
+            }
+            $plan = self::baselinePlan($in, strict: true);
+            if ($plan['problems'] !== []) {
+                throw new RuntimeException("Refused: the baseline cannot be applied.\n- ".implode("\n- ", $plan['problems']));
+            }
+
+            $repaired = [];
+            Auth::setUser($operator);
+            DB::transaction(function () use (&$repaired, $report, $plan, $in, $operator): void {
+                $skip = ['journal_entries', 'journal_lines', 'payment_void_requests'];
+                $maxEntry = (int) DB::table('journal_entries')->max('id');
+                $journalBefore = self::journalHash($maxEntry);
+                $before = self::financialHash($skip);
+                $loansBefore = self::loanTotals();
+
+                foreach (array_keys($plan['voids']) as $id) {
+                    $repaired[] = self::administrativeVoid($id, $operator, trim((string) $in['authorization']));
+                }
+                foreach (self::invoiceDrift() as $d) {
+                    Invoice::whereKey($d['id'])->lockForUpdate()->firstOrFail()->refreshPaymentStatus();
+                    $repaired[] = 'invoice '.$d['number'].': paid '.$d['stored_paid'].' -> '.$d['computed_paid'].', '.$d['stored_status'].' -> '.$d['computed_status'];
+                    Audit::log('production_fix.invoice_rebuilt', 'invoice '.$d['number'], end($repaired));
+                }
+                if ($report['sb_drift'] !== null) {
+                    DB::table('sb_number_sequence')->where('id', 1)->update(['last_value' => $report['sb_drift']['max']]);
+                    $repaired[] = 'SB counter '.$report['sb_drift']['last_value'].' -> '.$report['sb_drift']['max'];
+                    Audit::log('production_fix.sb_counter_raised', 'sb_number_sequence', end($repaired));
+                }
+
+                $adjustment = (int) $plan['adjustment'];
+                $entryId = null;
+                if ($adjustment !== 0) {
+                    $abs = abs($adjustment);
+                    $memo = 'Legacy Opening Balance Adjustment / Historical Cash Difference (cutoff '.$plan['cutoff_at'].'; owner-confirmed, not bank-verified; not revenue, profit or loss)';
+                    $lines = $adjustment > 0 ? [['cash', null, $abs, 0, null], ['equity.opening', null, 0, $abs]] : [['equity.opening', null, $abs, 0], ['cash', null, 0, $abs, null]];
+                    $entryId = Ledger::post($plan['cutoff_date'], $memo, self::BASELINE_SOURCE, 1, $lines, $operator->id)->id;
+                    $repaired[] = 'Legacy Opening Balance Adjustment '.($adjustment > 0 ? '+' : '-').self::money($abs).' posted as journal entry #'.$entryId.' (Dr/Cr cash and opening equity)';
+                }
+                Audit::log('cash.baseline_set', 'legacy cash baseline', json_encode([
+                    'version' => self::VERSION, 'cutoff_at' => $plan['cutoff_at'], 'cutoff_date' => $plan['cutoff_date'], 'evidence' => 'owner_confirmed', 'owner_cash' => $plan['owner_cash'],
+                    'reconstructed_expected_before_corrections' => $plan['expected_before'], 'duplicate_receipts_removed' => $plan['void_total'], 'reconstructed_expected' => $plan['expected_after'],
+                    'adjustment' => $adjustment, 'journal_entry_id' => $entryId, 'authorization' => trim((string) $in['authorization']), 'operator' => $operator->email,
+                    'backup' => ['file' => basename((string) $plan['backup']['path']), 'sha256' => $plan['backup']['sha256'], 'bytes' => $plan['backup']['size'], 'modified' => $plan['backup']['modified']],
+                ]));
+                self::supersedeLegacyReview($operator);
+
+                // Nothing may differ from what the owner authorized, or the whole correction is rolled back.
+                if (self::financialHash($skip) !== $before) {
+                    throw new RuntimeException('A financial amount, link or verification state changed beyond the authorized correction: rolled back.');
+                }
+                if (self::journalHash($maxEntry) !== $journalBefore || DB::table('journal_entries')->where('id', '>', $maxEntry)->count() !== ($adjustment === 0 ? 0 : 1)) {
+                    throw new RuntimeException('The journal changed beyond the single baseline entry: rolled back.');
+                }
+                if (self::loanTotals() !== $loansBefore || $loansBefore['outstanding'] !== 850_000) {
+                    throw new RuntimeException('Loans receivable are not as expected (BDT 8,500): rolled back.');
+                }
+                if (CashReconciliation::expectedCash((string) config('finance.currency'), $plan['cutoff_date']) !== $plan['owner_cash']) {
+                    throw new RuntimeException('Expected cash does not equal the owner-confirmed balance after the adjustment: rolled back.');
+                }
+                if ((int) DB::table('payments')->where('project_id', 2)->whereNull('voided_at')->sum('amount') !== array_sum(array_map(fn ($id) => self::PAYMENTS[$id][2], self::VALID))) {
+                    throw new RuntimeException('Suchona Mart valid receipts are not the owner-confirmed total: rolled back.');
+                }
+                $after = self::report();
+                if (! self::fullyCorrected($after['voids'], $after['invoices']) || $after['drift'] !== []) {
+                    throw new RuntimeException('Invoices #4, #6 and #10 are not in the confirmed state after the correction: rolled back.');
+                }
+                $details = 'cutoff '.$plan['cutoff_at'].' by '.$operator->email.'. Reconstructed historical cash '.self::money((int) $plan['expected_after']).' + adjustment '.self::money($adjustment).' = owner-confirmed '.self::money((int) $plan['owner_cash']).' (NOT independently bank-verified).';
+                if (self::marker() === null) {
+                    Audit::log(self::MARKER, self::VERSION, 'TECHNICAL CUTOVER COMPLETE together with the financial baseline, '.$details);
+                }
+                Audit::log(self::BASELINE_MARKER, self::VERSION, 'FINANCIAL BASELINE APPLIED, '.$details.' Duplicate receipts voided by administrative correction: '.implode(', ', array_map(fn ($id) => '#'.$id, array_keys($plan['voids']))).'.');
+            });
+
+            $after = self::report();
+
+            return ['technical' => $after['technical'], 'financial' => $after['financial'], 'report' => $after, 'plan' => $plan, 'repaired' => $repaired];
+        });
+    }
+
+    /**
+     * The explicit one-time administrative correction of one erroneous receipt: the same guards, recalculation and non-destructive stamp as the normal void, but recorded as what it
+     * is (status "authorized", decided by the named operator, "not a Board approval"). A pending request is converted; a rejected one stops the run. The payment and its
+     * allocations are kept. Raw writes are used on purpose so no notification claims a Board decision is awaited.
+     */
+    private static function administrativeVoid(int $paymentId, User $operator, string $authorization): string
+    {
+        $payment = Payment::withVoided()->whereKey($paymentId)->lockForUpdate()->firstOrFail();
+        if ($blockers = PaymentVoids::blockers($payment)) {
+            throw new RuntimeException('Payment #'.$paymentId.' cannot be voided: '.implode(' ', $blockers));
+        }
+        $invoice = $payment->invoice_id ? Invoice::whereKey($payment->invoice_id)->lockForUpdate()->first() : null;
+        $segmentIds = $payment->allocations()->pluck('segment_id')->all();
+        $note = 'ONE-TIME OWNER-AUTHORIZED ADMINISTRATIVE CORRECTION recorded by '.$operator->email.'; this is NOT a Board member approval.';
+        $row = [
+            'amount' => (int) $payment->amount, 'reason' => 'Owner-confirmed erroneous duplicate receipt (never received)', 'evidence' => mb_substr('Owner authorization: '.$authorization, 0, 255), 'status' => 'authorized',
+            'decided_by' => $operator->id, 'decided_at' => now(), 'decision_note' => mb_substr($note, 0, 255), 'active_payment_id' => $paymentId, 'updated_at' => now(),
+        ];
+        $pending = DB::table('payment_void_requests')->where('payment_id', $paymentId)->where('status', 'pending')->orderByDesc('id')->first();
+        $pending ? DB::table('payment_void_requests')->where('id', $pending->id)->update($row) : DB::table('payment_void_requests')->insert($row + ['payment_id' => $paymentId, 'requested_by' => $operator->id, 'created_at' => now()]);
+
+        DB::table('payments')->where('id', $paymentId)->whereNull('voided_at')->update(['voided_at' => now()]);
+        $invoice?->refreshPaymentStatus();
+        Invoice::refreshBillingSegments($segmentIds, $invoice?->id);
+        $line = 'payment #'.$paymentId.' ('.self::money((int) $payment->amount).') voided by administrative correction; the payment and its allocations are kept';
+        Audit::log('payment.void_authorized', 'payment '.$paymentId, $line.'. '.$note);
+
+        return $line;
+    }
+
+    /** The legacy-review items opened by the earlier cutover mode for exactly these matters are closed, attributed, and say they were superseded: not independently verified. */
+    private static function supersedeLegacyReview(User $operator): void
+    {
+        $items = ReconciliationException::where('status', 'open')->whereIn('key', ['cutover:payment_void:8', 'cutover:payment_void:13', 'cutover:cash_difference'])->get();
+        foreach ($items as $item) {
+            $item->update(['status' => 'resolved', 'resolved_by' => $operator->id, 'resolved_at' => now(),
+                'resolution_note' => 'Superseded by the owner-authorized one-time baseline correction run by '.$operator->email.'. Owner-confirmed, NOT independently bank-verified.']);
+            Audit::log('reconciliation.exception_resolved', $item->key, 'superseded by the one-time baseline correction');
+        }
+    }
+
+    private static function journalHash(int $upTo): string
+    {
+        $rows = DB::table('journal_lines')->join('journal_entries', 'journal_entries.id', '=', 'journal_lines.journal_entry_id')->where('journal_entries.id', '<=', $upTo)
+            ->orderBy('journal_lines.id')->get(['journal_entries.id as e', 'journal_entries.entry_date', 'journal_entries.source_type', 'journal_entries.source_id', 'journal_lines.account', 'journal_lines.partner_id',
+                'journal_lines.debit', 'journal_lines.credit', 'journal_lines.financial_account_id'])->map(fn ($r) => array_map(fn ($v) => $v === null ? null : (string) $v, (array) $r))->all();
+
+        return hash('sha256', json_encode($rows));
+    }
+
+    /** A fresh, readable database dump: modified within the last two hours, not trivially small, and containing the payments table. @return array{problem: ?string, info: ?array<string, mixed>} */
+    private static function checkBackup(?string $path): array
+    {
+        if ($path === null) {
+            return ['problem' => '--backup-file is required: take a fresh database dump first and pass its path', 'info' => null];
+        }
+        if (! is_file($path) || ! is_readable($path)) {
+            return ['problem' => 'the backup file "'.$path.'" does not exist or cannot be read', 'info' => null];
+        }
+        $age = time() - (int) filemtime($path);
+        $size = (int) filesize($path);
+        $info = ['path' => $path, 'size' => $size, 'modified' => date('Y-m-d H:i:s', (int) filemtime($path)), 'sha256' => hash_file('sha256', $path)];
+        if ($age > 7200 || $age < -300) {
+            return ['problem' => 'the backup file was last modified '.$info['modified'].': it must be taken within the last two hours (a fresh backup)', 'info' => $info];
+        }
+        if ($size < 10_000) {
+            return ['problem' => 'the backup file is only '.$size.' bytes: it does not look like a database dump', 'info' => $info];
+        }
+        $gz = str_ends_with(strtolower($path), '.gz');
+        $h = $gz ? gzopen($path, 'rb') : fopen($path, 'rb');
+        $found = false;
+        $read = 0;
+        while ($h && ! ($gz ? gzeof($h) : feof($h)) && $read < 512 * 1024 * 1024) {
+            $line = $gz ? gzgets($h, 65536) : fgets($h, 65536);
+            $read += strlen((string) $line);
+            if ($line !== false && stripos($line, 'CREATE TABLE') !== false && preg_match('/CREATE TABLE (IF NOT EXISTS )?[`"]?payments[`"]?\s/i', $line)) {
+                $found = true;
+
+                break;
+            }
+        }
+        $h ? ($gz ? gzclose($h) : fclose($h)) : null;
+
+        return ['problem' => $found ? null : 'the backup file does not contain the payments table: it is not a dump of this database', 'info' => $info];
+    }
+
     /**
      * Put every historical open item in the existing reconciliation-exceptions register so it stays visible until a second person resolves it with evidence. Registering
      * only records that the item exists. Safe to repeat.
@@ -200,7 +526,7 @@ class ProductionFix
             }
         };
         foreach ($report['voids'] as $id => $v) {
-            if ($v['state'] !== 'APPROVED') {
+            if (! self::corrected($v['state'])) {
                 $amount = self::PAYMENTS[$id][2];
                 $open('cutover:payment_void:'.$id, 'Payment #'.$id.' ('.self::money($amount).') confirmed by the owner as never received', $amount,
                     'The owner confirmed this receipt does not exist. The payment is kept and still counted until its void is approved. Current state: '.$v['state'].' ('.$v['next'].').',
@@ -228,16 +554,13 @@ class ProductionFix
     {
         $items = [];
         foreach ($voids as $id => $v) {
-            if ($v['state'] !== 'APPROVED') {
+            if (! self::corrected($v['state'])) {
                 $items[] = 'Payment #'.$id.' void: '.$v['state'].' ('.$v['next'].')';
             }
         }
         if ($cash !== null && $cash['status'] === 'not_verified') {
             $items[] = 'Actual cash balance: Not Verified ('.$cash['reason'].')';
         } elseif ($cash !== null) {
-            if ($cash['evidence'] === 'owner_confirmed') {
-                $items[] = 'Actual cash balance is owner-confirmed only; no independent bank/bKash statement backs it yet';
-            }
             if ($cash['difference'] !== 0) {
                 $items[] = 'Unreconciled cash difference of '.$cash['sign'].self::money(abs((int) $cash['difference'])).' ('.$cash['direction'].')';
             }
@@ -248,7 +571,7 @@ class ProductionFix
         if ($schemaReady || Schema::hasTable('reconciliation_exceptions')) {
             $open = ReconciliationException::where('status', 'open')->count();
             if ($open > 0) {
-                $items[] = $open.' historical review item(s) open (Finance > Historical Reconciliation)';
+                $items[] = 'Informational: '.$open.' historical review item(s) are registered and open (Finance > Historical Reconciliation); they do not block anything';
             }
         }
 
@@ -354,7 +677,7 @@ class ProductionFix
     {
         $found = [];
         foreach (DB::table('payments')->whereNotNull('voided_at')->pluck('id') as $id) {
-            if (! DB::table('payment_void_requests')->where('payment_id', $id)->where('status', 'approved')->exists()) {
+            if (! DB::table('payment_void_requests')->where('payment_id', $id)->whereIn('status', ['approved', 'authorized'])->exists()) {
                 $found[] = 'payment #'.$id.' is voided without an approved request';
             }
         }
@@ -368,7 +691,11 @@ class ProductionFix
         $payment = DB::table('payments')->where('id', $paymentId)->first();
         $latest = DB::table('payment_void_requests')->where('payment_id', $paymentId)->orderByDesc('id')->first();
         if ($payment && $payment->voided_at !== null) {
-            return $latest && $latest->status === 'approved' ? ['state' => 'APPROVED', 'next' => 'voided through the approved workflow; the payment is kept'] : ['state' => 'INVALID', 'next' => 'voided without an approved request'];
+            return match (true) {
+                $latest && $latest->status === 'approved' => ['state' => 'APPROVED', 'next' => 'voided through the approved workflow; the payment is kept'],
+                $latest && $latest->status === 'authorized' => ['state' => 'AUTHORIZED', 'next' => 'voided by the one-time owner-authorized administrative correction (not a Board approval); the payment is kept'],
+                default => ['state' => 'INVALID', 'next' => 'voided without an approved request'],
+            };
         }
         if ($latest && $latest->status === 'pending') {
             return ['state' => 'PENDING', 'next' => 'a Finance request awaits a different Board member\'s approval (Finance > Payment Voids)'];
@@ -443,7 +770,7 @@ class ProductionFix
     /** @param array<int, array{state: string}> $voids @param array<int, ?array<string, mixed>> $invoices */
     private static function fullyCorrected(array $voids, array $invoices): bool
     {
-        if (count($voids) !== 2 || collect($voids)->contains(fn ($v) => $v['state'] !== 'APPROVED')) {
+        if (count($voids) !== 2 || collect($voids)->contains(fn ($v) => ! self::corrected($v['state']))) {
             return false;
         }
         $four = $invoices[4] ?? null;
@@ -455,7 +782,7 @@ class ProductionFix
     }
 
     /** Every financial amount and link, excluding only what this cutover may change (invoice amount paid / status) and a void's stamp. Identical before and after, or the run is rolled back. */
-    private static function financialHash(): string
+    private static function financialHash(array $except = []): string
     {
         $parts = [];
         foreach ([
@@ -468,7 +795,7 @@ class ProductionFix
             'sourcing_lots' => ['id', 'status', 'ownership', 'project_id'], 'receipt_classifications' => ['id', 'payment_id', 'nature'], 'receipt_reviews' => ['id', 'payment_id', 'status'],
             'payment_void_requests' => ['id', 'payment_id', 'status'],
         ] as $table => $columns) {
-            if (Schema::hasTable($table)) {
+            if (! in_array($table, $except, true) && Schema::hasTable($table)) {
                 $parts[$table] = DB::table($table)->orderBy('id')->get($columns)->map(fn ($r) => array_map(fn ($v) => $v === null ? null : (string) $v, (array) $r))->all();
             }
         }

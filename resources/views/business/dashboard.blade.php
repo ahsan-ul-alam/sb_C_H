@@ -155,6 +155,10 @@
                     <li><span class="m">{{ $rc['bangla'] }}</span><span class="n m">{{ $rc['direction'] }}</span></li>
                     <li><span class="m">Status</span><span class="n m">{{ $rc['status'] === 'not_verified' ? 'Not Verified' : ($rc['status'] === 'reconciled' ? 'Reconciled' : 'Unreconciled') }}</span></li>
                     @if ($rc['cutoff'])<li><span class="m">As of</span><span class="n m">{{ $rc['cutoff'] }}@if ($rc['cutoff_at']) {{ $rc['cutoff_at']->format('H:i') }}@endif</span></li>@endif
+                    @if ($rc['baseline'])
+                        @php($bl = $rc['baseline'])
+                        <li><span class="m">Opening cash baseline (owner-authorized, owner-confirmed, not statement-verified), cutoff {{ $bl['cutoff_at'] ?? $bl['cutoff_date'] }}: reconstructed historical cash {{ $m($bl['reconstructed_expected']) }} + Legacy Opening Balance Adjustment {{ (int) $bl['adjustment'] >= 0 ? '+' : '−' }}{{ $m(abs((int) $bl['adjustment'])) }} = {{ $m($bl['owner_cash']) }}</span><span class="n m">not profit or loss</span></li>
+                    @endif
                     @foreach ($rc['statements'] as $st)
                         <li><span class="m">{{ $st['account'] }}: {{ $st['evidence'] === 'owner_confirmed' ? 'owner-confirmed' : 'statement' }} · {{ $st['reference'] }}@if ($st['verified_by']) · verified by {{ $st['verified_by'] }}@endif</span><span class="n m">{{ $m($st['balance']) }}</span></li>
                     @endforeach

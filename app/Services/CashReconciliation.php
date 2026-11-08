@@ -6,6 +6,7 @@ use App\Models\AccountStatement;
 use App\Models\FinancialAccount;
 use App\Models\JournalLine;
 use App\Models\Payment;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -45,9 +46,48 @@ class CashReconciliation
     }
 
     /**
+     * The owner-authorized opening cash baseline, if one was recorded (a permanent audit record, never overwritten): the reconstructed historical expected cash, the owner-confirmed
+     * actual cash at an explicit cutoff, and the one-time Legacy Opening Balance Adjustment that bridges them. Read from the database, never hardcoded.
+     *
+     * @return array<string, mixed>|null
+     */
+    public static function baseline(): ?array
+    {
+        $row = DB::table('audit_logs')->where('action', 'cash.baseline_set')->orderByDesc('id')->first();
+        $data = $row ? json_decode((string) $row->details, true) : null;
+
+        return is_array($data) && isset($data['cutoff_date'], $data['owner_cash'], $data['reconstructed_expected'], $data['adjustment']) ? $data : null;
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public static function snapshot(): array
+    {
+        $snapshot = self::statementSnapshot();
+        $baseline = self::baseline();
+        $snapshot['baseline'] = $baseline;
+        // With no complete set of verified statements (or only older ones) the owner-authorized baseline is the actual balance, labelled as owner-confirmed.
+        if ($baseline !== null && ($snapshot['cutoff'] === null || $baseline['cutoff_date'] > $snapshot['cutoff'])) {
+            $expected = self::expectedCash((string) config('finance.currency'), $baseline['cutoff_date']);
+            $difference = (int) $baseline['owner_cash'] - $expected;
+
+            return array_merge($snapshot, [
+                'status' => $difference === 0 ? 'reconciled' : 'unreconciled', 'reason' => null, 'cutoff' => $baseline['cutoff_date'], 'cutoff_at' => Carbon::parse($baseline['cutoff_at'] ?? $baseline['cutoff_date']),
+                'expected' => $expected, 'expected_as_of' => 'end of '.$baseline['cutoff_date'], 'actual' => (int) $baseline['owner_cash'], 'difference' => $difference,
+                'sign' => $difference > 0 ? '+' : ($difference < 0 ? '−' : ''),
+                'direction' => $difference > 0 ? 'Actual money is greater than the ERP expects' : ($difference < 0 ? 'Actual money is less than the ERP expects' : 'Balances match'),
+                'evidence' => 'owner_confirmed', 'statements' => [], 'missing' => [], 'source' => 'owner_baseline',
+            ]);
+        }
+
+        return $snapshot + ['source' => 'statements'];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private static function statementSnapshot(): array
     {
         $currency = (string) config('finance.currency');
         $accounts = FinancialAccount::where('is_active', true)->orderBy('name')->get();
