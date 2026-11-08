@@ -42,6 +42,10 @@ class OrderFulfilment
             $items = [];
             foreach ($data['items'] as $row) {
                 $product = SupplierProduct::findOrFail($row['product_id']);
+                // Only stock this project may sell can be put on an order: the client's own lots for the project (or allocated to it) and the custody handed to it.
+                if (Inventory::stockFor($project->client_id, $product->id, $project->id)->isEmpty()) {
+                    throw new RuntimeException($product->label().' has no stock available to this project, so it cannot be ordered.');
+                }
                 if (bccomp($row['quantity'], '0', 2) <= 0 || $row['unit_price'] <= 0) {
                     throw new RuntimeException('Every product needs a quantity and a selling price above zero.');
                 }
@@ -59,7 +63,8 @@ class OrderFulfilment
             $order = OrderCommission::record($project, ['reference' => $data['reference'], 'ordered_on' => $data['ordered_on'], 'net_value' => $total], $user);
             $order->update(['fulfilment' => 'stock', 'delivery_status' => 'pending', 'customer_name' => $data['customer_name'] ?? null,
                 'customer_phone' => $data['customer_phone'] ?? null, 'customer_address' => $data['customer_address'] ?? null, 'sales_channel' => $data['sales_channel'] ?? null,
-                'payment_method' => $data['payment_method'] ?? null, 'delivery_method' => $data['delivery_method'] ?? null, 'discount_reason' => ($data['discount_reason'] ?? null) ?: null]);
+                'payment_method' => $data['payment_method'] ?? null, 'delivery_method' => $data['delivery_method'] ?? null, 'discount_reason' => ($data['discount_reason'] ?? null) ?: null,
+                'delivery_charge' => max(0, (int) ($data['delivery_charge'] ?? 0))]);
             $order->items()->createMany($items);
             Audit::log('order.created', 'order '.$order->id, $order->reference.' '.$total);
 
@@ -96,19 +101,30 @@ class OrderFulfilment
                     Inventory::move($line, 'reserve', ['available' => bcmul($qty, '-1', 2), 'reserved' => $qty], 'res:'.$item->id, $item, $user, null, null, $locationId); // an explicit location reserves only the units standing there
                 }
             }
-            $o->update(['delivery_status' => 'confirmed']);
+            $o->update(['delivery_status' => 'confirmed', 'confirmed_at' => now()]);
             Audit::log('order.confirmed', 'order '.$o->id, 'stock reserved');
         });
     }
 
-    public static function dispatch(ClientOrder $order, User $user): void
+    /** The goods are picked and packed. The stock stays reserved (nothing has left the warehouse), so this moves no quantity. */
+    public static function pack(ClientOrder $order, User $user): void
     {
         self::locked($order, function (ClientOrder $o) use ($user) {
             self::expect($o, 'confirmed');
+            $o->update(['delivery_status' => 'packed', 'packed_at' => now()]);
+            Audit::log('order.packed', 'order '.$o->id, 'by '.$user->name);
+        });
+    }
+
+    /** Packing is optional: an order can be dispatched straight after it is confirmed. */
+    public static function dispatch(ClientOrder $order, User $user, ?string $courier = null, ?string $tracking = null): void
+    {
+        self::locked($order, function (ClientOrder $o) use ($user, $courier, $tracking) {
+            self::expect($o, 'confirmed', 'packed');
             foreach ($o->items as $item) {
                 Inventory::move($item->line, 'dispatch', ['reserved' => bcmul((string) $item->quantity, '-1', 2), 'dispatched' => (string) $item->quantity], 'dsp:'.$item->id, $item, $user);
             }
-            $o->update(['delivery_status' => 'dispatched']);
+            $o->update(['delivery_status' => 'dispatched', 'dispatched_at' => now(), 'courier' => $courier ?: $o->courier, 'tracking_reference' => $tracking ?: $o->tracking_reference]);
             Audit::log('order.dispatched', 'order '.$o->id);
         });
     }
@@ -134,7 +150,8 @@ class OrderFulfilment
                     Inventory::move($item->line, 'deliver', ['dispatched' => bcmul($qty, '-1', 2), 'delivered' => $qty], 'dlv:'.$item->id, $item, $user);
                 }
                 if (bccomp($rest, '0', 2) > 0) {
-                    Inventory::move($item->line, 'fail', ['dispatched' => bcmul($rest, '-1', 2), 'available' => $rest], 'fail:'.$item->id, $item, $user, 'Not delivered');
+                    // Units the courier brings back are in custody again but NOT sellable until they are inspected.
+                    Inventory::move($item->line, 'fail', ['dispatched' => bcmul($rest, '-1', 2), 'returned' => $rest], 'fail:'.$item->id, $item, $user, 'Not delivered: returned to custody, awaiting inspection');
                 }
                 $item->update(['delivered_quantity' => $qty]);
                 $total += (int) $item->refresh()->deliveredAmount();
@@ -146,7 +163,7 @@ class OrderFulfilment
 
                 return;
             }
-            $o->update(['delivery_status' => 'delivered', 'net_value' => $total]);
+            $o->update(['delivery_status' => 'delivered', 'net_value' => $total, 'delivered_at' => now()]);
             self::earnCommission($o->refresh());
             Audit::log('order.delivered', 'order '.$o->id, 'value '.$total);
         });
@@ -162,13 +179,16 @@ class OrderFulfilment
         }
     }
 
-    /** The courier could not deliver: the stock returns to available and no commission is earned. */
+    /**
+     * The courier could not deliver: the units come back into custody and wait for inspection (they are sellable again only once inspected as usable),
+     * and no commission is earned.
+     */
     public static function fail(ClientOrder $order, User $user): void
     {
         self::locked($order, function (ClientOrder $o) use ($user) {
             self::expect($o, 'dispatched');
             foreach ($o->items as $item) {
-                Inventory::move($item->line, 'fail', ['dispatched' => bcmul((string) $item->quantity, '-1', 2), 'available' => (string) $item->quantity], 'fail:'.$item->id, $item, $user, 'Delivery failed');
+                Inventory::move($item->line, 'fail', ['dispatched' => bcmul((string) $item->quantity, '-1', 2), 'returned' => (string) $item->quantity], 'fail:'.$item->id, $item, $user, 'Delivery failed: returned to custody, awaiting inspection');
             }
             $o->update(['delivery_status' => 'failed']);
             OrderCommission::cancel($o);
@@ -179,8 +199,8 @@ class OrderFulfilment
     public static function cancel(ClientOrder $order, User $user): void
     {
         self::locked($order, function (ClientOrder $o) use ($user) {
-            self::expect($o, 'pending', 'confirmed');
-            if ($o->delivery_status === 'confirmed') {
+            self::expect($o, 'pending', 'confirmed', 'packed');
+            if (in_array($o->delivery_status, ['confirmed', 'packed'], true)) {
                 foreach ($o->items as $item) {
                     Inventory::move($item->line, 'release', ['reserved' => bcmul((string) $item->quantity, '-1', 2), 'available' => (string) $item->quantity], 'rel:'.$item->id, $item, $user, 'Order cancelled');
                 }
@@ -230,7 +250,16 @@ class OrderFulfilment
         });
     }
 
-    /** After inspection the returned units are either usable again (available) or written off as damaged. */
+    /** Units of this order line that came back (customer return or failed delivery) and have not been inspected yet. */
+    public static function awaitingInspection(ClientOrderItem $item): string
+    {
+        return bcadd((string) StockMovement::where('client_order_item_id', $item->id)->sum('d_returned'), '0', 2);
+    }
+
+    /**
+     * After inspection the returned units are either usable again (available) or written off as damaged. Only the units THIS order line brought back can be
+     * inspected, and each only once: the line is locked, so two submissions cannot inspect the same units twice.
+     */
     public static function inspectReturn(ClientOrderItem $item, string $usable, string $damaged, User $user): void
     {
         DB::transaction(function () use ($item, $usable, $damaged, $user) {
@@ -238,6 +267,9 @@ class OrderFulfilment
             $total = bcadd($usable, $damaged, 2);
             if (bccomp($total, '0', 2) <= 0 || bccomp($usable, '0', 2) < 0 || bccomp($damaged, '0', 2) < 0) {
                 throw new RuntimeException('Enter how many returned units are usable and how many are damaged.');
+            }
+            if (bccomp($total, self::awaitingInspection($item), 2) > 0) {
+                throw new RuntimeException('Only '.self::awaitingInspection($item).' unit(s) of this order line are waiting for inspection; '.$total.' were entered.');
             }
             Inventory::move($item->line, 'inspect', ['returned' => bcmul($total, '-1', 2), 'available' => $usable, 'damaged' => $damaged],
                 'insp:'.$item->id.':'.(StockMovement::where('client_order_item_id', $item->id)->where('type', 'inspect')->count() + 1), $item, $user, 'Return inspected');

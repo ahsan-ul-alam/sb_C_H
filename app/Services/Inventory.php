@@ -155,6 +155,9 @@ class Inventory
             ->whereNotNull('received_quantity')
             ->whereHas('lot', fn ($q) => $q->where('ownership', 'client')->where('status', '!=', 'cancelled')->whereHas('project', fn ($p) => $p->where('client_id', $clientId)))
             ->when($productId, fn ($q) => $q->where('supplier_product_id', $productId))
+            // One project never takes another project's units, even of the same client: only the lots of THIS project, or lots explicitly allocated to it, are eligible.
+            ->when($projectId, fn ($q) => $q->whereHas('lot', fn ($l) => $l->where(fn ($w) => $w->where('project_id', $projectId)
+                ->orWhereHas('allocations', fn ($a) => $a->where('kind', 'sale')->where('project_id', $projectId)))))
             ->orderBy('arrived_on')->orderBy('id')->get()
             ->map(fn ($l) => ['line' => $l, 'available' => self::sliceBalances($l, null)['available'], 'handover' => null]);
         $custody = $projectId === null ? collect() : InventoryHandover::query()->with('line')

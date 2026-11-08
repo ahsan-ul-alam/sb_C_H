@@ -11,6 +11,7 @@ use App\Models\Partner;
 use App\Models\Payment;
 use App\Models\Project;
 use App\Models\ReceiptClassification;
+use App\Models\SourcingAllocation;
 use App\Models\SourcingLot;
 use App\Models\SourcingLotLine;
 use App\Models\StockMovement;
@@ -21,17 +22,18 @@ use App\Services\ClientSettlementService;
 use App\Services\FinancialStatements;
 use App\Services\Inventory;
 use App\Services\LotFinancials;
+use App\Services\OrderFulfilment;
 use App\Services\StorageBilling;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
 use Tests\Support\SellbeesCompany;
 
-require_once __DIR__ . '/../../Support/helpers.php';
+require_once __DIR__.'/../../Support/helpers.php';
 
 uses(RefreshDatabase::class);
 
-afterEach(fn() => Carbon::setTestNow());
+afterEach(fn () => Carbon::setTestNow());
 
 /**
  * A client's own stock, made the way the business makes it: supplier → product → Quick Lot → billed to the client → arrival recorded.
@@ -40,12 +42,12 @@ afterEach(fn() => Carbon::setTestNow());
  */
 function clientStock(SellbeesCompany $co, string $qty = '100', ?string $received = null, ?string $accepted = null, string $clientName = 'Client Stock', string $price = '120', string $arrivedOn = '2026-02-10'): array
 {
-    $co->post('clients', 'sourcing.suppliers.store', ['name' => 'Supplier ' . Str::random(4), 'phone' => '017'])->assertSessionHasNoErrors();
+    $co->post('clients', 'sourcing.suppliers.store', ['name' => 'Supplier '.Str::random(4), 'phone' => '017'])->assertSessionHasNoErrors();
     $supplier = Supplier::latest('id')->first();
-    $co->post('clients', 'sourcing.products.store', ['supplier_id' => $supplier->id, 'name' => 'Hair Oil ' . Str::random(3), 'reference_price' => $price])->assertSessionHasNoErrors();
+    $co->post('clients', 'sourcing.products.store', ['supplier_id' => $supplier->id, 'name' => 'Hair Oil '.Str::random(3), 'reference_price' => $price])->assertSessionHasNoErrors();
     $product = SupplierProduct::latest('id')->first();
     $client = $co->client($clientName);
-    $project = $co->project($client, 'P' . Str::random(3));
+    $project = $co->project($client, 'P'.Str::random(3));
     $co->post('clients', 'sourcing.lots.store', [
         'supplier_id' => $supplier->id,
         'delivery_cost' => '1000',
@@ -80,7 +82,7 @@ function placeOrder(SellbeesCompany $co, $project, $product, string $qty, string
 
 function orderStep(SellbeesCompany $co, string $step, ClientOrder $order, array $data = [])
 {
-    return $co->post('clients', 'product.orders.' . $step, $data, $order);
+    return $co->post('clients', 'product.orders.'.$step, $data, $order);
 }
 
 function bootProduct($test): SellbeesCompany
@@ -152,7 +154,7 @@ it('reserves, dispatches and delivers stock exactly, and earns commission only o
     expect($order->status)->toBe('successful')->and($order->commission)->toBe(100)->and($order->rate_bps)->toBe(100)  // BDT 100 × 1% = BDT 1.00
         ->and($order->invoice->total)->toBe(100)->and(dr('income'))->toBe(0)->and(dr('client.funds'))->toBe(0);          // delivery is not a collection and not revenue
     $key = (string) Str::uuid();
-    $collect = fn(string $amount, string $k) => $co->post('clients', 'product.orders.collect', ['amount' => $amount, 'collected_on' => '2026-02-11', 'idempotency_key' => $k], $order);
+    $collect = fn (string $amount, string $k) => $co->post('clients', 'product.orders.collect', ['amount' => $amount, 'collected_on' => '2026-02-11', 'idempotency_key' => $k], $order);
     $collect('100', $key)->assertSessionHasNoErrors();
     $collect('100', $key);
     $collect('0.01', (string) Str::uuid())->assertSessionHas('error');                  // nothing left to collect
@@ -169,8 +171,8 @@ it('refuses overselling, other clients\' stock, unowned and company stock, and h
 
     placeOrder($co, $s['project'], $s['product'], '101', '10', 'BIG');
     orderStep($co, 'confirm', ClientOrder::where('reference', 'BIG')->first())->assertSessionHas('error');         // more than available
-    placeOrder($co, $otherProject, $s['product'], '1', '10', 'WRONG');
-    orderStep($co, 'confirm', ClientOrder::where('reference', 'WRONG')->first())->assertSessionHas('error');       // another client's stock is invisible
+    placeOrder($co, $otherProject, $s['product'], '1', '10', 'WRONG')->assertSessionHas('error');                    // another client's stock cannot even be put on an order
+    expect(ClientOrder::where('reference', 'WRONG')->exists())->toBeFalse();
     expect(Inventory::balances($s['line'])['reserved'])->toBe('0.00')->and(Inventory::balances($s['line'])['available'])->toBe('100.00');
 
     // Cancel releases a reservation; a failed delivery returns it and earns nothing.
@@ -188,8 +190,10 @@ it('refuses overselling, other clients\' stock, unowned and company stock, and h
     orderStep($co, 'dispatch', $fail);
     orderStep($co, 'fail', $fail)->assertSessionHasNoErrors();
     $b = Inventory::balances($s['line']);
-    expect($b['available'])->toBe('100.00')->and($b['dispatched'])->toBe('0.00')->and($fail->refresh()->status)->toBe('cancelled')->and($fail->commission)->toBe(0)->and($fail->billed_invoice_id)->toBeNull();
+    expect($b['available'])->toBe('90.00')->and($b['returned'])->toBe('10.00')->and($b['dispatched'])->toBe('0.00')->and($fail->refresh()->status)->toBe('cancelled')->and($fail->commission)->toBe(0)->and($fail->billed_invoice_id)->toBeNull();
     $co->post('clients', 'product.orders.collect', ['amount' => '1', 'collected_on' => '2026-02-11', 'idempotency_key' => (string) Str::uuid()], $fail)->assertSessionHas('error'); // no money for an undelivered order
+    $co->post('clients', 'product.items.inspect', ['usable' => '10', 'damaged' => '0'], $fail->items()->first())->assertSessionHasNoErrors(); // inspected usable: sellable again
+    expect(Inventory::balances($s['line'])['available'])->toBe('100.00');
 
     // Partial delivery: 6 of 10 delivered, 4 go back; commission on 6 × 10 = 60 → 0.60.
     placeOrder($co, $s['project'], $s['product'], '10', '10', 'PART');
@@ -198,7 +202,9 @@ it('refuses overselling, other clients\' stock, unowned and company stock, and h
     orderStep($co, 'dispatch', $part);
     orderStep($co, 'deliver', $part, ['delivered' => [$part->items()->first()->id => '6']])->assertSessionHasNoErrors();
     $b = Inventory::balances($s['line']);
-    expect($b['delivered'])->toBe('6.00')->and($b['available'])->toBe('94.00')->and($part->refresh()->net_value)->toBe(6_000)->and($part->commission)->toBe(60);
+    expect($b['delivered'])->toBe('6.00')->and($b['available'])->toBe('90.00')->and($b['returned'])->toBe('4.00')->and($part->refresh()->net_value)->toBe(6_000)->and($part->commission)->toBe(60);
+    $co->post('clients', 'product.items.inspect', ['usable' => '4', 'damaged' => '0'], $part->items()->first())->assertSessionHasNoErrors();   // the 4 not delivered are inspected back into stock
+    expect(Inventory::balances($s['line'])['available'])->toBe('94.00');
 
     // A returned unit is NOT sellable until inspected.
     $item = $part->items()->first();
@@ -213,10 +219,10 @@ it('refuses overselling, other clients\' stock, unowned and company stock, and h
     // Unowned and company-owned stock cannot be sold through client settlement.
     $lot = $s['lot'];
     $lot->update(['ownership' => null]);
-    placeOrder($co, $s['project'], $s['product'], '1', '10', 'NOOWNER');
-    orderStep($co, 'confirm', ClientOrder::where('reference', 'NOOWNER')->first())->assertSessionHas('error');
+    placeOrder($co, $s['project'], $s['product'], '1', '10', 'NOOWNER')->assertSessionHas('error');                    // unowned stock cannot even be put on an order
     $co->post('clients', 'product.lots.ownership', ['ownership' => 'company'], $lot)->assertSessionHasNoErrors();
-    orderStep($co, 'confirm', ClientOrder::where('reference', 'NOOWNER')->first())->assertSessionHas('error');
+    placeOrder($co, $s['project'], $s['product'], '1', '10', 'NOOWNER')->assertSessionHas('error');                    // nor can company-owned stock
+    expect(ClientOrder::where('reference', 'NOOWNER')->exists())->toBeFalse();
     $co->post('clients', 'product.lots.ownership', ['ownership' => 'client'], $lot)->assertSessionHas('error');         // ownership is fixed once stated
     expect($lot->refresh()->ownership)->toBe('company');
 });
@@ -253,7 +259,7 @@ it('bills storage monthly only under the Board policy, once per lot and month, n
     $co->post('finance', 'finance.orders.storage', ['storage_rate' => '50', 'storage_threshold' => '100'])->assertSessionHasNoErrors();
     Carbon::setTestNow('2026-03-05 10:00:00');
 
-    expect(fn() => StorageBilling::runMonth('2026-02'))->toThrow(RuntimeException::class, 'not authorised');       // no policy: nothing is charged
+    expect(fn () => StorageBilling::runMonth('2026-02'))->toThrow(RuntimeException::class, 'not authorised');       // no policy: nothing is charged
     $co->standingPolicy('storage');
     $out = StorageBilling::runMonth('2026-02');                                                                    // approved, but the area was never measured
     expect($out['needs_measurement'])->toBe([$s['lot']->number])->and($out['billed'])->toBe([])->and(Invoice::where('purpose', 'Warehouse storage')->count())->toBe(0);
@@ -285,7 +291,7 @@ it('bills storage monthly only under the Board policy, once per lot and month, n
     Carbon::setTestNow('2026-04-05 10:00:00');
     $out = StorageBilling::runMonth('2026-03');
     expect($out['billed'])->toBe([])->and(StorageCharge::where('period', '2026-03')->count())->toBe(0);
-    expect(fn() => StorageBilling::runMonth('2026-04'))->toThrow(RuntimeException::class, 'finished month');
+    expect(fn () => StorageBilling::runMonth('2026-04'))->toThrow(RuntimeException::class, 'finished month');
 });
 
 it('settles a client: collected sales less commission and unpaid storage, partial payouts, balanced books, income recognised once', function () {
@@ -317,7 +323,7 @@ it('settles a client: collected sales less commission and unpaid storage, partia
     $co->as('finance')->get(route('product.settlements.show', $s['client']))->assertOk()->assertSee('9,400.00')->assertSee('Record client settlement');
 
     // Scenario 8: pay 5,000 first, 4,400 stays payable. Real payouts need Finance, a reference and sufficient bank cash.
-    $settle = fn(string $pay, string $key, string $ref = 'TRX-1') => $co->post('finance', 'product.settlements.store', ['pay' => $pay, 'paid_on' => '2026-03-08', 'reference' => $ref, 'idempotency_key' => $key], $s['client']);
+    $settle = fn (string $pay, string $key, string $ref = 'TRX-1') => $co->post('finance', 'product.settlements.store', ['pay' => $pay, 'paid_on' => '2026-03-08', 'reference' => $ref, 'idempotency_key' => $key], $s['client']);
     $co->post('clients', 'product.settlements.store', ['paid_on' => '2026-03-08', 'idempotency_key' => (string) Str::uuid()], $s['client'])->assertForbidden();
     $settle('9400.01', (string) Str::uuid())->assertSessionHas('error');                                                  // more than payable
     $settle('5000', (string) Str::uuid(), '')->assertSessionHas('error');                                                 // a payout needs its transfer reference
@@ -418,4 +424,119 @@ it('keeps product operations inside the permission map', function () {
     expect(Inventory::balances($s['line'])['available'])->toBe('95.00')->and(Inventory::balances($s['line'])['adjusted'])->toBe('-5.00')->and(Inventory::reconciles($s['line']))->toBeTrue();
     $co->as('clients')->get(route('product.inventory', ['client' => $s['client']->id, 'availability' => 'in_stock']))->assertOk()->assertSee('Hair Oil');
     expect(Expense::count())->toBe(0);                                                                                  // none of this created an expense
+});
+
+// ───────────── project-wise inventory and order management ─────────────
+
+it('packs without moving stock, dispatches with courier and tracking, and releases a cancelled reservation exactly once', function () {
+    $co = bootProduct($this);
+    $s = clientStock($co, '100');
+    placeOrder($co, $s['project'], $s['product'], '10', '10', 'PK1')->assertSessionHasNoErrors();
+    $o = ClientOrder::where('reference', 'PK1')->first();
+    orderStep($co, 'pack', $o)->assertSessionHas('error');                                    // cannot pack an unconfirmed order
+    orderStep($co, 'confirm', $o)->assertSessionHasNoErrors();
+    orderStep($co, 'pack', $o)->assertSessionHasNoErrors();
+    expect($o->refresh()->delivery_status)->toBe('packed')->and($o->packed_at)->not->toBeNull()->and($o->confirmed_at)->not->toBeNull()
+        ->and(Inventory::balances($s['line'])['reserved'])->toBe('10.00')->and(Inventory::balances($s['line'])['available'])->toBe('90.00');
+    orderStep($co, 'pack', $o)->assertSessionHas('error');                                    // a repeated pack changes nothing
+
+    orderStep($co, 'cancel', $o)->assertSessionHasNoErrors();                                 // a packed order can still be cancelled: reserved goes back once
+    orderStep($co, 'cancel', $o)->assertSessionHas('error');
+    expect(Inventory::balances($s['line'])['available'])->toBe('100.00')->and(Inventory::balances($s['line'])['reserved'])->toBe('0.00');
+
+    placeOrder($co, $s['project'], $s['product'], '10', '10', 'PK2');
+    $p = ClientOrder::where('reference', 'PK2')->first();
+    orderStep($co, 'confirm', $p);
+    orderStep($co, 'dispatch', $p, ['courier' => 'Pathao', 'tracking_reference' => 'TRK-77'])->assertSessionHasNoErrors();
+    expect($p->refresh()->courier)->toBe('Pathao')->and($p->tracking_reference)->toBe('TRK-77')->and($p->dispatched_at)->not->toBeNull();
+    orderStep($co, 'cancel', $p)->assertSessionHas('error');                                  // dispatched stock cannot be released as if it were still reserved
+    expect(Inventory::balances($s['line'])['dispatched'])->toBe('10.00')->and(Inventory::balances($s['line'])['available'])->toBe('90.00');
+});
+
+it('never reserves the same units twice and never lets available go negative', function () {
+    $co = bootProduct($this);
+    $s = clientStock($co, '10');
+    placeOrder($co, $s['project'], $s['product'], '7', '10', 'A');
+    placeOrder($co, $s['project'], $s['product'], '7', '10', 'B');
+    $a = ClientOrder::where('reference', 'A')->first();
+    $b = ClientOrder::where('reference', 'B')->first();
+    orderStep($co, 'confirm', $a)->assertSessionHasNoErrors();
+    orderStep($co, 'confirm', $b)->assertSessionHas('error');                                 // only 3 left
+    orderStep($co, 'confirm', $a)->assertSessionHas('error');                                 // a repeated confirm reserves nothing more
+    $bal = Inventory::balances($s['line']);
+    expect($bal['available'])->toBe('3.00')->and($bal['reserved'])->toBe('7.00')->and($b->refresh()->delivery_status)->toBe('pending')->and(Inventory::reconciles($s['line']))->toBeTrue();
+});
+
+it('keeps one project\'s stock away from another project of the same client unless it is explicitly allocated', function () {
+    $co = bootProduct($this);
+    $s = clientStock($co, '50');
+    $second = $co->project($s['client'], 'Second project');                                   // same client, different project
+
+    placeOrder($co, $second, $s['product'], '5', '10', 'X-PROJ')->assertSessionHas('error');
+    expect(ClientOrder::where('reference', 'X-PROJ')->exists())->toBeFalse()->and(Inventory::balances($s['line'])['reserved'])->toBe('0.00');
+    placeOrder($co, $s['project'], $s['product'], '5', '10', 'OWN')->assertSessionHasNoErrors();   // its own project still can
+
+    SourcingAllocation::create(['sourcing_lot_id' => $s['lot']->id, 'project_id' => $second->id, 'kind' => 'sale', 'description' => 'Agreed share', 'quantity' => '10', 'unit_price' => 1_000,
+        'created_by' => $co->users['finance']->id]);
+    placeOrder($co, $second, $s['product'], '5', '10', 'ALLOCATED')->assertSessionHasNoErrors();   // an explicit allocation makes the lot eligible
+});
+
+it('returns a failed delivery to custody for inspection and lets each returned unit be inspected only once', function () {
+    $co = bootProduct($this);
+    $s = clientStock($co, '100');
+    placeOrder($co, $s['project'], $s['product'], '10', '10', 'F1');
+    placeOrder($co, $s['project'], $s['product'], '10', '10', 'F2');
+    $f1 = ClientOrder::where('reference', 'F1')->first();
+    $f2 = ClientOrder::where('reference', 'F2')->first();
+    foreach ([$f1, $f2] as $o) {
+        orderStep($co, 'confirm', $o);
+        orderStep($co, 'dispatch', $o);
+        orderStep($co, 'fail', $o)->assertSessionHasNoErrors();
+        orderStep($co, 'fail', $o)->assertSessionHas('error');                                // a failure is recorded once
+    }
+    $bal = Inventory::balances($s['line']);
+    expect($bal['available'])->toBe('80.00')->and($bal['returned'])->toBe('20.00')->and($bal['dispatched'])->toBe('0.00');   // not sellable yet
+    $i1 = $f1->items()->first();
+
+    $co->post('clients', 'product.items.inspect', ['usable' => '11', 'damaged' => '0'], $i1)->assertSessionHas('error');     // more than this line brought back
+    $co->post('clients', 'product.items.inspect', ['usable' => '7', 'damaged' => '3'], $i1)->assertSessionHasNoErrors();
+    $co->post('clients', 'product.items.inspect', ['usable' => '1', 'damaged' => '0'], $i1)->assertSessionHas('error');       // already inspected: nothing left on this line
+    $bal = Inventory::balances($s['line']);
+    expect($bal['available'])->toBe('87.00')->and($bal['damaged'])->toBe('3.00')->and($bal['returned'])->toBe('10.00')->and(Inventory::reconciles($s['line']))->toBeTrue();   // F2's units are still waiting
+    expect(OrderFulfilment::awaitingInspection($f2->items()->first()))->toBe('10.00');
+});
+
+it('labels partial delivery and partial or full return without a second status that could drift', function () {
+    $co = bootProduct($this);
+    $s = clientStock($co, '100');
+    placeOrder($co, $s['project'], $s['product'], '10', '10', 'L1');
+    $o = ClientOrder::where('reference', 'L1')->first();
+    expect($o->fulfilmentLabel())->toBe('Draft');
+    orderStep($co, 'confirm', $o);
+    orderStep($co, 'dispatch', $o);
+    $item = $o->items()->first();
+    orderStep($co, 'deliver', $o, ['delivered' => [$item->id => '8']])->assertSessionHasNoErrors();
+    expect($o->refresh()->load('items')->fulfilmentLabel())->toBe('Partially delivered');
+    orderStep($co, 'return', $o, ['returned' => [$item->id => '3']])->assertSessionHasNoErrors();
+    expect($o->refresh()->load('items')->fulfilmentLabel())->toBe('Partially returned');
+    orderStep($co, 'return', $o, ['returned' => [$item->id => '5']])->assertSessionHasNoErrors();
+    expect($o->refresh()->load('items')->fulfilmentLabel())->toBe('Returned');
+    orderStep($co, 'return', $o, ['returned' => [$item->id => '1']])->assertSessionHas('error');   // cannot return more than was delivered
+});
+
+it('never edits or deletes a stock movement, and shows a project only its own inventory and orders', function () {
+    $co = bootProduct($this);
+    $s = clientStock($co, '40', clientName: 'Mine');
+    $other = clientStock($co, '25', clientName: 'Theirs');
+    placeOrder($co, $s['project'], $s['product'], '4', '10', 'MINE-1');
+    orderStep($co, 'confirm', ClientOrder::where('reference', 'MINE-1')->first());
+
+    $movement = StockMovement::where('sourcing_lot_line_id', $s['line']->id)->first();
+    expect(fn () => $movement->update(['reason' => 'tamper']))->toThrow(LogicException::class)
+        ->and(fn () => $movement->delete())->toThrow(LogicException::class);
+
+    $page = $co->as('clients')->get(route('product.projects.show', $s['project']))->assertOk()->assertSee('MINE-1')->assertSee($s['product']->name);
+    $page->assertDontSee($other['product']->name);
+    $co->as('auditor')->get(route('product.projects.show', $s['project']))->assertOk();            // read-only roles can look
+    $co->post('auditor', 'product.orders.pack', [], ClientOrder::where('reference', 'MINE-1')->first())->assertForbidden();   // but not act
 });

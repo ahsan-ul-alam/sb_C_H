@@ -14,6 +14,13 @@ class StockMovement extends Model
         return ['occurred_on' => 'date'];
     }
 
+    /** A stock movement is history: it is never edited or deleted, a correction is always a new movement with a reason. */
+    protected static function booted(): void
+    {
+        static::updating(fn () => throw new \LogicException('A stock movement cannot be changed; record a correcting movement instead.'));
+        static::deleting(fn () => throw new \LogicException('A stock movement cannot be deleted; record a correcting movement instead.'));
+    }
+
     /** @return BelongsTo<SourcingLotLine, $this> */
     public function line(): BelongsTo
     {

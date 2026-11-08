@@ -26,7 +26,7 @@
         @php($first = $group->first())
         <section class="panel">
             <div class="panel-head"><h2>
-                @if ($first['project']) {{ $first['project']->name }} <span class="sub">{{ $first['client']?->name }}</span>
+                @if ($first['project']) <a href="{{ route('product.projects.show', $first['project']) }}">{{ $first['project']->name }}</a> <span class="sub">{{ $first['client']?->name }}</span>
                 @elseif ($key === 'shared') Shared lots <span class="sub">physical units are counted once here; each project's allocation is shown on the line</span>
                 @else Not attributed to any project @endif
             </h2></div>

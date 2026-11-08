@@ -112,7 +112,9 @@ it('reserves, releases and dispatches at the locations that hold the units, and 
     expect(StockLocations::balances($s['line']))->toBe([$m => '40.00', $d => '5.00']);
     $co->post('clients', 'product.orders.cancel', [], $b)->assertSessionHasNoErrors();
     expect(StockLocations::availableBalances($s['line']))->toBe([$m => '40.00', $d => '5.00'])->and(Inventory::reconciles($s['line']))->toBeTrue();
-    $co->post('clients', 'product.orders.fail', [], $a)->assertSessionHasNoErrors();   // failed delivery restocks DHK
+    $co->post('clients', 'product.orders.fail', [], $a)->assertSessionHasNoErrors();   // failed delivery: back in DHK, awaiting inspection
+    expect(StockLocations::availableBalances($s['line']))->toBe([$m => '40.00', $d => '5.00']);
+    $co->post('clients', 'product.items.inspect', ['usable' => '15', 'damaged' => '0'], $a->items()->first())->assertSessionHasNoErrors(); // inspected usable: sellable in DHK again
     expect(StockLocations::availableBalances($s['line']))->toBe([$m => '40.00', $d => '20.00']);
 });
 it('keeps rejected and damaged units in quarantine, out of stock, valuation and the accepted location', function () {

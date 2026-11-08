@@ -129,6 +129,8 @@ it('runs the Premium Hoodie lot end to end with exact balances at every step', f
     hoodieStep($co, 'cancel', $c)->assertSessionHasNoErrors();
     expect(hoodieBalances($s))->toMatchArray(['available' => '413.00', 'reserved' => '0.00']);
     hoodieStep($co, 'fail', $b)->assertSessionHasNoErrors();
+    expect(hoodieBalances($s))->toMatchArray(['available' => '413.00', 'dispatched' => '0.00', 'returned' => '10.00']);   // back in custody, not yet sellable
+    $co->post('clients', 'product.items.inspect', ['usable' => '10', 'damaged' => '0'], $b->items()->first())->assertSessionHasNoErrors();
     expect(hoodieBalances($s))->toMatchArray(['available' => '423.00', 'dispatched' => '0.00'])->and(Inventory::reconciles($s['line']))->toBeTrue();
     expect(StockMovement::where('sourcing_lot_line_id', $line->id)->where('type', 'receipt')->count())->toBe(2);
 });
@@ -139,8 +141,7 @@ it('keeps one client\'s stock from another client\'s order', function () {
     $s['co']->post('clients', 'sourcing.lots.bill-client', ['project_id' => $s['project']->id], $s['lot'])->assertSessionHasNoErrors();
     $otherProject = $s['co']->project($s['co']->client('Other Client'), 'Other Project');
     $s['co']->post('clients', 'product.orders.store', ['project_id' => $otherProject->id, 'reference' => 'X', 'ordered_on' => '2026-02-10', 'items' => [['product_id' => $s['product']->id, 'quantity' => '5', 'price' => '600']]]);
-    $x = ClientOrder::where('reference', 'X')->firstOrFail();
-    hoodieStep($s['co'], 'confirm', $x)->assertSessionHas('error');
+    expect(ClientOrder::where('reference', 'X')->exists())->toBeFalse();   // another client's project cannot even order this stock
     expect(hoodieBalances($s)['reserved'])->toBe('0.00');
 });
 

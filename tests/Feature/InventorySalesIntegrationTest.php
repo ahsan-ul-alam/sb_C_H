@@ -43,9 +43,11 @@ it('runs receive, locate, discount, dispatch from locations, partial delivery, c
     $co->post('clients', 'product.orders.dispatch', [], $o);                                       // duplicate dispatch changes nothing
     expect(loc($s))->toBe([$d => '40.00'])->and(Inventory::balances($line)['dispatched'])->toBe('150.00');
 
-    // Deliver 100; the other 50 go back to the places they left.
+    // Deliver 100; the other 50 come back to the places they left, but are not sellable until inspected.
     $item = $o->items()->first();
     $co->post('clients', 'product.orders.deliver', ['delivered' => [$item->id => '100']], $o)->assertSessionHasNoErrors();
+    expect(Inventory::balances($line)['available'])->toBe('40.00')->and(Inventory::balances($line)['returned'])->toBe('50.00')->and(loc($s))->toBe([$m => '50.00', $d => '40.00']);
+    $co->post('clients', 'product.items.inspect', ['usable' => '50', 'damaged' => '0'], $item)->assertSessionHasNoErrors();
     expect(Inventory::balances($line)['available'])->toBe('90.00')->and(Inventory::balances($line)['delivered'])->toBe('100.00')->and(loc($s))->toBe([$m => '50.00', $d => '40.00']);
     $o->refresh();
     expect($o->net_value)->toBe(5_500_000)->and($o->commission)->toBe(550_000);

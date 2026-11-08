@@ -150,6 +150,15 @@ class StockLocations
                 return self::scale($deltas, self::takeFrom($held, ltrim($deltas['reserved'], '-'), $line, 'reserved'), ltrim($deltas['reserved'], '-'));
             }
         }
+        // An inspection settles units where they came back to (a failed delivery or customer return is put back at the place it left), so a usable unit becomes
+        // available in that same place and not in an invented "unplaced" balance.
+        if ($item && $type === 'inspect' && bccomp($deltas['returned'] ?? '0', '0', 2) < 0) {
+            $held = self::heldByItem($item, 'd_returned');
+            $size = ltrim($deltas['returned'], '-');
+            if (bccomp(array_reduce($held, fn ($c, $q) => bcadd($c, $q, 2), '0'), $size, 2) >= 0) {
+                return self::scale($deltas, self::takeFrom($held, $size, $line, 'returned'), $size);
+            }
+        }
         if (bccomp($onHand, '0', 2) === 0) {
             return [[null, $deltas]];
         }

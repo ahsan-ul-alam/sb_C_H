@@ -21,6 +21,7 @@ use App\Services\ClientSettlementService;
 use App\Services\Inventory;
 use App\Services\OrderFulfilment;
 use App\Services\OrderRefunds;
+use App\Services\ProjectInventory;
 use App\Services\StorageBilling;
 use App\Support\BusinessDate;
 use App\Support\Money;
@@ -138,6 +139,37 @@ class ProductOperationsController extends Controller
         ]);
     }
 
+    /**
+     * One project's inventory and orders on a single page: the dashboard figures, its stock positions (project → lot → product), the order list with filters, and
+     * the stock movement history. Everything is read from the existing ledger and order records; nothing here writes.
+     */
+    public function projectShow(Request $request, Project $project): View
+    {
+        $project->load('client');
+        $product = trim((string) $request->query('product'));
+        $positions = ProjectInventory::positions(['project' => $project->id, 'product' => $product]);
+        $custodyLineIds = $positions->pluck('line.id')->unique();
+        $state = $request->query('state');
+        $allOrders = ClientOrder::where('project_id', $project->id)->where('fulfilment', 'stock')->get(['id', 'delivery_status']);
+        $orders = ClientOrder::where('project_id', $project->id)->where('fulfilment', 'stock')->with(['project.client', 'items.line.lot', 'collections', 'invoice'])
+            ->when($state, fn ($q, $s) => $q->where('delivery_status', $s))
+            ->when($product !== '', fn ($q) => $q->whereHas('items', fn ($i) => $i->where('description', 'like', '%'.$product.'%')))
+            ->when(trim((string) $request->query('search')) !== '', fn ($q) => $q->where(fn ($w) => $w->where('reference', 'like', '%'.trim((string) $request->query('search')).'%')
+                ->orWhere('customer_name', 'like', '%'.trim((string) $request->query('search')).'%')->orWhere('tracking_reference', 'like', '%'.trim((string) $request->query('search')).'%')))
+            ->latest('id')->paginate(25)->withQueryString();
+        $movements = StockMovement::with(['line.lot', 'creator', 'location'])->whereIn('sourcing_lot_line_id', $custodyLineIds)
+            ->where(fn ($q) => $q->whereIn('client_order_item_id', ClientOrderItem::whereIn('client_order_id', ClientOrder::where('project_id', $project->id)->select('id'))->select('id'))
+                ->orWhereIn('type', ['receipt', 'adjust', 'custody_in', 'custody_out', 'custody_return']))
+            ->latest('id')->limit(60)->get();
+
+        return view('product.project', [
+            'project' => $project, 'positions' => $positions, 'totals' => ProjectInventory::totals($positions), 'orders' => $orders, 'movements' => $movements,
+            'counts' => ['total' => $allOrders->count(), 'pending' => $allOrders->whereIn('delivery_status', ['pending', 'confirmed', 'packed', 'dispatched'])->count(),
+                'completed' => $allOrders->where('delivery_status', 'delivered')->count(), 'cancelled' => $allOrders->whereIn('delivery_status', ['cancelled', 'failed'])->count()],
+            'accounts' => FinancialAccount::where('is_active', true)->orderBy('name')->get(), 'states' => ['pending' => 'Draft', 'confirmed' => 'Confirmed', 'packed' => 'Packed', 'dispatched' => 'Dispatched', 'delivered' => 'Delivered', 'failed' => 'Failed delivery', 'cancelled' => 'Cancelled'],
+        ]);
+    }
+
     public function orderStore(Request $request): RedirectResponse
     {
         $data = $request->validate([
@@ -146,8 +178,9 @@ class ProductOperationsController extends Controller
             'sales_channel' => ['nullable', Rule::in(array_keys(self::CHANNELS))], 'payment_method' => ['nullable', Rule::in(array_keys(self::PAYMENT_METHODS))],
             'delivery_method' => ['nullable', Rule::in(array_keys(self::DELIVERY_METHODS))], 'discount_reason' => ['nullable', 'string', 'max:255'],
             'items' => ['required', 'array', 'min:1'], 'items.*.product_id' => ['nullable', 'integer'], 'items.*.quantity' => ['nullable', 'regex:'.self::QTY], 'items.*.price' => ['nullable', 'regex:'.Money::AMOUNT_REGEX],
-            'items.*.discount' => ['nullable', 'regex:'.Money::AMOUNT_REGEX],
+            'items.*.discount' => ['nullable', 'regex:'.Money::AMOUNT_REGEX], 'delivery_charge' => ['nullable', 'regex:'.Money::AMOUNT_REGEX],
         ]);
+        $data['delivery_charge'] = Money::toMinor($data['delivery_charge'] ?? 0);
         $items = collect($data['items'])->filter(fn ($i) => ! empty($i['product_id']) && ($i['quantity'] ?? '') !== '')
             ->map(fn ($i) => ['product_id' => (int) $i['product_id'], 'quantity' => $i['quantity'], 'unit_price' => Money::toMinor($i['price'] ?? 0), 'unit_discount' => Money::toMinor($i['discount'] ?? 0)])->values()->all();
         if (collect($items)->contains(fn ($i) => $i['unit_discount'] > 0) && ! $request->user()->can('orders.discount')) {
@@ -164,9 +197,16 @@ class ProductOperationsController extends Controller
         return $this->attempt(fn () => OrderFulfilment::confirm($order, $request->user(), $d['stock_location_id'] ?? null), 'Order confirmed and the stock is reserved.');
     }
 
+    public function orderPack(Request $request, ClientOrder $order): RedirectResponse
+    {
+        return $this->attempt(fn () => OrderFulfilment::pack($order, $request->user()), 'Order packed. The stock stays reserved until it is dispatched.');
+    }
+
     public function orderDispatch(Request $request, ClientOrder $order): RedirectResponse
     {
-        return $this->attempt(fn () => OrderFulfilment::dispatch($order, $request->user()), 'Order dispatched.');
+        $d = $request->validate(['courier' => ['nullable', 'string', 'max:80'], 'tracking_reference' => ['nullable', 'string', 'max:120']]);
+
+        return $this->attempt(fn () => OrderFulfilment::dispatch($order, $request->user(), $d['courier'] ?? null, $d['tracking_reference'] ?? null), 'Order dispatched.');
     }
 
     public function orderDeliver(Request $request, ClientOrder $order): RedirectResponse

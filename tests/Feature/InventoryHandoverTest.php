@@ -460,8 +460,7 @@ it('refuses to reserve more custody stock than the client holds, never reaches S
     expect(Inventory::sliceBalances($line, $handover->id)['reserved'])->toBe('0.00')->and(Inventory::sliceBalances($line, null)['available'])->toBe('90.00');
 
     $stranger = $this->co->project($this->co->client('Another Client'), 'Their project');
-    $theirs = custodyOrder($stranger, '1', (string) $product, 'ORD-THEIRS');
-    expect(fn () => OrderFulfilment::confirm($theirs, $this->finance))->toThrow(RuntimeException::class);
+    expect(fn () => custodyOrder($stranger, '1', (string) $product, 'ORD-THEIRS'))->toThrow(RuntimeException::class, 'no stock available');
 
     $ok = custodyOrder($this->project, '10', (string) $product, 'ORD-OK');
     OrderFulfilment::confirm($ok, $this->finance);

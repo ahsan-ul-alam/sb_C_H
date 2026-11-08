@@ -253,10 +253,12 @@ Route::middleware('auth')->group(function () {
         Route::post('lots/{lot}/ownership', [ProductOperationsController::class, 'ownership'])->name('lots.ownership')->middleware('can:sourcing.manage');
         Route::post('lots/{lot}/area', [ProductOperationsController::class, 'area'])->name('lots.area')->middleware('can:sourcing.manage');
 
+        Route::get('projects/{project}', [ProductOperationsController::class, 'projectShow'])->name('projects.show')->whereNumber('project');
         Route::get('orders', [ProductOperationsController::class, 'orders'])->name('orders');
         Route::middleware('can:orders.manage')->group(function () {
             Route::post('orders', [ProductOperationsController::class, 'orderStore'])->name('orders.store');
             Route::post('orders/{order}/confirm', [ProductOperationsController::class, 'orderConfirm'])->name('orders.confirm');
+            Route::post('orders/{order}/pack', [ProductOperationsController::class, 'orderPack'])->name('orders.pack');
             Route::post('orders/{order}/dispatch', [ProductOperationsController::class, 'orderDispatch'])->name('orders.dispatch');
             Route::post('orders/{order}/deliver', [ProductOperationsController::class, 'orderDeliver'])->name('orders.deliver');
             Route::post('orders/{order}/fail', [ProductOperationsController::class, 'orderFail'])->name('orders.fail');
