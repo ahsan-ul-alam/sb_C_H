@@ -12,7 +12,7 @@
     @can('expense.record')
     <section class="panel">
         <div class="panel-head"><h2>Record expense</h2></div>
-        <form method="POST" action="{{ route('finance.expenses.store') }}" class="panel-body">@csrf
+        <form method="POST" action="{{ route('finance.expenses.store') }}" class="panel-body">@csrf<input type="hidden" name="submission_key" value="{{ \Illuminate\Support\Str::uuid() }}">
             <div class="form-grid">
                 <div class="field"><label>Category</label><input name="category" value="{{ old('category') }}" required></div>
                 <div class="field"><label>Description</label><input name="description" value="{{ old('description') }}" required></div>

@@ -9,6 +9,8 @@ use App\Models\Invoice;
 use App\Models\Payment;
 use App\Models\Project;
 use App\Models\Segment;
+use App\Services\DuplicateSubmission;
+use App\Services\SubmissionGuard;
 use App\Support\DateRange;
 use App\Support\ListFilters;
 use App\Support\Money;
@@ -98,15 +100,19 @@ class InvoiceController extends Controller
     {
         [$data, $items] = $this->validated($request, $project);
 
-        $invoice = DB::transaction(function () use ($project, $data, $items): Invoice {
-            $invoice = $project->invoices()->make($data);
-            $invoice->currency = $project->currency;
-            $invoice->status = InvoiceStatus::Unpaid;
-            $invoice->save();
-            $this->syncItems($invoice, $items);
+        try {
+            $invoice = SubmissionGuard::once($request->input('submission_key'), 'invoice.create', $request->user()?->id, fn (): Invoice => DB::transaction(function () use ($project, $data, $items): Invoice {
+                $invoice = $project->invoices()->make($data);
+                $invoice->currency = $project->currency;
+                $invoice->status = InvoiceStatus::Unpaid;
+                $invoice->save();
+                $this->syncItems($invoice, $items);
 
-            return $invoice;
-        });
+                return $invoice;
+            }));
+        } catch (DuplicateSubmission $e) {
+            return redirect()->route('projects.show', $project)->with('status', $e->getMessage());
+        }
 
         return $this->afterSave($request, $invoice, 'Invoice created.');
     }
@@ -240,7 +246,7 @@ class InvoiceController extends Controller
             $unitPrice = Money::toMinor($item['unit_price']);
 
             return [
-                'segment_id' => $item['segment_id'] ?: null,
+                'segment_id' => ($item['segment_id'] ?? null) ?: null,
                 'description' => $item['description'],
                 'quantity' => $item['quantity'],
                 'unit' => ($item['unit'] ?? null) ?: null,

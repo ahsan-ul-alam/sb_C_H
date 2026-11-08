@@ -23,7 +23,7 @@
     @can('capital.record')
     <section class="panel">
         <div class="panel-head"><h2>Record capital paid or withdrawn</h2><span class="sub">Owner money is never revenue or profit. A withdrawal is a return of capital, not an expense.</span></div>
-        <form method="POST" action="{{ route('finance.capital.store') }}" class="panel-body">@csrf
+        <form method="POST" action="{{ route('finance.capital.store') }}" class="panel-body">@csrf<input type="hidden" name="submission_key" value="{{ \Illuminate\Support\Str::uuid() }}">
             <div class="form-grid">
                 <div class="field"><label>Partner</label><select name="partner_id" required>@foreach ($partners as $p)<option value="{{ $p->id }}">{{ $p->code }} · {{ $p->name }}</option>@endforeach</select></div>
                 <div class="field"><label>Kind</label><select name="kind"><option value="contribution">Investment / additional investment</option><option value="withdrawal">Capital withdrawal</option></select></div>

@@ -20,6 +20,8 @@
         @csrf
         @if ($editing)
             @method('PUT')
+        @else
+            <input type="hidden" name="submission_key" value="{{ \Illuminate\Support\Str::uuid() }}">
         @endif
 
         <div class="form-section">

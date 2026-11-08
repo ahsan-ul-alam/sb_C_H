@@ -8,6 +8,7 @@ use App\Models\Payout;
 use App\Services\Audit;
 use App\Services\Ledger;
 use App\Services\PayoutService;
+use App\Services\SubmissionGuard;
 use App\Support\Money;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -41,17 +42,23 @@ class PayoutController extends Controller
 
     public function store(Request $request): RedirectResponse
     {
-        $data = $request->validate(['amount' => ['required', 'regex:'.Money::AMOUNT_REGEX], 'note' => ['nullable', 'string', 'max:200']]);
+        $data = $request->validate(['amount' => ['required', 'regex:'.Money::AMOUNT_REGEX], 'note' => ['nullable', 'string', 'max:200'], 'submission_key' => ['nullable', 'uuid']]);
         $partnerId = $request->user()->partner_id;
         abort_unless($partnerId, 403);
 
+        // A repeated submit surfaces as DuplicateSubmission (a RuntimeException): attempt() shows it, naming the payout already created.
         return $this->attempt(function () use ($request, $data, $partnerId) {
-            $amount = Money::toMinor($data['amount']);
-            if ($amount <= 0 || $amount > $this->available($partnerId)) {
-                throw new RuntimeException('Amount must be positive and within your available profit entitlement ('.Money::format($this->available($partnerId)).').');
-            }
-            $payout = Payout::create(['partner_id' => $partnerId, 'amount' => $amount, 'note' => $data['note'] ?? null, 'requested_by' => $request->user()->id]);
-            Audit::log('payout.requested', 'payout '.$payout->id, (string) $amount);
+            SubmissionGuard::once($data['submission_key'] ?? null, 'payout.request', $request->user()->id, function () use ($request, $data, $partnerId): Payout {
+                Partner::whereKey($partnerId)->lockForUpdate()->first(); // two requests cannot both pass the entitlement check
+                $amount = Money::toMinor($data['amount']);
+                if ($amount <= 0 || $amount > $this->available($partnerId)) {
+                    throw new RuntimeException('Amount must be positive and within your available profit entitlement ('.Money::format($this->available($partnerId)).').');
+                }
+                $payout = Payout::create(['partner_id' => $partnerId, 'amount' => $amount, 'note' => $data['note'] ?? null, 'requested_by' => $request->user()->id]);
+                Audit::log('payout.requested', 'payout '.$payout->id, (string) $amount);
+
+                return $payout;
+            });
         }, 'Payout requested.');
     }
 

@@ -9,9 +9,11 @@ use App\Models\ExpensePayment;
 use App\Models\FinancialAccount;
 use App\Models\Project;
 use App\Services\Audit;
+use App\Services\DuplicateSubmission;
 use App\Services\ExpenseService;
 use App\Services\ExpenseVerifier;
 use App\Services\SourcingPayments;
+use App\Services\SubmissionGuard;
 use App\Support\Money;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -48,6 +50,7 @@ class ExpenseController extends Controller
             'vendor' => ['nullable', 'string', 'max:120'],
             'document_id' => ['nullable', 'exists:documents,id'],
             'prepaid_months' => ['nullable', 'integer', 'between:1,60', 'required_if:classification,prepaid'],
+            'submission_key' => ['nullable', 'uuid'],
         ]);
         $amount = Money::toMinor($data['amount']);
         if ($amount <= 0) {
@@ -61,17 +64,28 @@ class ExpenseController extends Controller
         if (AccountingPeriod::where('month', substr($data['spent_on'], 0, 7))->exists()) {
             return back()->with('error', 'That month is already closed; record a correction in an open month.')->withInput();
         }
-        if (Expense::where('category', $data['category'])->where('description', $data['description'])->where('amount', $amount)->whereDate('spent_on', $data['spent_on'])
-            ->where('status', '!=', 'rejected')->whereNull('reverses_id')->exists()) {
-            return back()->with('error', 'An identical expense (same category, description, amount and date) already exists. If this is a genuine second payment, change the description.')->withInput();
+        $existing = Expense::where('category', $data['category'])->where('description', $data['description'])->where('amount', $amount)->whereDate('spent_on', $data['spent_on'])
+            ->where('status', '!=', 'rejected')->whereNull('reverses_id')->first();
+        if ($existing) {
+            return back()->with('error', 'An identical expense (#'.$existing->id.': same category, description, amount and date) already exists. If this is a genuine second payment, change the description.')->withInput();
         }
         $unpaid = ($data['payment_status'] ?? 'paid') === 'unpaid';
         $data['payment_status'] = $unpaid ? 'unpaid' : 'paid';
         if ($unpaid) {
             unset($data['paid_on']);
         }
-        $expense = ExpenseVerifier::record([...array_filter($data, fn ($v) => $v !== null && $v !== ''), 'amount' => $amount, 'is_asset' => $isAsset], $request->user());
-        Audit::log('expense.recorded', 'expense '.$expense->id, (string) $amount);
+        $submissionKey = $data['submission_key'] ?? null;
+        unset($data['submission_key']);
+        try {
+            $expense = SubmissionGuard::once($submissionKey, 'expense.record', $request->user()->id, function () use ($data, $amount, $isAsset, $request): Expense {
+                $expense = ExpenseVerifier::record([...array_filter($data, fn ($v) => $v !== null && $v !== ''), 'amount' => $amount, 'is_asset' => $isAsset], $request->user());
+                Audit::log('expense.recorded', 'expense '.$expense->id, (string) $amount);
+
+                return $expense;
+            });
+        } catch (DuplicateSubmission $e) {
+            return back()->with('status', $e->getMessage());
+        }
 
         return back()->with('status', $expense->status === 'verified'
             ? 'Expense recorded and verified automatically under the Board\'s standing policy.'

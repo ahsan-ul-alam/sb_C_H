@@ -6,7 +6,7 @@
     <section class="panel">
         <div class="panel-head"><h2>Request a withdrawal</h2>
             <span class="sub">Available: {{ Money::format($available[auth()->user()->partner_id] ?? 0) }}</span></div>
-        <form method="POST" action="{{ route('finance.payouts.store') }}" class="panel-body">@csrf
+        <form method="POST" action="{{ route('finance.payouts.store') }}" class="panel-body">@csrf<input type="hidden" name="submission_key" value="{{ \Illuminate\Support\Str::uuid() }}">
             <div class="form-grid">
                 <div class="field"><label>Amount</label><input name="amount" inputmode="decimal" value="{{ old('amount') }}" required></div>
                 <div class="field"><label>Note</label><input name="note" value="{{ old('note') }}"></div>

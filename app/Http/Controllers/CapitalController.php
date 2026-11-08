@@ -8,11 +8,14 @@ use App\Models\OpeningBatch;
 use App\Models\Partner;
 use App\Models\PolicyVersion;
 use App\Services\Audit;
+use App\Services\DuplicateSubmission;
 use App\Services\InvestmentService;
 use App\Services\Ledger;
+use App\Services\SubmissionGuard;
 use App\Support\Money;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\View\View;
@@ -49,6 +52,7 @@ class CapitalController extends Controller
             'financial_account_id' => ['nullable', Rule::exists('financial_accounts', 'id')->where('is_active', true)],
             'method' => ['nullable', 'string', 'max:24'],
             'notes' => ['nullable', 'string', 'max:255'],
+            'submission_key' => ['nullable', 'uuid'],
         ]);
         $data['kind'] ??= 'contribution';
         $amount = Money::toMinor($data['amount']);
@@ -63,12 +67,20 @@ class CapitalController extends Controller
         }
         // A repeated submit (double click, retry) of the same entry must not create a second postable record.
         $duplicate = CapitalEntry::where('partner_id', $data['partner_id'])->where('kind', $data['kind'])->where('amount', $amount)->whereDate('paid_on', $data['paid_on'])
-            ->where('reference', $data['reference'] ?? null)->whereNotIn('status', ['rejected', 'reversed'])->exists();
+            ->where('reference', $data['reference'] ?? null)->whereNotIn('status', ['rejected', 'reversed'])->first();
         if ($duplicate) {
-            return back()->with('error', 'An identical capital entry (same partner, amount, date and reference) already exists. If this is a genuine second contribution, give it a different reference.')->withInput();
+            return back()->with('error', 'An identical capital entry (#'.$duplicate->id.': same partner, amount, date and reference) already exists. If this is a genuine second contribution, give it a different reference.')->withInput();
         }
-        $entry = CapitalEntry::create([...$data, 'amount' => $amount, 'created_by' => $request->user()->id]);
-        Audit::log('capital.recorded', 'capital '.$entry->id, $data['kind'].' '.$amount);
+        try {
+            $entry = SubmissionGuard::once($data['submission_key'] ?? null, 'capital.record', $request->user()->id, function () use ($data, $amount, $request): CapitalEntry {
+                $entry = CapitalEntry::create([...Arr::except($data, 'submission_key'), 'amount' => $amount, 'created_by' => $request->user()->id]);
+                Audit::log('capital.recorded', 'capital '.$entry->id, $data['kind'].' '.$amount);
+
+                return $entry;
+            });
+        } catch (DuplicateSubmission $e) {
+            return back()->with('status', $e->getMessage());
+        }
 
         return back()->with('status', ($data['kind'] === 'withdrawal' ? 'Capital withdrawal' : 'Capital entry').' recorded; awaiting verification.');
     }
