@@ -141,6 +141,17 @@
 
         <h2 class="sr-only">Details on request</h2>
         <div class="bo-details">
+            <details class="bo-detail" id="d-fund" open><summary>Fund / asset position <small>cash, receivables and net assets are different things</small></summary>
+                <div class="body"><ul class="bo-rows">
+                    <li><span class="t">Available cash</span><span class="n t">{{ $m($data['fund']['available_cash']) }}</span></li>
+                    <li><span>+ Loans receivable (lent out, recoverable, not spendable)</span><span class="n">{{ $m($data['fund']['loans_receivable']) }}</span></li>
+                    <li><span class="t">Cash + loans receivable</span><span class="n t">{{ $m($data['fund']['cash_plus_receivables']) }}</span></li>
+                    <li><span class="t">Total net assets (all assets less liabilities)</span><span class="n t">{{ $m($data['fund']['total_net_assets']) }}</span></li>
+                    @foreach ($data['fund']['loans'] as $loan)
+                        <li><span class="m">Loan to {{ $loan['borrower'] }} ({{ $loan['lent_on'] }}): lent {{ $m($loan['principal']) }}, repaid {{ $m($loan['repaid']) }}, {{ $loan['status'] }}</span><span class="n m">{{ $m($loan['outstanding']) }}</span></li>
+                    @endforeach
+                </ul><p class="bo-note">A loan is not an expense, loss, revenue or profit: lending moves cash into the receivable and a repayment moves it back. Expected repayments are never counted as available cash.@if ($data['fund']['collections_not_journaled'] > 0) Available cash includes {{ $m($data['fund']['collections_not_journaled']) }} of customer collections recorded but not yet in the ledger.@endif</p></div></details>
+
             <details class="bo-detail" id="d-bridge"><summary>Why the result and the cash differ <small>cash-to-profit bridge</small></summary>
                 <div class="body"><ul class="bo-rows">
                     @foreach ($data['bridge']['lines'] as $line)<li><span>{{ $line['label'] }}</span><span class="n">{{ $m($line['amount']) }}</span></li>@endforeach

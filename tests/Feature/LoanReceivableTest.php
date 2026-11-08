@@ -8,6 +8,7 @@ use App\Models\JournalLine;
 use App\Models\LoanReceivable;
 use App\Models\LoanReceivableRepayment;
 use App\Services\AccountingService;
+use App\Services\BusinessDashboard;
 use App\Services\ExpenseService;
 use App\Services\FinancialReportingService;
 use App\Services\FinancialStatements;
@@ -268,6 +269,41 @@ it('takes a partial and then a full repayment into the chosen account, never as 
         ->and(lrPl('2026-11')['recognised_revenue'])->toBe(0);
     $this->co->post('finance', 'finance.loans-receivable.repay', ['amount' => '1', 'repaid_on' => '2026-11-09', 'idempotency_key' => (string) Str::uuid()], $loan)->assertSessionHas('error'); // fully repaid
     expect(ledgerAudit()['unbalanced'])->toBe(0)->and(FinancialStatements::position()['balanced'])->toBeTrue();
+});
+
+it('shows the loan separately in the dashboard fund position: lending and repayment move cash and receivable, never profit', function () {
+    $build = fn () => BusinessDashboard::build(null, CarbonImmutable::parse('2026-11-10'));
+    $before = $build();
+
+    $loan = lrVerified();
+    $lent = $build();
+    $amount = (int) $this->loanExpense->amount;
+
+    // Reclassified: the historical expense leaves management operating expenses once (no double count); cash is untouched; the receivable appears on its own.
+    expect($lent['expenses']['total'])->toBe($before['expenses']['total'] - $amount)
+        ->and($lent['fund']['available_cash'])->toBe($before['fund']['available_cash'])
+        ->and($lent['fund']['loans_receivable'])->toBe($amount)
+        ->and($lent['fund']['cash_plus_receivables'])->toBe($lent['fund']['available_cash'] + $amount)
+        ->and($lent['fund']['total_net_assets'])->toBe($before['fund']['total_net_assets'] + $amount)
+        ->and($lent['fund']['loans'][0])->toMatchArray(['borrower' => $this->ahsan->name, 'principal' => $amount, 'repaid' => 0, 'outstanding' => $amount, 'status' => 'outstanding']);
+
+    // A partial repayment: cash up, receivable down by the same amount; cash + receivables, net assets, expenses and profit do not move.
+    lrRepay($loan, '3000', '2026-11-06', accountId: $this->bank->id);
+    $repaid = $build();
+    expect($repaid['fund']['available_cash'])->toBe($lent['fund']['available_cash'] + 3_000_00)
+        ->and($repaid['fund']['loans_receivable'])->toBe($amount - 3_000_00)
+        ->and($repaid['fund']['cash_plus_receivables'])->toBe($lent['fund']['cash_plus_receivables'])
+        ->and($repaid['fund']['total_net_assets'])->toBe($lent['fund']['total_net_assets'])
+        ->and($repaid['expenses']['total'])->toBe($lent['expenses']['total'])->and($repaid['net_profit']['amount'])->toBe($lent['net_profit']['amount'])
+        ->and($repaid['fund']['loans'][0])->toMatchArray(['repaid' => 3_000_00, 'outstanding' => 5_000_00, 'status' => 'partly repaid']);
+
+    // A repayment that is only pending is not cash yet.
+    lrRepay($loan, '1000', '2026-11-07', verify: false);
+    $pending = $build();
+    expect($pending['fund']['available_cash'])->toBe($repaid['fund']['available_cash'])->and($pending['fund']['loans_receivable'])->toBe($repaid['fund']['loans_receivable']);
+
+    $page = $this->co->as('board')->get('/')->assertOk()->getContent();
+    expect($page)->toContain('Fund / asset position')->toContain('Cash + loans receivable')->toContain('Total net assets');
 });
 
 it('prevents duplicate repayments, including pending ones that reserve the balance', function () {

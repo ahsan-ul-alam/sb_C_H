@@ -9,6 +9,7 @@ use App\Models\ExpensePayment;
 use App\Models\FinancialAccount;
 use App\Models\Invoice;
 use App\Models\JournalLine;
+use App\Models\LoanReceivable;
 use App\Models\Payment;
 use App\Models\Project;
 use App\Models\ReceiptClassification;
@@ -54,6 +55,7 @@ class BusinessDashboard
         $investment = self::investment($to, $start);
         $cash = self::cash();
         $position = self::position($receipts, $currency);
+        $fund = self::fundPosition($cash, $position, $currency, $to);
 
         $net = $revenue['verified'] - $expenses['total'];
         $funding = self::funding($start, $to, $receipts, $cash);
@@ -73,7 +75,7 @@ class BusinessDashboard
             'net_profit' => ['amount' => $net, 'status' => $overall,
                 'if_suggested_service_accepted' => $net + $receipts['provisional_service']['amount'],
                 'unrecognised_sourcing_estimate' => $sourcing['estimate_total']],
-            'investment' => $investment, 'revenue' => $revenue, 'expenses' => $expenses, 'sourcing' => $sourcing, 'cash' => $cash, 'position' => $position,
+            'investment' => $investment, 'revenue' => $revenue, 'expenses' => $expenses, 'sourcing' => $sourcing, 'cash' => $cash, 'position' => $position, 'fund' => $fund,
             'receipts' => $receipts, 'status' => $status, 'unresolved' => $unresolved, 'funding' => $funding, 'accounts' => self::accounts($start, $to), 'bridge' => self::bridge($revenue, $expenses, $funding, $receipts, $net),
             'chart' => self::chart($from, $to, $receipts['applied_service_rows'], $sourcing['recognised_rows']),
         ];
@@ -418,6 +420,33 @@ class BusinessDashboard
         $lines = array_map(fn ($l) => ['label' => $l[0], 'amount' => (int) $l[1]], $lines);
 
         return ['lines' => $lines, 'total' => (int) array_sum(array_column($lines, 'amount'))];
+    }
+
+    /**
+     * Three different figures that must never be mixed up. Available cash is money in the accounts (the ledger's cash plus customer collections recorded
+     * but not yet journaled). Cash + loans receivable adds money lent out and still to be repaid: a recoverable asset, NOT spendable cash. Total net assets
+     * is every ledger asset less every liability (the same figure as the balance sheet) plus those unjournaled collections. A loan is none of operating
+     * expense, loss, revenue or profit: lending moves cash into the receivable and a repayment moves it back, so neither changes profit.
+     *
+     * @return array<string, mixed>
+     */
+    private static function fundPosition(array $cash, array $position, string $currency, CarbonImmutable $to): array
+    {
+        $ids = Payment::whereHas('project', fn ($q) => $q->where('currency', $currency))->whereDate('paid_on', '<=', $to)->pluck('id');
+        $posted = DB::table('journal_entries')->where(fn ($q) => $q->where('source_type', 'payment')->orWhere('source_type', 'like', 'payment_v%'))->whereIn('source_id', $ids)->pluck('source_id');
+        $unjournaled = (int) Payment::whereIn('id', $ids)->whereNotIn('id', $posted)->sum('amount');
+        $available = $cash['ledger_total'] + $unjournaled;
+        $balance = FinancialStatements::position();
+
+        $loans = LoanReceivable::with('repayments')->where('status', 'verified')->orderBy('id')->get()->map(function (LoanReceivable $l) {
+            $repaid = (int) $l->repayments->where('status', 'verified')->sum('amount');
+
+            return ['borrower' => $l->borrower_name, 'lent_on' => $l->lent_on->toDateString(), 'principal' => $l->principal, 'repaid' => $repaid, 'outstanding' => $l->principal - $repaid,
+                'status' => $repaid === 0 ? 'outstanding' : ($repaid >= $l->principal ? 'repaid' : 'partly repaid')];
+        })->all();
+
+        return ['available_cash' => $available, 'loans_receivable' => $position['loans_receivable'], 'cash_plus_receivables' => $available + $position['loans_receivable'],
+            'total_net_assets' => $balance['assets'] - $balance['liabilities'] + $unjournaled, 'collections_not_journaled' => $unjournaled, 'loans' => $loans];
     }
 
     /** @return array<string, mixed> */
