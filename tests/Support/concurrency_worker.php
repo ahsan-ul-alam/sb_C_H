@@ -4,6 +4,7 @@ use App\Models\AdvanceSettlement;
 use App\Models\CapitalEntry;
 use App\Models\Client;
 use App\Models\ClientApiIntegration;
+use App\Models\ClientOrder;
 use App\Models\Expense;
 use App\Models\FinancialAccount;
 use App\Models\InventoryEngineEnrolment;
@@ -14,6 +15,7 @@ use App\Models\Payment;
 use App\Models\Payout;
 use App\Models\Project;
 use App\Models\SourcingLot;
+use App\Models\SourcingLotLine;
 use App\Models\SupplierReturn;
 use App\Models\SupplierReturnSettlement;
 use App\Models\User;
@@ -27,8 +29,10 @@ use App\Services\InventoryEngine;
 use App\Services\InventoryHandoverService;
 use App\Services\InvestmentService;
 use App\Services\LoanReceivableService;
+use App\Services\OrderFulfilment;
 use App\Services\PaymentRecorder;
 use App\Services\PayoutService;
+use App\Services\ProjectStockAllocation;
 use App\Services\SourcingPayments;
 use App\Services\SubmissionGuard;
 use App\Services\SupplierReturnService;
@@ -140,6 +144,17 @@ try {
             } catch (DuplicateSubmission) {
                 return false;
             }
+        })(),
+        // Confirming an order (reserves stock under the lot lock) and handing units to another project, both of which must respect each project's entitlement.
+        'order_confirm' => (function () use ($args) {
+            OrderFulfilment::confirm(ClientOrder::findOrFail($args['order']), auth()->user());
+
+            return true;
+        })(),
+        'stock_allocate' => (function () use ($args) {
+            ProjectStockAllocation::allocate(SourcingLotLine::findOrFail($args['line']), Project::findOrFail($args['project']), $args['qty'], 'race', auth()->user());
+
+            return true;
         })(),
         'client_create' => Client::create(['name' => 'Race client '.$args['n'], 'mobile' => '017'])->sb_number,
         'otp_verify' => ClientInformationOtp::verify(ClientApiIntegration::findOrFail($args['integration']), $args['sb'], $args['request_id'], $args['code']) !== null,

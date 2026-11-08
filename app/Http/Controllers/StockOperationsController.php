@@ -8,6 +8,7 @@ use App\Models\Document;
 use App\Models\Project;
 use App\Models\SourcingArrivalEvent;
 use App\Models\SourcingLotLine;
+use App\Models\StockAllocation;
 use App\Models\StockMovement;
 use App\Models\StockThreshold;
 use App\Models\StockTransfer;
@@ -18,6 +19,7 @@ use App\Services\InventoryExceptions;
 use App\Services\InventoryReports;
 use App\Services\ProductImages;
 use App\Services\ProjectInventory;
+use App\Services\ProjectStockAllocation;
 use App\Services\Receiving;
 use App\Services\SalesDashboard;
 use App\Services\SalesStatus;
@@ -59,10 +61,30 @@ class StockOperationsController extends Controller
     public function projects(Request $request): View
     {
         $rows = ProjectInventory::positions($this->filters($request));
+        $visible = $request->user()->accessibleProjectIds();
 
         return view('stock.projects', ['rows' => $rows->groupBy(fn ($r) => $r['project']?->id ?? ($r['attribution'] === 'shared' ? 'shared' : 'none')), 'totals' => ProjectInventory::totals($rows),
-            'projects' => Project::orderBy('name')->get(['id', 'name']), 'clients' => Client::orderBy('name')->get(['id', 'name']), 'suppliers' => Supplier::orderBy('name')->get(['id', 'name']),
+            'projects' => Project::when($visible !== null, fn ($q) => $q->whereIn('id', $visible))->orderBy('name')->get(['id', 'name']),
+            'clients' => Client::when($visible !== null, fn ($q) => $q->whereHas('projects', fn ($p) => $p->whereIn('id', $visible)))->orderBy('name')->get(['id', 'name']), 'suppliers' => Supplier::orderBy('name')->get(['id', 'name']),
             'locations' => InventoryExceptions::locationList(), 'products' => SupplierProduct::orderBy('name')->get(['id', 'name'])]);
+    }
+
+    /** Hand part of a lot line from its home project to another project of the same client (audited; see ProjectStockAllocation). */
+    public function allocationStore(Request $request): RedirectResponse
+    {
+        $d = $request->validate(['line_id' => ['required', 'exists:sourcing_lot_lines,id'], 'project_id' => ['required', 'exists:projects,id'], 'quantity' => ['required', 'regex:'.self::QTY], 'reason' => ['required', 'string', 'max:255']]);
+        $line = SourcingLotLine::with('lot')->findOrFail($d['line_id']);
+        $to = Project::findOrFail($d['project_id']);
+        abort_unless($request->user()->canAccessProject($line->lot->project_id) && $request->user()->canAccessProject($to), 403, 'You do not have access to this project.');
+
+        return $this->attempt(fn () => ProjectStockAllocation::allocate($line, $to, $d['quantity'], $d['reason'], $request->user()), 'Stock allocated to the project.');
+    }
+
+    public function allocationCancel(Request $request, StockAllocation $allocation): RedirectResponse
+    {
+        abort_unless($request->user()->canAccessProject($allocation->line->lot->project_id) && $request->user()->canAccessProject($allocation->project_id), 403, 'You do not have access to this project.');
+
+        return $this->attempt(fn () => ProjectStockAllocation::cancel($allocation, $request->user()), 'Allocation cancelled.');
     }
 
     public function movements(Request $request): View

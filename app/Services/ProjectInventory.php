@@ -56,6 +56,12 @@ class ProjectInventory
             }
         }
 
+        // A user limited to certain projects sees only the positions of those projects (never a shared or unattributed row that could expose another project's stock).
+        $visible = auth()->user()?->accessibleProjectIds();
+        if ($visible !== null) {
+            $rows = $rows->filter(fn ($r) => $r['project'] !== null && in_array($r['project']->id, $visible, true));
+        }
+
         return $rows->filter(fn ($r) => self::keeps($r, $f))->values();
     }
 

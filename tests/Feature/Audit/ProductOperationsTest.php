@@ -23,6 +23,7 @@ use App\Services\FinancialStatements;
 use App\Services\Inventory;
 use App\Services\LotFinancials;
 use App\Services\OrderFulfilment;
+use App\Services\ProjectStockAllocation;
 use App\Services\StorageBilling;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
@@ -169,8 +170,8 @@ it('refuses overselling, other clients\' stock, unowned and company stock, and h
     $other = $co->client('Another Client');
     $otherProject = $co->project($other, 'OP');
 
-    placeOrder($co, $s['project'], $s['product'], '101', '10', 'BIG');
-    orderStep($co, 'confirm', ClientOrder::where('reference', 'BIG')->first())->assertSessionHas('error');         // more than available
+    placeOrder($co, $s['project'], $s['product'], '101', '10', 'BIG')->assertSessionHas('error');                    // more than available is refused at creation
+    expect(ClientOrder::where('reference', 'BIG')->exists())->toBeFalse();
     placeOrder($co, $otherProject, $s['product'], '1', '10', 'WRONG')->assertSessionHas('error');                    // another client's stock cannot even be put on an order
     expect(ClientOrder::where('reference', 'WRONG')->exists())->toBeFalse();
     expect(Inventory::balances($s['line'])['reserved'])->toBe('0.00')->and(Inventory::balances($s['line'])['available'])->toBe('100.00');
@@ -456,8 +457,8 @@ it('packs without moving stock, dispatches with courier and tracking, and releas
 it('never reserves the same units twice and never lets available go negative', function () {
     $co = bootProduct($this);
     $s = clientStock($co, '10');
-    placeOrder($co, $s['project'], $s['product'], '7', '10', 'A');
-    placeOrder($co, $s['project'], $s['product'], '7', '10', 'B');
+    placeOrder($co, $s['project'], $s['product'], '7', '10', 'A')->assertSessionHasNoErrors();
+    placeOrder($co, $s['project'], $s['product'], '7', '10', 'B')->assertSessionHasNoErrors();
     $a = ClientOrder::where('reference', 'A')->first();
     $b = ClientOrder::where('reference', 'B')->first();
     orderStep($co, 'confirm', $a)->assertSessionHasNoErrors();
@@ -478,7 +479,9 @@ it('keeps one project\'s stock away from another project of the same client unle
 
     SourcingAllocation::create(['sourcing_lot_id' => $s['lot']->id, 'project_id' => $second->id, 'kind' => 'sale', 'description' => 'Agreed share', 'quantity' => '10', 'unit_price' => 1_000,
         'created_by' => $co->users['finance']->id]);
-    placeOrder($co, $second, $s['product'], '5', '10', 'ALLOCATED')->assertSessionHasNoErrors();   // an explicit allocation makes the lot eligible
+    placeOrder($co, $second, $s['product'], '5', '10', 'BILLING-ONLY')->assertSessionHas('error');   // a billing allocation gives the project no stock
+    ProjectStockAllocation::allocate($s['line'], $second, '10', 'Agreed share', $co->users['finance']);
+    placeOrder($co, $second, $s['product'], '5', '10', 'ALLOCATED')->assertSessionHasNoErrors();   // an explicit stock allocation does
 });
 
 it('returns a failed delivery to custody for inspection and lets each returned unit be inspected only once', function () {
@@ -539,4 +542,144 @@ it('never edits or deletes a stock movement, and shows a project only its own in
     $page->assertDontSee($other['product']->name);
     $co->as('auditor')->get(route('product.projects.show', $s['project']))->assertOk();            // read-only roles can look
     $co->post('auditor', 'product.orders.pack', [], ClientOrder::where('reference', 'MINE-1')->first())->assertForbidden();   // but not act
+});
+
+// ───────────── quantity-based project allocation and project access ─────────────
+
+/** A lot of 100 owned by project one, with a second and a third project of the same client. */
+function sharedLot(SellbeesCompany $co): array
+{
+    $s = clientStock($co, '100');
+    $s['second'] = $co->project($s['client'], 'Second');
+    $s['third'] = $co->project($s['client'], 'Third');
+
+    return $s;
+}
+
+it('lets a project sell only the quantity allocated to it, never the whole lot', function () {
+    $co = bootProduct($this);
+    $s = sharedLot($co);
+    $finance = $co->users['finance'];
+    ProjectStockAllocation::allocate($s['line'], $s['second'], '20', 'Share for the second project', $finance);
+
+    placeOrder($co, $s['second'], $s['product'], '21', '10', 'S21')->assertSessionHas('error');     // 20 allocated must never authorise 21 (or 100)
+    placeOrder($co, $s['second'], $s['product'], '20', '10', 'S20')->assertSessionMissing('error');
+    placeOrder($co, $s['project'], $s['product'], '81', '10', 'H81')->assertSessionHas('error');     // the home project keeps 80
+    placeOrder($co, $s['project'], $s['product'], '80', '10', 'H80')->assertSessionMissing('error');
+    placeOrder($co, $s['third'], $s['product'], '1', '10', 'T1')->assertSessionHas('error');         // an unallocated project gets nothing
+    expect(ClientOrder::whereIn('reference', ['S21', 'H81', 'T1'])->exists())->toBeFalse();
+
+    orderStep($co, 'confirm', ClientOrder::where('reference', 'S20')->first())->assertSessionMissing('error');
+    orderStep($co, 'confirm', ClientOrder::where('reference', 'H80')->first())->assertSessionMissing('error');
+    $b = Inventory::balances($s['line']);
+    expect($b['reserved'])->toBe('100.00')->and($b['available'])->toBe('0.00')->and(ProjectStockAllocation::remaining($s['line'], $s['second']->id))->toBe('0.00')
+        ->and(ProjectStockAllocation::remaining($s['line'], $s['project']->id))->toBe('0.00');
+});
+
+it('re-checks the limit when an order is confirmed, and when an allocation is taken back', function () {
+    $co = bootProduct($this);
+    $s = sharedLot($co);
+    $finance = $co->users['finance'];
+    $alloc = ProjectStockAllocation::allocate($s['line'], $s['second'], '20', 'Share', $finance);
+
+    placeOrder($co, $s['second'], $s['product'], '15', '10', 'D1')->assertSessionMissing('error');
+    placeOrder($co, $s['second'], $s['product'], '15', '10', 'D2')->assertSessionMissing('error');   // two drafts may each fit alone
+    orderStep($co, 'confirm', ClientOrder::where('reference', 'D1')->first())->assertSessionMissing('error');
+    orderStep($co, 'confirm', ClientOrder::where('reference', 'D2')->first())->assertSessionHas('error');   // but the limit holds at confirmation
+    expect(Inventory::balances($s['line'])['reserved'])->toBe('15.00');
+
+    expect(fn () => ProjectStockAllocation::cancel($alloc, $finance))->toThrow(RuntimeException::class, 'already used');   // 15 of the 20 are in use
+    $unused = ProjectStockAllocation::allocate($s['line'], $s['third'], '10', 'Share', $finance);
+    placeOrder($co, $s['third'], $s['product'], '10', '10', 'THIRD')->assertSessionMissing('error');
+    ProjectStockAllocation::cancel($unused, $finance);                                                // nothing used yet: allowed
+    orderStep($co, 'confirm', ClientOrder::where('reference', 'THIRD')->first())->assertSessionHas('error');   // the draft lost its entitlement
+    expect(fn () => ProjectStockAllocation::cancel($unused, $finance))->toThrow(RuntimeException::class, 'already cancelled');
+    expect(fn () => $unused->delete())->toThrow(LogicException::class);
+
+    // Only free units of a client's own lot can move, and only within that client.
+    expect(fn () => ProjectStockAllocation::allocate($s['line'], $s['third'], '81', 'Too many', $finance))->toThrow(RuntimeException::class, 'free to allocate');
+    $stranger = $co->project($co->client('Other client'), 'Elsewhere');
+    expect(fn () => ProjectStockAllocation::allocate($s['line'], $stranger, '1', 'Wrong client', $finance))->toThrow(RuntimeException::class, 'same client');
+    expect(fn () => ProjectStockAllocation::allocate($s['line'], $s['second'], '0', 'Nothing', $finance))->toThrow(RuntimeException::class);
+});
+
+it('gives a cancelled, failed or returned order\'s units back to the project that owned them, and none to another', function () {
+    $co = bootProduct($this);
+    $s = sharedLot($co);
+    ProjectStockAllocation::allocate($s['line'], $s['second'], '20', 'Share', $co->users['finance']);
+    $left = fn ($p) => ProjectStockAllocation::remaining($s['line'], $p->id);
+
+    placeOrder($co, $s['second'], $s['product'], '20', '10', 'R1');
+    $o = ClientOrder::where('reference', 'R1')->first();
+    orderStep($co, 'confirm', $o);
+    expect($left($s['second']))->toBe('0.00');
+    orderStep($co, 'cancel', $o);
+    expect($left($s['second']))->toBe('20.00')->and($left($s['project']))->toBe('80.00');            // released exactly once, to its own project
+    orderStep($co, 'cancel', $o)->assertSessionHas('error');
+    expect($left($s['second']))->toBe('20.00');
+
+    placeOrder($co, $s['second'], $s['product'], '20', '10', 'R2');
+    $f = ClientOrder::where('reference', 'R2')->first();
+    foreach (['confirm', 'dispatch', 'fail'] as $step) {
+        orderStep($co, $step, $f);
+    }
+    expect($left($s['second']))->toBe('0.00');                                                       // awaiting inspection: not yet sellable by anyone
+    $co->post('clients', 'product.items.inspect', ['usable' => '15', 'damaged' => '5'], $f->items()->first())->assertSessionHasNoErrors();
+    expect($left($s['second']))->toBe('15.00')->and($left($s['project']))->toBe('80.00')->and(Inventory::balances($s['line'])['damaged'])->toBe('5.00');   // damaged units are consumed
+    expect(Inventory::reconciles($s['line']))->toBeTrue();
+});
+
+it('limits users to their assigned projects and bound client, enforced on pages and actions, while management keeps everything', function () {
+    $co = bootProduct($this);
+    $s = sharedLot($co);
+    $other = clientStock($co, '30', clientName: 'Rival client');
+    placeOrder($co, $s['project'], $s['product'], '5', '10', 'MINE');
+    placeOrder($co, $other['project'], $other['product'], '5', '10', 'RIVAL');
+    $mine = ClientOrder::where('reference', 'MINE')->first();
+    $rival = ClientOrder::where('reference', 'RIVAL')->first();
+
+    $legacy = SellbeesCompany::user('legacy@audit.test', 'client_management');          // no assignment: unchanged access
+    $staff = SellbeesCompany::user('staff@audit.test', 'client_management');
+    $clientUser = SellbeesCompany::user('clientuser@audit.test', 'employee');
+    $this->actingAs($co->users['super'])->post(route('users.access', $staff), ['project_ids' => [$s['project']->id]])->assertSessionHas('status');
+    $this->actingAs($co->users['super'])->post(route('users.access', $clientUser), ['client_id' => $other['client']->id])->assertSessionHas('status');
+
+    // Unrestricted legacy user: sees both, as before.
+    $this->actingAs($legacy)->get(route('product.projects.show', $s['project']))->assertOk();
+    $this->actingAs($legacy)->get(route('product.projects.show', $other['project']))->assertOk();
+
+    // Assigned staff: own project only, everywhere.
+    $this->actingAs($staff)->get(route('product.projects.show', $s['project']))->assertOk()->assertSee('MINE');
+    $this->actingAs($staff)->get(route('product.projects.show', $other['project']))->assertForbidden();
+    $this->actingAs($staff)->get(route('product.orders', ['project' => $other['project']->id]))->assertForbidden();
+    $this->actingAs($staff)->get(route('product.orders'))->assertOk()->assertSee('MINE')->assertDontSee('RIVAL');
+    $this->actingAs($staff)->get(route('product.inventory'))->assertOk()->assertDontSee($other['product']->name);
+    $this->actingAs($staff)->get(route('product.inventory.show', $other['line']))->assertForbidden();
+    $this->actingAs($staff)->get(route('stock.projects'))->assertOk()->assertDontSee($other['product']->name);
+    foreach (['stock.overview', 'stock.movements', 'stock.reports', 'product.settlements', 'product.refunds'] as $page) {
+        $this->actingAs($staff)->get(route($page))->assertForbidden();                    // pages that mix projects
+    }
+    foreach (['confirm', 'pack', 'dispatch', 'cancel', 'collect', 'refunds'] as $action) {
+        $route = $action === 'refunds' ? 'product.refunds.store' : 'product.orders.'.$action;
+        $this->actingAs($staff)->post(route($route, $rival), ['amount' => '1'])->assertForbidden();
+    }
+    $this->actingAs($staff)->post(route('product.orders.store'), ['project_id' => $other['project']->id, 'reference' => 'SNEAK', 'ordered_on' => '2026-03-06', 'items' => [['product_id' => $other['product']->id, 'quantity' => '1', 'price' => '10']]])->assertForbidden();
+    $this->actingAs($staff)->post(route('product.inventory.adjust', $other['line']), ['delta' => '-1', 'reason' => 'x'])->assertForbidden();
+    $this->actingAs($staff)->post(route('product.orders.confirm', $mine))->assertSessionMissing('error');       // own project works
+    expect(ClientOrder::where('reference', 'SNEAK')->exists())->toBeFalse()->and($rival->refresh()->delivery_status)->toBe('pending');
+
+    // A user bound to a client sees that client's projects only (never another client's), whatever they are assigned.
+    $this->actingAs($clientUser)->get(route('product.projects.show', $s['project']))->assertForbidden();
+    expect($clientUser->refresh()->canAccessProject($other['project']))->toBeTrue()->and($clientUser->canAccessProject($s['project']))->toBeFalse();
+
+    // Management roles are never narrowed, and cannot be limited by accident.
+    foreach (['super', 'board', 'finance', 'auditor'] as $who) {
+        $this->actingAs($co->users[$who])->get(route('product.projects.show', $other['project']))->assertOk();
+    }
+    $this->actingAs($co->users['super'])->post(route('users.access', $co->users['finance']), ['project_ids' => [$s['project']->id]])->assertSessionHas('error');
+    $this->actingAs($co->users['super'])->post(route('users.access', $co->users['super']), ['project_ids' => []])->assertSessionHas('error');   // nobody edits their own access
+    $this->actingAs($co->users['finance'])->post(route('users.access', $staff), ['project_ids' => []])->assertForbidden();                       // needs users.manage
+
+    // Allocation workflow respects project access too.
+    $this->actingAs($staff)->post(route('stock.allocations.store'), ['line_id' => $other['line']->id, 'project_id' => $other['project']->id, 'quantity' => '1', 'reason' => 'x'])->assertForbidden();
 });

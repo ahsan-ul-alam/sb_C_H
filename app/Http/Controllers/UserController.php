@@ -2,13 +2,16 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Client;
 use App\Models\Partner;
+use App\Models\Project;
 use App\Models\User;
 use App\Services\Audit;
 use App\Services\Notify;
 use App\Support\Permissions;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\View\View;
 
@@ -16,7 +19,38 @@ class UserController extends Controller
 {
     public function index(): View
     {
-        return view('users.index', ['users' => User::orderBy('name')->get(), 'partners' => Partner::orderBy('sort')->get()]);
+        return view('users.index', ['users' => User::orderBy('name')->get(), 'partners' => Partner::orderBy('sort')->get(), 'clients' => Client::orderBy('name')->get(['id', 'name']),
+            'projects' => Project::with('client:id,name')->whereNull('archived_at')->orderBy('name')->get(),
+            'assigned' => DB::table('project_user')->get()->groupBy('user_id')->map(fn ($rows) => $rows->pluck('project_id')->map(fn ($id) => (int) $id)->all())->all()]);
+    }
+
+    /**
+     * Which client a user is bound to and which projects they are assigned to. Nobody changes their own access, and management roles are not narrowed
+     * (they always see every project), so access limits apply only to the other roles.
+     */
+    public function access(Request $request, User $user): RedirectResponse
+    {
+        $data = $request->validate(['client_id' => ['nullable', 'exists:clients,id'], 'project_ids' => ['nullable', 'array'], 'project_ids.*' => ['exists:projects,id']]);
+        if ($user->id === $request->user()->id) {
+            return back()->with('error', 'You cannot change your own project access.');
+        }
+        if ($user->hasRole(...User::CROSS_PROJECT_ROLES)) {
+            return back()->with('error', 'Management, Finance and Auditor roles always see every project; remove the role first if this person should be limited.');
+        }
+        $projectIds = array_values(array_unique(array_map('intval', $data['project_ids'] ?? [])));
+        if (! empty($data['client_id']) && Project::whereIn('id', $projectIds)->where('client_id', '!=', $data['client_id'])->exists()) {
+            return back()->with('error', 'A user bound to a client can only be assigned that client\'s projects.');
+        }
+        DB::transaction(function () use ($user, $data, $projectIds, $request) {
+            $user->forceFill(['client_id' => $data['client_id'] ?? null])->save();
+            DB::table('project_user')->where('user_id', $user->id)->delete();
+            foreach ($projectIds as $id) {
+                DB::table('project_user')->insert(['user_id' => $user->id, 'project_id' => $id, 'created_by' => $request->user()->id, 'created_at' => now(), 'updated_at' => now()]);
+            }
+            Audit::log('user.access_updated', $user->email, 'client '.($data['client_id'] ?? '-').' projects '.implode(',', $projectIds));
+        });
+
+        return back()->with('status', 'Project access saved.');
     }
 
     public function store(Request $request): RedirectResponse

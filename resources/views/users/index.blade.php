@@ -33,6 +33,23 @@
         </table></div>
     </section>
 
+    <section class="panel">
+        <div class="panel-head"><div><h2>Project access</h2><div class="sub">Management, Finance and Auditor roles always see every project. For anyone else: bind a client-facing user to one client, and/or assign staff to projects. A user with neither keeps the access their role gave.</div></div></div>
+        <div class="table-wrap"><table class="table table-min-760">
+            <thead><tr><th scope="col">User</th><th scope="col">Bound to client</th><th scope="col">Assigned projects</th><th scope="col"><span class="sr-only">Save</span></th></tr></thead>
+            <tbody>
+            @foreach ($users->reject(fn ($u) => $u->hasRole(...\App\Models\User::CROSS_PROJECT_ROLES)) as $u)
+                <tr>
+                    <td class="primary-cell"><form id="af{{ $u->id }}" method="POST" action="{{ route('users.access', $u) }}">@csrf</form>{{ $u->name }}<span class="secondary">{{ $u->email }}</span></td>
+                    <td><select name="client_id" form="af{{ $u->id }}" aria-label="Client for {{ $u->name }}"><option value="">Not bound</option>@foreach ($clients as $c)<option value="{{ $c->id }}" @selected($u->client_id === $c->id)>{{ $c->name }}</option>@endforeach</select></td>
+                    <td><select name="project_ids[]" form="af{{ $u->id }}" multiple size="4" aria-label="Projects for {{ $u->name }}">@foreach ($projects as $p)<option value="{{ $p->id }}" @selected(in_array($p->id, $assigned[$u->id] ?? []))>{{ $p->client->name }} — {{ $p->name }}</option>@endforeach</select></td>
+                    <td class="num"><button class="btn btn-sm btn-primary" form="af{{ $u->id }}">Save access</button></td>
+                </tr>
+            @endforeach
+            </tbody>
+        </table></div>
+    </section>
+
     <section class="panel form-card wide">
         <div class="panel-head"><div><h2>Add user</h2><div class="sub">Create a sign-in for a team member and choose what they can do.</div></div></div>
         <form method="POST" action="{{ route('users.store') }}" novalidate>@csrf

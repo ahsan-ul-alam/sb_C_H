@@ -455,8 +455,7 @@ it('refuses to reserve more custody stock than the client holds, never reaches S
     [$lot, $line, $allocation] = hoLot(product: $product);
     $handover = hoApprove(hoPropose($allocation, '10'));
 
-    $big = custodyOrder($this->project, '11', (string) $product, 'ORD-BIG');
-    expect(fn () => OrderFulfilment::confirm($big, $this->finance))->toThrow(RuntimeException::class, 'Only 10.00');
+    expect(fn () => custodyOrder($this->project, '11', (string) $product, 'ORD-BIG'))->toThrow(RuntimeException::class, 'Only 10.00');   // refused when the order is created
     expect(Inventory::sliceBalances($line, $handover->id)['reserved'])->toBe('0.00')->and(Inventory::sliceBalances($line, null)['available'])->toBe('90.00');
 
     $stranger = $this->co->project($this->co->client('Another Client'), 'Their project');

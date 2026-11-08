@@ -8,6 +8,7 @@ use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Attributes\Hidden;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Illuminate\Support\Facades\DB;
@@ -61,6 +62,47 @@ class User extends Authenticatable
     public function addRole(string $role): void
     {
         $this->setRoles([...$this->roleKeys(), $role]);
+    }
+
+    /** Roles that see every project (management, finance and audit); project assignment and client binding never narrow them. */
+    public const CROSS_PROJECT_ROLES = ['super_admin', 'board_member', 'finance', 'auditor'];
+
+    /** @return BelongsToMany<Project, $this> */
+    public function assignedProjects(): BelongsToMany
+    {
+        return $this->belongsToMany(Project::class, 'project_user')->withTimestamps();
+    }
+
+    /**
+     * The project ids this user may see, or null for all of them. Management roles see everything. Otherwise a user bound to a client sees only that
+     * client's projects (narrowed to the assigned ones if any are assigned), and a user with assignments sees only those. A user with neither keeps the access
+     * the role always gave, so nobody is locked out until an administrator assigns them.
+     *
+     * @return list<int>|null
+     */
+    public function accessibleProjectIds(): ?array
+    {
+        if ($this->hasRole(...self::CROSS_PROJECT_ROLES)) {
+            return null;
+        }
+        $assigned = DB::table('project_user')->where('user_id', $this->id)->pluck('project_id')->map(fn ($id) => (int) $id)->all();
+        if ($this->client_id !== null) {
+            return Project::where('client_id', $this->client_id)->when($assigned !== [], fn ($q) => $q->whereIn('id', $assigned))->pluck('id')->map(fn ($id) => (int) $id)->all();
+        }
+
+        return $assigned === [] ? null : $assigned;
+    }
+
+    public function seesAllProjects(): bool
+    {
+        return $this->accessibleProjectIds() === null;
+    }
+
+    public function canAccessProject(Project|int|null $project): bool
+    {
+        $ids = $this->accessibleProjectIds();
+
+        return $ids === null || ($project !== null && in_array($project instanceof Project ? $project->id : $project, $ids, true));
     }
 
     /** Effective permissions are the union of every role held. */

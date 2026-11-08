@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Middleware\AjaxResponses;
+use App\Http\Middleware\CrossProjectOnly;
 use App\Http\Middleware\SecurityHeaders;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -21,6 +22,7 @@ return Application::configure(basePath: dirname(__DIR__))
             $middleware->trustProxies(at: $proxies);
         }
         $middleware->append(SecurityHeaders::class);
+        $middleware->alias(['cross.project' => CrossProjectOnly::class]);
         $middleware->web(append: [AjaxResponses::class]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

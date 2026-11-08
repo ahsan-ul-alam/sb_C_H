@@ -43,6 +43,36 @@
     </section>
 
     <section class="panel">
+        <div class="panel-head"><h2>Stock allocated between projects</h2><span class="sub">A project can sell only its own share of a lot plus the quantity explicitly allocated to it. Billing allocations do not count.</span></div>
+        <div class="table-wrap"><table class="table table-min-760">
+            <thead><tr><th>Product / lot</th><th>Direction</th><th class="num">Quantity</th><th>Reason</th><th>By</th><th></th></tr></thead>
+            <tbody>
+            @forelse ($allocations as $a)
+                <tr><td>{{ $a->line->description }}<span class="secondary">{{ $a->line->lot->number }}</span></td>
+                    <td>@if ($a->project_id === $project->id) received from {{ $a->line->lot->project->name }} @else given to {{ $a->project->name }} @endif</td>
+                    <td class="num">{{ $a->quantity }}</td><td>{{ $a->reason }}</td><td>{{ $a->creator?->name }}</td>
+                    <td>@can('inventory.adjust')<form method="POST" action="{{ route('stock.allocations.cancel', $a) }}" class="inline-form" data-confirm="Cancel this allocation?">@csrf<button class="btn btn-sm btn-danger">Cancel</button></form>@endcan</td></tr>
+            @empty
+                <tr><td colspan="6" class="muted">No stock is shared with another project.</td></tr>
+            @endforelse
+            </tbody>
+        </table></div>
+        @can('inventory.adjust')
+            @if ($homeLines->isNotEmpty() && $siblings->isNotEmpty())
+            <form method="POST" action="{{ route('stock.allocations.store') }}" class="panel-body">@csrf
+                <div class="form-grid">
+                    <div class="field"><label>Lot line (free units)</label><select name="line_id" required>@foreach ($homeLines as $r)<option value="{{ $r['line']->id }}">{{ $r['line']->description }} · {{ $r['line']->lot->number }} ({{ $r['free'] }} free)</option>@endforeach</select></div>
+                    <div class="field"><label>Give to project</label><select name="project_id" required>@foreach ($siblings as $p)<option value="{{ $p->id }}">{{ $p->name }}</option>@endforeach</select></div>
+                    <div class="field"><label>Quantity</label><input name="quantity" inputmode="decimal" required></div>
+                    <div class="field grow"><label>Reason</label><input name="reason" maxlength="255" required></div>
+                </div>
+                <button class="btn btn-primary" style="margin-top:.7rem">Allocate</button>
+            </form>
+            @endif
+        @endcan
+    </section>
+
+    <section class="panel">
         <div class="panel-head"><h2>Stock by lot and product</h2></div>
         <div class="table-wrap"><table class="table table-min-760">
             <thead><tr><th>Product / lot</th><th>Ownership</th><th class="num">Accepted</th><th class="num">Available</th><th class="num">Reserved</th><th class="num">Dispatched</th><th class="num">Delivered</th><th class="num">Returned</th><th class="num">Damaged</th></tr></thead>

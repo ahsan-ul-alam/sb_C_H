@@ -7,6 +7,8 @@ use App\Models\ClientOrderItem;
 use App\Models\InventoryHandover;
 use App\Models\OrderCollection;
 use App\Models\Project;
+use App\Models\SourcingLot;
+use App\Models\SourcingLotLine;
 use App\Models\StockMovement;
 use App\Models\SupplierProduct;
 use App\Models\User;
@@ -46,6 +48,9 @@ class OrderFulfilment
                 if (Inventory::stockFor($project->client_id, $product->id, $project->id)->isEmpty()) {
                     throw new RuntimeException($product->label().' has no stock available to this project, so it cannot be ordered.');
                 }
+                // The quantity is limited too: never more than this project is entitled to (confirming re-checks this under the lot lock).
+                $wanted = collect($data['items'])->where('product_id', $row['product_id'])->reduce(fn ($c, $r) => bcadd($c, (string) $r['quantity'], 2), '0');
+                Inventory::allocate($project->client_id, $product->id, $wanted, $project->id);
                 if (bccomp($row['quantity'], '0', 2) <= 0 || $row['unit_price'] <= 0) {
                     throw new RuntimeException('Every product needs a quantity and a selling price above zero.');
                 }
@@ -72,8 +77,16 @@ class OrderFulfilment
         });
     }
 
+    /**
+     * Run one order step under the order's row lock. On MySQL the transaction reads COMMITTED data: under the default REPEATABLE READ, the order is read (and a
+     * snapshot taken) BEFORE the lot lock is won, so after waiting for another order the stock sums would be stale and two orders could take the same units.
+     */
     private static function locked(ClientOrder $order, \Closure $work): mixed
     {
+        if (DB::transactionLevel() === 0 && in_array(DB::getDriverName(), ['mysql', 'mariadb'], true)) {
+            DB::statement('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
+        }
+
         return DB::transaction(fn () => $work(ClientOrder::whereKey($order->id)->lockForUpdate()->with(['items', 'project.client'])->firstOrFail()));
     }
 
@@ -90,6 +103,11 @@ class OrderFulfilment
         self::locked($order, function (ClientOrder $o) use ($user, $locationId) {
             self::expect($o, 'pending');
             $clientId = $o->project->client_id;
+            // Serialise with every other order and allocation touching the same lots (always in id order, so two confirmations cannot deadlock): the
+            // project's entitlement is then read and used under one lock, and two projects can never take the same units.
+            $lotIds = SourcingLotLine::whereIn('supplier_product_id', $o->items->pluck('supplier_product_id'))
+                ->whereHas('lot', fn ($q) => $q->where('ownership', 'client')->whereHas('project', fn ($p) => $p->where('client_id', $clientId)))->pluck('sourcing_lot_id')->unique()->sort()->values();
+            SourcingLot::whereIn('id', $lotIds)->orderBy('id')->lockForUpdate()->get();
             foreach ($o->items as $request) {
                 $plan = Inventory::allocate($clientId, (int) $request->supplier_product_id, (string) $request->quantity, (int) $o->project_id);
                 $first = true;

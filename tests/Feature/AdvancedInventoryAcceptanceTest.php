@@ -66,9 +66,8 @@ it('runs the Premium Hoodie lot end to end with exact balances at every step', f
     $a = hoodieOrder($s, 'A', '60');
     $b = hoodieOrder($s, 'B', '10');
     $c = hoodieOrder($s, 'C', '30');
-    $tooBig = hoodieOrder($s, 'BIG', '1000');
-    hoodieStep($co, 'confirm', $tooBig)->assertSessionHas('error');
-    expect($tooBig->refresh()->delivery_status)->toBe('pending');
+    $co->post('clients', 'product.orders.store', ['project_id' => $s['project']->id, 'reference' => 'BIG', 'ordered_on' => '2026-02-10', 'items' => [['product_id' => $s['product']->id, 'quantity' => '1000', 'price' => '600']]])->assertSessionHas('error');
+    expect(ClientOrder::where('reference', 'BIG')->exists())->toBeFalse();   // more than the project may sell is refused when the order is created
     foreach ([$a, $b, $c] as $o) {
         hoodieStep($co, 'confirm', $o)->assertSessionHasNoErrors();
     }

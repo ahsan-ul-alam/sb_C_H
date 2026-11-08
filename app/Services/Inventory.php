@@ -155,11 +155,15 @@ class Inventory
             ->whereNotNull('received_quantity')
             ->whereHas('lot', fn ($q) => $q->where('ownership', 'client')->where('status', '!=', 'cancelled')->whereHas('project', fn ($p) => $p->where('client_id', $clientId)))
             ->when($productId, fn ($q) => $q->where('supplier_product_id', $productId))
-            // One project never takes another project's units, even of the same client: only the lots of THIS project, or lots explicitly allocated to it, are eligible.
-            ->when($projectId, fn ($q) => $q->whereHas('lot', fn ($l) => $l->where(fn ($w) => $w->where('project_id', $projectId)
-                ->orWhereHas('allocations', fn ($a) => $a->where('kind', 'sale')->where('project_id', $projectId)))))
             ->orderBy('arrived_on')->orderBy('id')->get()
-            ->map(fn ($l) => ['line' => $l, 'available' => self::sliceBalances($l, null)['available'], 'handover' => null]);
+            // One project never takes another project's units, even of the same client: it may use only the quantity it is entitled to on each line
+            // (the home project's own share, or what was explicitly allocated to it) and not yet committed to its orders.
+            ->map(function ($l) use ($projectId) {
+                $physical = self::sliceBalances($l, null)['available'];
+                $room = $projectId === null ? $physical : ProjectStockAllocation::remaining($l->loadMissing('lot'), $projectId);
+
+                return ['line' => $l, 'available' => bccomp($room, $physical, 2) < 0 ? $room : $physical, 'handover' => null];
+            });
         $custody = $projectId === null ? collect() : InventoryHandover::query()->with('line')
             ->where('status', 'approved')->where('custody_mode', 'warehouse')->where('client_id', $clientId)->where('project_id', $projectId)
             ->when($productId, fn ($q) => $q->where('supplier_product_id', $productId))

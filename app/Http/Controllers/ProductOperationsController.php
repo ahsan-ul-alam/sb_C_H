@@ -13,6 +13,7 @@ use App\Models\OrderRefundAllocation;
 use App\Models\Project;
 use App\Models\SourcingLot;
 use App\Models\SourcingLotLine;
+use App\Models\StockAllocation;
 use App\Models\StockMovement;
 use App\Models\StorageCharge;
 use App\Models\Supplier;
@@ -22,6 +23,7 @@ use App\Services\Inventory;
 use App\Services\OrderFulfilment;
 use App\Services\OrderRefunds;
 use App\Services\ProjectInventory;
+use App\Services\ProjectStockAllocation;
 use App\Services\StorageBilling;
 use App\Support\BusinessDate;
 use App\Support\Money;
@@ -46,9 +48,44 @@ class ProductOperationsController extends Controller
 
     public const DELIVERY_METHODS = ['courier' => 'Courier', 'own' => 'Own delivery', 'pickup' => 'Customer pickup'];
 
+    /**
+     * Every action that is given an order, an order line, a refund or a client is checked against the user's project access before it runs, so no
+     * route of this controller can be reached by naming someone else's record.
+     *
+     * @param  array<string, mixed>  $parameters
+     */
+    public function callAction($method, $parameters)
+    {
+        foreach ($parameters as $value) {
+            $project = match (true) {
+                $value instanceof ClientOrder => $value->project_id,
+                $value instanceof ClientOrderItem => $value->order->project_id,
+                $value instanceof OrderRefund => $value->order->project_id,
+                default => false,
+            };
+            if ($project !== false) {
+                $this->authorizeProject(request(), $project);
+            }
+            if ($value instanceof Client) {
+                $ids = request()->user()->accessibleProjectIds();
+                abort_unless($ids === null || Project::where('client_id', $value->id)->whereIn('id', $ids)->exists(), 403, 'You do not have access to this client.');
+            }
+        }
+
+        return $this->{$method}(...array_values($parameters));
+    }
+
+    /** Refuse (403) a user whose project access does not include this project. Every page and action that names a project or an order goes through this. */
+    private function authorizeProject(Request $request, Project|int|null $project): void
+    {
+        abort_unless($request->user()->canAccessProject($project), 403, 'You do not have access to this project.');
+    }
+
     public function inventory(Request $request): View
     {
+        $visible = $request->user()->accessibleProjectIds();
         $lines = SourcingLotLine::query()->whereNotNull('received_quantity')->with(['lot.project.client', 'supplier'])
+            ->when($visible !== null, fn ($q) => $q->whereHas('lot', fn ($l) => $l->whereIn('project_id', $visible)))
             ->when($request->integer('client'), fn ($q, $id) => $q->whereHas('lot.project', fn ($p) => $p->where('client_id', $id)))
             ->when($request->integer('supplier'), fn ($q, $id) => $q->where('supplier_id', $id))
             ->when($request->integer('lot'), fn ($q, $id) => $q->where('sourcing_lot_id', $id))
@@ -58,7 +95,7 @@ class ProductOperationsController extends Controller
             ->when($request->query('availability') === 'in_stock', fn ($c) => $c->filter(fn ($r) => bccomp($r['b']['available'], '0', 2) > 0))
             ->when($request->query('availability') === 'out', fn ($c) => $c->filter(fn ($r) => bccomp($r['b']['available'], '0', 2) <= 0))->values();
 
-        $stockOrders = ClientOrder::where('fulfilment', 'stock')->with(['items', 'collections'])->get();
+        $stockOrders = ClientOrder::where('fulfilment', 'stock')->when($visible !== null, fn ($q) => $q->whereIn('project_id', $visible))->with(['items', 'collections'])->get();
         $clients = Client::orderBy('name')->get();
 
         return view('product.inventory', [
@@ -68,8 +105,8 @@ class ProductOperationsController extends Controller
                 'pending' => $stockOrders->where('delivery_status', 'pending')->count(),
                 'confirmed' => $stockOrders->whereIn('delivery_status', ['confirmed', 'dispatched'])->count(),
                 'awaiting_collection' => (int) $stockOrders->where('delivery_status', 'delivered')->sum(fn ($o) => OrderFulfilment::collectionState($o)['outstanding']),
-                'settlement_due' => (int) $clients->sum(fn ($c) => max(0, ClientSettlementService::fundsHeld($c))),
-                'storage_due' => (int) StorageCharge::where('status', 'billed')->with('invoice')->get()->sum(fn ($s) => $s->invoice?->balance() ?? 0),
+                'settlement_due' => $visible !== null ? 0 : (int) $clients->sum(fn ($c) => max(0, ClientSettlementService::fundsHeld($c))),
+                'storage_due' => $visible !== null ? 0 : (int) StorageCharge::where('status', 'billed')->with('invoice')->get()->sum(fn ($s) => $s->invoice?->balance() ?? 0),
                 'needs_measurement' => StorageCharge::where('status', 'needs_measurement')->count(),
                 'unowned' => SourcingLot::whereNull('ownership')->whereHas('lines', fn ($l) => $l->whereNotNull('received_quantity'))->count(),
             ],
@@ -78,6 +115,7 @@ class ProductOperationsController extends Controller
 
     public function inventoryShow(SourcingLotLine $line): View
     {
+        $this->authorizeProject(request(), $line->lot->project_id);
         $line->load(['lot.project.client', 'supplier']);
 
         return view('product.inventory-show', [
@@ -120,6 +158,7 @@ class ProductOperationsController extends Controller
     public function adjust(Request $request, SourcingLotLine $line): RedirectResponse
     {
         $data = $request->validate(['delta' => ['required', 'regex:/^-?\d{1,10}(\.\d{1,2})?$/'], 'reason' => ['required', 'string', 'max:255']]);
+        $this->authorizeProject($request, $line->lot->project_id);
 
         return $this->attempt(fn () => Inventory::adjust($line, $data['delta'], $data['reason'], $request->user(), $request->boolean('damaged')), 'Stock adjusted and recorded.');
     }
@@ -129,12 +168,16 @@ class ProductOperationsController extends Controller
     public function orders(Request $request): View
     {
         $project = $request->integer('project') ? Project::with('client')->find($request->integer('project')) : null;
+        if ($project) {
+            $this->authorizeProject($request, $project);
+        }
+        $visible = $request->user()->accessibleProjectIds();
         $stock = $project ? Inventory::stockFor($project->client_id, null, $project->id)->groupBy(fn ($r) => $r['line']->supplier_product_id)
             ->map(fn ($g) => ['name' => $g->first()['line']->description, 'available' => $g->reduce(fn ($c, $r) => bcadd($c, $r['available'], 2), '0')]) : collect();
-        $orders = ClientOrder::where('fulfilment', 'stock')->with(['project.client', 'items.line', 'collections', 'invoice'])->latest('id')->paginate(25)->withQueryString();
+        $orders = ClientOrder::where('fulfilment', 'stock')->when($visible !== null, fn ($q) => $q->whereIn('project_id', $visible))->with(['project.client', 'items.line', 'collections', 'invoice'])->latest('id')->paginate(25)->withQueryString();
 
         return view('product.orders', [
-            'orders' => $orders, 'projects' => Project::with('client:id,name')->whereNull('archived_at')->orderBy('name')->get(), 'project' => $project, 'stock' => $stock,
+            'orders' => $orders, 'projects' => Project::with('client:id,name')->whereNull('archived_at')->when($visible !== null, fn ($q) => $q->whereIn('id', $visible))->orderBy('name')->get(), 'project' => $project, 'stock' => $stock,
             'accounts' => FinancialAccount::where('is_active', true)->orderBy('name')->get(),
         ]);
     }
@@ -145,6 +188,7 @@ class ProductOperationsController extends Controller
      */
     public function projectShow(Request $request, Project $project): View
     {
+        $this->authorizeProject($request, $project);
         $project->load('client');
         $product = trim((string) $request->query('product'));
         $positions = ProjectInventory::positions(['project' => $project->id, 'product' => $product]);
@@ -162,7 +206,14 @@ class ProductOperationsController extends Controller
                 ->orWhereIn('type', ['receipt', 'adjust', 'custody_in', 'custody_out', 'custody_return']))
             ->latest('id')->limit(60)->get();
 
+        $homeLineIds = SourcingLotLine::whereHas('lot', fn ($l) => $l->where('project_id', $project->id)->where('ownership', 'client'))->whereNotNull('received_quantity')->pluck('id');
+        $visible = $request->user()->accessibleProjectIds();
+
         return view('product.project', [
+            'allocations' => StockAllocation::with(['line.lot.project', 'project', 'creator'])->whereNull('cancelled_at')
+                ->where(fn ($q) => $q->where('project_id', $project->id)->orWhereIn('sourcing_lot_line_id', $homeLineIds))->latest('id')->get(),
+            'homeLines' => SourcingLotLine::with('lot')->whereIn('id', $homeLineIds)->get()->map(fn ($l) => ['line' => $l, 'free' => bcadd(ProjectStockAllocation::remaining($l, $project->id), '0', 2)])->filter(fn ($r) => bccomp($r['free'], '0', 2) > 0)->values(),
+            'siblings' => Project::where('client_id', $project->client_id)->where('id', '!=', $project->id)->when($visible !== null, fn ($q) => $q->whereIn('id', $visible))->whereNull('archived_at')->orderBy('name')->get(['id', 'name']),
             'project' => $project, 'positions' => $positions, 'totals' => ProjectInventory::totals($positions), 'orders' => $orders, 'movements' => $movements,
             'counts' => ['total' => $allOrders->count(), 'pending' => $allOrders->whereIn('delivery_status', ['pending', 'confirmed', 'packed', 'dispatched'])->count(),
                 'completed' => $allOrders->where('delivery_status', 'delivered')->count(), 'cancelled' => $allOrders->whereIn('delivery_status', ['cancelled', 'failed'])->count()],
@@ -181,6 +232,7 @@ class ProductOperationsController extends Controller
             'items.*.discount' => ['nullable', 'regex:'.Money::AMOUNT_REGEX], 'delivery_charge' => ['nullable', 'regex:'.Money::AMOUNT_REGEX],
         ]);
         $data['delivery_charge'] = Money::toMinor($data['delivery_charge'] ?? 0);
+        $this->authorizeProject($request, (int) $data['project_id']);
         $items = collect($data['items'])->filter(fn ($i) => ! empty($i['product_id']) && ($i['quantity'] ?? '') !== '')
             ->map(fn ($i) => ['product_id' => (int) $i['product_id'], 'quantity' => $i['quantity'], 'unit_price' => Money::toMinor($i['price'] ?? 0), 'unit_discount' => Money::toMinor($i['discount'] ?? 0)])->values()->all();
         if (collect($items)->contains(fn ($i) => $i['unit_discount'] > 0) && ! $request->user()->can('orders.discount')) {

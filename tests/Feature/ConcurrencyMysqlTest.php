@@ -7,6 +7,7 @@ use App\Models\AuditLog;
 use App\Models\CapitalEntry;
 use App\Models\Client;
 use App\Models\ClientInfoChallenge;
+use App\Models\ClientOrder;
 use App\Models\CostRecognition;
 use App\Models\Expense;
 use App\Models\ExpensePayment;
@@ -17,21 +18,26 @@ use App\Models\LoanReceivable;
 use App\Models\LoanReceivableRepayment;
 use App\Models\Payment;
 use App\Models\Payout;
+use App\Models\StockAllocation;
 use App\Models\Supplier;
 use App\Models\SupplierPayment;
 use App\Models\SupplierReturn;
 use App\Services\AccountingService;
 use App\Services\AdvanceSettlementService;
 use App\Services\ClientApiIntegrations;
+use App\Services\Inventory;
 use App\Services\InventoryEngine;
 use App\Services\InventoryHandoverService;
 use App\Services\InventoryValuation;
 use App\Services\InvestmentService;
 use App\Services\Ledger;
 use App\Services\LoanReceivableService;
+use App\Services\ProjectStockAllocation;
+use App\Services\Receiving;
 use App\Services\Sourcing;
 use App\Services\SourcingArrival;
 use App\Services\SourcingPayments;
+use App\Services\StockLocations;
 use App\Services\SubmissionGuard;
 use App\Services\SupplierReturnService;
 use Illuminate\Support\Carbon;
@@ -511,4 +517,57 @@ it('keeps submission_keys on InnoDB and rolls a failed save back with its key so
 
     $entry = SubmissionGuard::once($key, 'capital.record', 1, $payload, fn () => CapitalEntry::create(['partner_id' => $this->co->partner('A')->id, 'kind' => 'contribution', 'amount' => 5, 'paid_on' => '2026-11-09', 'created_by' => 1]));
     expect($entry->exists)->toBeTrue()->and(CapitalEntry::count())->toBe(2);
+});
+
+/** A lot of ten units owned by project one, received and billed to the client, plus a second and third project of the same client. */
+function ccProjectStock(): array
+{
+    require_once __DIR__.'/../Support/inventory_helpers.php';
+    $s = unreceivedLot(test()->co, '10');
+    $s['line']->refresh();
+    Receiving::receive($s['line'], '10', '10', '0', '2026-02-10', StockLocations::default()->id, 'GRN-1', null, null, $s['user']);
+    test()->co->post('clients', 'sourcing.lots.bill-client', ['project_id' => $s['project']->id], $s['lot'])->assertSessionHasNoErrors();
+    $s['second'] = test()->co->project($s['client'], 'Second');
+    $s['third'] = test()->co->project($s['client'], 'Third');
+    Carbon::setTestNow('2026-11-10');
+
+    return $s;
+}
+
+function ccDraft(array $s, $project, string $ref, string $qty): int
+{
+    test()->co->post('clients', 'product.orders.store', ['project_id' => $project->id, 'reference' => $ref, 'ordered_on' => '2026-11-10', 'items' => [['product_id' => $s['product']->id, 'quantity' => $qty, 'price' => '10']]])->assertSessionMissing('error');
+
+    return ClientOrder::where('reference', $ref)->firstOrFail()->id;
+}
+
+it('never lets simultaneous confirmations take more than a project is entitled to', function () {
+    $s = ccProjectStock();
+    ProjectStockAllocation::allocate($s['line'], $s['second'], '4', 'Share', test()->co->users['finance']);   // project two may sell 4, project one 6
+    $b1 = ccDraft($s, $s['second'], 'B1', '3');
+    $b2 = ccDraft($s, $s['second'], 'B2', '3');
+    $a1 = ccDraft($s, $s['project'], 'A1', '6');
+    $a2 = ccDraft($s, $s['project'], 'A2', '6');
+    $orders = [$b1, $b2, $a1, $a2];
+
+    $results = ccRun('order_confirm', 4, fn (int $i) => ['order' => $orders[$i]]);
+
+    $confirmed = ClientOrder::whereIn('id', $orders)->where('delivery_status', 'confirmed')->pluck('reference')->all();
+    expect(collect($results)->where('ok', true))->toHaveCount(2)                                              // one of B1/B2 and one of A1/A2; the others are refused
+        ->and(ProjectStockAllocation::committed($s['line'], $s['second']->id))->toBe('3.00')
+        ->and(ProjectStockAllocation::committed($s['line'], $s['project']->id))->toBe('6.00')
+        ->and(Inventory::balances($s['line'])['reserved'])->toBe('9.00')->and(Inventory::balances($s['line'])['available'])->toBe('1.00')
+        ->and(count(array_intersect($confirmed, ['B1', 'B2'])))->toBe(1)->and(count(array_intersect($confirmed, ['A1', 'A2'])))->toBe(1)
+        ->and(Inventory::reconciles($s['line']))->toBeTrue();
+});
+
+it('never lets simultaneous allocations hand out more units than the home project has free', function () {
+    $s = ccProjectStock();
+    $projects = [$s['second']->id, $s['third']->id];
+
+    $results = ccRun('stock_allocate', 2, fn (int $i) => ['line' => $s['line']->id, 'project' => $projects[$i], 'qty' => '7']);
+
+    expect(collect($results)->where('ok', true))->toHaveCount(1)                                              // 7 + 7 > 10: exactly one fits
+        ->and(StockAllocation::whereNull('cancelled_at')->sum('quantity'))->toEqual(7)
+        ->and(ProjectStockAllocation::remaining($s['line']->refresh(), $s['project']->id))->toBe('3.00');
 });

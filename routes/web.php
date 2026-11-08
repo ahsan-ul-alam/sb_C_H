@@ -267,50 +267,53 @@ Route::middleware('auth')->group(function () {
             Route::post('order-items/{item}/inspect', [ProductOperationsController::class, 'itemInspect'])->name('items.inspect');
         });
         Route::post('orders/{order}/collect', [ProductOperationsController::class, 'orderCollect'])->name('orders.collect')->middleware('can:collection.record');
-        Route::get('refunds', [ProductOperationsController::class, 'refunds'])->name('refunds');
+        Route::get('refunds', [ProductOperationsController::class, 'refunds'])->name('refunds')->middleware('cross.project');
         Route::post('orders/{order}/refunds', [ProductOperationsController::class, 'refundStore'])->name('refunds.store')->middleware('can:orders.manage');
         Route::post('refunds/{refund}/cancel', [ProductOperationsController::class, 'refundCancel'])->name('refunds.cancel')->middleware('can:orders.manage');
-        Route::post('refunds/{refund}/decide', [ProductOperationsController::class, 'refundDecide'])->name('refunds.decide')->middleware('can:order.refund.approve');
-        Route::post('refunds/{refund}/pay', [ProductOperationsController::class, 'refundPay'])->name('refunds.pay')->middleware('can:settlement.record');
+        Route::post('refunds/{refund}/decide', [ProductOperationsController::class, 'refundDecide'])->name('refunds.decide')->middleware(['can:order.refund.approve', 'cross.project']);
+        Route::post('refunds/{refund}/pay', [ProductOperationsController::class, 'refundPay'])->name('refunds.pay')->middleware(['can:settlement.record', 'cross.project']);
 
         Route::middleware('can:settlement.view')->group(function () {
-            Route::get('settlements', [ProductOperationsController::class, 'settlements'])->name('settlements');
+            Route::get('settlements', [ProductOperationsController::class, 'settlements'])->name('settlements')->middleware('cross.project');
             Route::get('settlements/{client}', [ProductOperationsController::class, 'settlementShow'])->name('settlements.show');
         });
-        Route::post('settlements/{client}', [ProductOperationsController::class, 'settlementStore'])->name('settlements.store')->middleware('can:settlement.record');
+        Route::post('settlements/{client}', [ProductOperationsController::class, 'settlementStore'])->name('settlements.store')->middleware(['can:settlement.record', 'cross.project']);
     });
 
     // Advanced inventory and sales screens. Reading needs inventory.view; receiving needs sourcing.manage (as the arrival it extends); transfers, locations and
     // low-stock levels need inventory.adjust. Nothing here edits a stock balance: every write is a recorded arrival, transfer or the existing order steps.
     Route::middleware('can:inventory.view')->prefix('stock')->name('stock.')->group(function () {
-        Route::get('/', [StockOperationsController::class, 'overview'])->name('overview');
+        Route::get('/', [StockOperationsController::class, 'overview'])->name('overview')->middleware('cross.project');
         Route::get('projects', [StockOperationsController::class, 'projects'])->name('projects');
-        Route::get('movements', [StockOperationsController::class, 'movements'])->name('movements');
-        Route::get('receiving', [StockOperationsController::class, 'receiving'])->name('receiving');
-        Route::post('receiving/{line}', [StockOperationsController::class, 'receive'])->name('receive')->middleware('can:sourcing.manage')->whereNumber('line');
-        Route::post('arrivals/{event}/evidence', [StockOperationsController::class, 'evidenceStore'])->name('evidence.store')->middleware('can:sourcing.manage')->whereNumber('event');
-        Route::get('evidence/{document}', [StockOperationsController::class, 'evidenceDownload'])->name('evidence.download')->whereNumber('document');
+        Route::get('movements', [StockOperationsController::class, 'movements'])->name('movements')->middleware('cross.project');
+        Route::get('receiving', [StockOperationsController::class, 'receiving'])->name('receiving')->middleware('cross.project');
+        Route::post('receiving/{line}', [StockOperationsController::class, 'receive'])->name('receive')->middleware('cross.project')->middleware('can:sourcing.manage')->whereNumber('line');
+        Route::post('arrivals/{event}/evidence', [StockOperationsController::class, 'evidenceStore'])->name('evidence.store')->middleware('cross.project')->middleware('can:sourcing.manage')->whereNumber('event');
+        Route::get('evidence/{document}', [StockOperationsController::class, 'evidenceDownload'])->name('evidence.download')->middleware('cross.project')->whereNumber('document');
         Route::post('products/{product}/image', [StockOperationsController::class, 'productImageStore'])->name('products.image.store')->middleware('can:sourcing.manage')->whereNumber('product');
         Route::get('products/{product}/image', [StockOperationsController::class, 'productImage'])->name('products.image')->whereNumber('product');
-        Route::get('reservations', [StockOperationsController::class, 'reservations'])->name('reservations');
-        Route::get('transfers', [StockOperationsController::class, 'transfers'])->name('transfers');
-        Route::middleware('can:inventory.adjust')->group(function () {
+        Route::get('reservations', [StockOperationsController::class, 'reservations'])->name('reservations')->middleware('cross.project');
+        Route::get('transfers', [StockOperationsController::class, 'transfers'])->name('transfers')->middleware('cross.project');
+        Route::post('allocations', [StockOperationsController::class, 'allocationStore'])->name('allocations.store')->middleware('can:inventory.adjust');
+        Route::post('allocations/{allocation}/cancel', [StockOperationsController::class, 'allocationCancel'])->name('allocations.cancel')->middleware('can:inventory.adjust')->whereNumber('allocation');
+        Route::middleware(['can:inventory.adjust', 'cross.project'])->group(function () {
             Route::post('locations', [StockOperationsController::class, 'locationStore'])->name('locations.store');
             Route::post('transfers', [StockOperationsController::class, 'transferStore'])->name('transfers.store');
             Route::post('transfers/{transfer}/complete', [StockOperationsController::class, 'transferComplete'])->name('transfers.complete');
             Route::post('transfers/{transfer}/cancel', [StockOperationsController::class, 'transferCancel'])->name('transfers.cancel');
             Route::post('thresholds', [StockOperationsController::class, 'thresholdStore'])->name('thresholds.store');
         });
-        Route::get('exceptions', [StockOperationsController::class, 'exceptions'])->name('exceptions');
-        Route::get('sales', [StockOperationsController::class, 'sales'])->name('sales');
-        Route::get('reports', [StockOperationsController::class, 'reports'])->name('reports');
-        Route::get('reports/{type}', [StockOperationsController::class, 'report'])->name('report');
+        Route::get('exceptions', [StockOperationsController::class, 'exceptions'])->name('exceptions')->middleware('cross.project');
+        Route::get('sales', [StockOperationsController::class, 'sales'])->name('sales')->middleware('cross.project');
+        Route::get('reports', [StockOperationsController::class, 'reports'])->name('reports')->middleware('cross.project');
+        Route::get('reports/{type}', [StockOperationsController::class, 'report'])->name('report')->middleware('cross.project');
     });
 
     Route::middleware('can:users.manage')->group(function () {
         Route::get('users', [UserController::class, 'index'])->name('users.index');
         Route::post('users', [UserController::class, 'store'])->name('users.store');
         Route::put('users/{user}', [UserController::class, 'update'])->name('users.update');
+        Route::post('users/{user}/access', [UserController::class, 'access'])->name('users.access');
     });
 
     Route::prefix('finance')->name('finance.')->group(function () {
