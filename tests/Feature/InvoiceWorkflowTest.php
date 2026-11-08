@@ -14,6 +14,8 @@ use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
+require_once __DIR__.'/../Support/helpers.php';
+
 uses(RefreshDatabase::class);
 
 beforeEach(function () {
@@ -110,13 +112,13 @@ test('segment invoice can be partially paid then fully paid without double count
         ->toContain('1 service')->toContain('Onboarding')->toContain('Multiple methods');
 
     // Removing payments steps back to PARTIALLY PAID, then DUE once nothing is paid.
-    $this->delete(route('payments.destroy', $invoice->payments()->latest('id')->first()))->assertRedirect();
+    approvedPaymentVoid($invoice->payments()->latest('id')->first());
     expect($invoice->refresh()->status)->toBe(InvoiceStatus::Partial)
         ->and($invoice->status->stamp())->toBe('PARTIALLY PAID')
         ->and($invoice->balance())->toBe(600_000)
         ->and($segment->receivedAmount())->toBe(400_000);
 
-    $this->delete(route('payments.destroy', $invoice->payments()->first()))->assertRedirect();
+    approvedPaymentVoid($invoice->payments()->first());
     expect($invoice->refresh()->status->stamp())->toBe('DUE')
         ->and($invoice->balance())->toBe(1_000_000);
 });

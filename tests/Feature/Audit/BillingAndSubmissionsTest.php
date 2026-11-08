@@ -56,8 +56,8 @@ it('credits a segment payment once across invoices, in oldest-first order, and f
     $payment = Payment::first();
     $co->as('finance')->put(route('payments.update', $payment), ['amount' => '5000', 'paid_on' => '2026-02-05', 'method' => 'cash'])->assertSessionHasNoErrors();
     expect($one->refresh()->amount_paid)->toBe(500_000)->and($two->refresh()->amount_paid)->toBe(0);
-    $co->as('finance')->delete(route('payments.destroy', $payment))->assertSessionHasNoErrors();
-    expect($one->refresh()->amount_paid)->toBe(0)->and($two->refresh()->status->value)->toBe('unpaid')->and(Payment::count())->toBe(0);
+    $co->voidPayment($payment);
+    expect($one->refresh()->amount_paid)->toBe(0)->and($two->refresh()->status->value)->toBe('unpaid')->and(Payment::count())->toBe(0)->and(Payment::withVoided()->count())->toBe(1);
 
     // Scenario E and invalid amounts: nothing is stored.
     foreach (['0', '-50', '10000.01', 'abc'] as $bad) {

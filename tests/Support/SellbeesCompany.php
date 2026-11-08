@@ -8,6 +8,8 @@ use App\Models\Expense;
 use App\Models\FinancialAccount;
 use App\Models\Invoice;
 use App\Models\Partner;
+use App\Models\Payment;
+use App\Models\PaymentVoidRequest;
 use App\Models\PolicyVersion;
 use App\Models\Project;
 use App\Models\Resolution;
@@ -89,6 +91,16 @@ class SellbeesCompany
     public function post(string $who, string $route, array $data = [], mixed $param = null): TestResponse
     {
         return $this->as($who)->post(route($route, $param), $data);
+    }
+
+    /** Void a customer payment through the real workflow: Finance proposes with reason and evidence, a Board member approves. */
+    public function voidPayment(Payment $payment, string $evidence = 'STMT-1'): PaymentVoidRequest
+    {
+        $this->post('finance', 'payments.void-requests.store', ['reason' => 'Duplicate entry', 'evidence' => $evidence], $payment)->assertSessionHasNoErrors()->assertSessionMissing('error');
+        $request = PaymentVoidRequest::where('payment_id', $payment->id)->latest('id')->firstOrFail();
+        $this->post('board', 'finance.payment-voids.decide', ['decision' => 'approve'], $request)->assertSessionHasNoErrors()->assertSessionMissing('error');
+
+        return $request->refresh();
     }
 
     /** Invest capital through the real Finance → Board workflow. */

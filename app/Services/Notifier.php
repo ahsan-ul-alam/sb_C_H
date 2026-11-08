@@ -10,6 +10,7 @@ use App\Models\ExitSettlement;
 use App\Models\Expense;
 use App\Models\OpeningBatch;
 use App\Models\OpeningLine;
+use App\Models\PaymentVoidRequest;
 use App\Models\Payout;
 use App\Models\PolicyVersion;
 use App\Models\Resolution;
@@ -45,6 +46,13 @@ class Notifier
                 }
             });
         }
+
+        self::listen(PaymentVoidRequest::class, 'created', fn ($r) => Notify::send(Notify::withPermission('payment.void.approve', [$r->requested_by]), 'Payment void awaiting decision', 'A payment void needs a Board decision.', 'finance.payment-voids', 'approval', 'paymentvoid:'.$r->id.':decide'));
+        self::listen(PaymentVoidRequest::class, 'updated', function ($r) {
+            if ($r->wasChanged('status') && in_array($r->status, ['approved', 'rejected'], true)) {
+                Notify::send(Notify::user($r->requested_by), 'Payment void '.$r->status, 'Your payment void request was '.$r->status.'.', 'finance.payment-voids', 'result', 'paymentvoid:'.$r->id.':'.$r->status);
+            }
+        });
 
         self::listen(AccountingPeriod::class, 'created', fn ($p) => $p->closed_by === null ? null : Notify::send(Notify::withPermission('period.verify', [$p->closed_by]), 'Period awaiting verification', 'Period '.$p->month.' was closed and needs verification.', 'finance.periods.show', 'approval', 'period:'.$p->id.':verify', [$p]));
         self::listen(AccountingPeriod::class, 'updated', function ($p) {

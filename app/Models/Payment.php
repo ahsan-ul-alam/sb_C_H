@@ -3,9 +3,9 @@
 namespace App\Models;
 
 use App\Enums\PaymentMethod;
-use App\Services\Audit;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -18,6 +18,8 @@ use Illuminate\Validation\ValidationException;
 #[Fillable(['amount', 'paid_on', 'method', 'reference', 'notes', 'financial_account_id'])]
 class Payment extends Model
 {
+    public const ACTIVE_SCOPE = 'active';
+
     /**
      * Get the attributes that should be cast.
      *
@@ -28,6 +30,7 @@ class Payment extends Model
         return [
             'amount' => 'integer',
             'paid_on' => 'date',
+            'voided_at' => 'datetime',
             'method' => PaymentMethod::class,
         ];
     }
@@ -38,6 +41,15 @@ class Payment extends Model
      */
     protected static function booted(): void
     {
+        // Every ordinary query sees ACTIVE payments only, so a voided payment drops out of collections, invoice balances, project receipts, cash and
+        // dashboards exactly once, with no per-query bookkeeping. History screens opt back in with Payment::withVoided().
+        static::addGlobalScope(self::ACTIVE_SCOPE, fn (Builder $query) => $query->whereNull($query->getModel()->qualifyColumn('voided_at')));
+
+        // A payment is financial evidence: it is voided through an approved PaymentVoidRequest and never deleted.
+        static::deleting(function (): void {
+            throw ValidationException::withMessages(['payment' => 'A payment is never deleted. Request a void with a reason and evidence; a different Board member approves it.']);
+        });
+
         $guard = function (self $payment): void {
             $currency = Project::whereKey($payment->project_id)->value('currency');
             if ($currency !== config('finance.currency')) {
@@ -51,14 +63,17 @@ class Payment extends Model
             }
         };
         static::saving($guard);
-        static::deleting($guard);
-        // A payment that already carries advance/refund records is financial evidence and cannot be voided.
-        static::deleting(function (self $payment): void {
-            if (RevenueAdjustment::where('payment_id', $payment->id)->exists()) {
-                throw ValidationException::withMessages(['paid_on' => 'This payment has advance/refund records in the finance ledger and cannot be deleted. Record a refund instead.']);
-            }
-        });
-        static::deleted(fn (self $payment) => Audit::log('payment.voided', 'payment '.$payment->id, 'amount '.$payment->amount.' paid '.$payment->paid_on->toDateString()));
+    }
+
+    /** Every payment including voided ones: for history, audit and the void register only; never for a total. */
+    public static function withVoided(): Builder
+    {
+        return static::withoutGlobalScope(self::ACTIVE_SCOPE);
+    }
+
+    public function isVoided(): bool
+    {
+        return $this->voided_at !== null;
     }
 
     /**

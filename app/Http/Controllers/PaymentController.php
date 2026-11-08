@@ -28,7 +28,8 @@ class PaymentController extends Controller
         $search = trim((string) $request->query('q'));
         $range = $request->filled('range') ? DateRange::fromRequest($request) : null;
 
-        $query = Payment::query()
+        // The list keeps voided payments visible (marked) for audit; every total below counts active payments only.
+        $query = Payment::withVoided()
             ->with(['project.client', 'invoice', 'allocations.segment'])
             ->when($search !== '', fn ($q) => $q->where(fn ($q) => $q
                 ->where('reference', 'like', "%{$search}%")
@@ -43,6 +44,7 @@ class PaymentController extends Controller
 
         $totalsByCurrency = (clone $query)
             ->setEagerLoads([])
+            ->whereNull('payments.voided_at')
             ->join('projects', 'projects.id', '=', 'payments.project_id')
             ->selectRaw('projects.currency as currency, SUM(payments.amount) as total, COUNT(*) as count')
             ->groupBy('projects.currency')
@@ -158,14 +160,6 @@ class PaymentController extends Controller
         $this->recorder->save($payment, $payment->project, $payment->invoice, $this->validated($request), $allocations, $segment);
 
         return $this->redirectFor($payment)->with('status', 'Payment updated.');
-    }
-
-    public function destroy(Payment $payment): RedirectResponse
-    {
-        $redirect = $this->redirectFor($payment);
-        $this->recorder->delete($payment);
-
-        return $redirect->with('status', 'Payment removed. Balances recalculated.');
     }
 
     private function redirectFor(Payment $payment): RedirectResponse

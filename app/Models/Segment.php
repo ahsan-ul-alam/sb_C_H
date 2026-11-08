@@ -51,7 +51,9 @@ class Segment extends Model
      */
     public function receivedAmount(?int $exceptPaymentId = null): int
     {
+        // whereHas('payment') applies the Payment default scope: allocations of a voided payment are kept but no longer count as received.
         return (int) $this->allocations()
+            ->whereHas('payment')
             ->when($exceptPaymentId, fn ($query) => $query->where('payment_id', '!=', $exceptPaymentId))
             ->sum('amount');
     }

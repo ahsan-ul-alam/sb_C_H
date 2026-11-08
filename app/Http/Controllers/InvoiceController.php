@@ -6,6 +6,7 @@ use App\Enums\InvoiceStatus;
 use App\Models\BusinessSetting;
 use App\Models\Client;
 use App\Models\Invoice;
+use App\Models\Payment;
 use App\Models\Project;
 use App\Models\Segment;
 use App\Support\DateRange;
@@ -154,8 +155,8 @@ class InvoiceController extends Controller
 
     public function destroy(Invoice $invoice): RedirectResponse
     {
-        if ($invoice->payments()->exists()) {
-            return back()->with('error', 'This invoice has payments and cannot be deleted. Remove the payments first.');
+        if ($invoice->payments()->withoutGlobalScope(Payment::ACTIVE_SCOPE)->exists()) {
+            return back()->with('error', 'This invoice has payments (including voided ones, which are kept for audit) and cannot be deleted.');
         }
 
         $project = $invoice->project;

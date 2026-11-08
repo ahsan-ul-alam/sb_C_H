@@ -27,7 +27,7 @@ class Permissions
     public const GOVERNANCE = [
         'policy.approve', 'allocation.approve', 'payout.approve', 'resolution.decide', 'period.verify',
         'exit.approve', 'capital.verify', 'expense.verify', 'opening.approve', 'sourcing.fund.approve', 'sourcing.negative_margin',
-        'transfer.void', 'client.expense.approve', 'loan.verify', 'income.verify', 'cashalloc.approve', 'sourcing.advance.approve', 'inventory.handover.approve', 'inventory.loss.approve', 'supplier.return.approve', 'revenue.event.approve', 'receipt.classification.approve', 'ownership.approve',
+        'transfer.void', 'client.expense.approve', 'loan.verify', 'income.verify', 'cashalloc.approve', 'sourcing.advance.approve', 'inventory.handover.approve', 'inventory.loss.approve', 'supplier.return.approve', 'revenue.event.approve', 'receipt.classification.approve', 'ownership.approve', 'payment.void.approve',
     ];
 
     /**
@@ -39,13 +39,13 @@ class Permissions
         $roles = [
             'board_member' => [...$view, 'dashboard.business', 'client.expense.approve', 'client.profit.view', 'policy.create', 'policy.approve', 'allocation.approve', 'payout.approve',
                 'resolution.create', 'resolution.decide', 'period.verify', 'exit.approve', 'partner.manage', 'capital.verify', 'expense.verify', 'opening.approve', 'document.upload', 'transfer.void', 'loan.verify', 'income.verify', 'cashalloc.approve', 'reconcile.review',
-                'sourcing.view', 'sourcing.reports', 'sourcing.price.approve', 'sourcing.negative_margin', 'sourcing.fund.approve', 'sourcing.advance.approve', 'inventory.handover.approve', 'inventory.loss.approve', 'supplier.return.approve', 'revenue.event.approve', 'sourcing.supplier.secrets', 'inventory.view', 'settlement.view', 'commission.view', 'order.refund.approve', 'receipt.classification.approve', 'ownership.approve'],
+                'sourcing.view', 'sourcing.reports', 'sourcing.price.approve', 'sourcing.negative_margin', 'sourcing.fund.approve', 'sourcing.advance.approve', 'inventory.handover.approve', 'inventory.loss.approve', 'supplier.return.approve', 'revenue.event.approve', 'sourcing.supplier.secrets', 'inventory.view', 'settlement.view', 'commission.view', 'order.refund.approve', 'receipt.classification.approve', 'ownership.approve', 'payment.void.approve'],
             'finance' => ['clienthub', ...$view, 'dashboard.business', 'client.expense.record', 'client.expense.review', 'client.profit.declare', 'client.profit.view', 'capital.record', 'expense.record', 'period.close', 'allocation.prepare',
                 'allocation.post', 'payout.pay', 'resolution.pay', 'exit.prepare', 'exit.pay', 'policy.create', 'revenue.record', 'opening.prepare', 'document.upload',
                 'account.manage', 'transfer.record', 'expense.pay', 'loan.record', 'income.record', 'reconcile.review',
                 'sourcing.view', 'sourcing.reports', 'sourcing.manage', 'sourcing.override', 'sourcing.price.approve', 'sourcing.payment.record',
                 'sourcing.fund.request', 'sourcing.fund.utilize', 'sourcing.settle', 'sourcing.supplier.secrets',
-                'commission.view', 'commission.manage', 'commission.rates', 'inventory.view', 'orders.manage', 'orders.discount', 'order.refund.approve', 'inventory.adjust', 'inventory.handover.propose', 'inventory.loss.propose', 'inventory.loss.review', 'supplier.return.propose', 'supplier.return.review', 'revenue.event.propose', 'collection.record', 'settlement.view', 'settlement.record'],
+                'commission.view', 'commission.manage', 'commission.rates', 'inventory.view', 'orders.manage', 'orders.discount', 'order.refund.approve', 'inventory.adjust', 'inventory.handover.propose', 'inventory.loss.propose', 'inventory.loss.review', 'supplier.return.propose', 'supplier.return.review', 'revenue.event.propose', 'collection.record', 'settlement.view', 'settlement.record', 'payment.void.propose'],
             'hr' => ['resolution.create'],
             'partner' => ['own.view', 'payout.request', 'resolution.create'],
             'client_management' => ['clienthub', 'client.profit.view', 'sourcing.view', 'sourcing.manage', 'sourcing.fund.request', 'commission.view', 'commission.manage', 'inventory.view', 'inventory.handover.propose', 'inventory.loss.propose', 'supplier.return.propose', 'orders.manage', 'collection.record', 'settlement.view'],

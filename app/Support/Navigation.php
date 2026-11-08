@@ -77,6 +77,7 @@ class Navigation
                 ['Account Statements', 'finance.statements', 'finance.view', 'cash', ['finance.statements*']],
                 ['Historical Reconciliation', 'finance.historical', 'finance.view', 'check-circle', ['finance.historical*']],
                 ['Loans Receivable', 'finance.loans-receivable', 'finance.view', 'cash', ['finance.loans-receivable*']],
+                ['Payment Voids', 'finance.payment-voids', 'finance.view', 'check-circle', ['finance.payment-voids*']],
                 ['Other Income', 'finance.other-income', 'finance.view', 'cash', ['finance.other-income*']],
                 ['Periods & Profit', 'finance.periods', 'finance.view', 'invoice', ['finance.periods*', 'finance.allocations*']],
                 ['Advances & Refunds', 'finance.revenue', 'finance.view', 'wallet', ['finance.revenue*']],

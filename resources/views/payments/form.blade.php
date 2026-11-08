@@ -128,10 +128,9 @@
                 </div>
             </section>
             @if ($editing)
-                <form method="POST" action="{{ route('payments.destroy', $payment) }}" data-confirm="Remove this payment of {{ Money::format($payment->amount, $cur) }}? Balances and the invoice stamp will be recalculated.">
-                    @csrf @method('DELETE')
-                    <button type="submit" class="btn btn-danger btn-sm"><x-icon name="trash" class="icon-sm" /> Remove payment</button>
-                </form>
+                @can('payment.void.propose')
+                    @include('payments.void-form', ['payment' => $payment, 'compact' => false])
+                @endcan
             @endif
         </aside>
     </div>

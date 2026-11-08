@@ -12,6 +12,8 @@ use App\Support\Money;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 
+require_once __DIR__.'/../Support/helpers.php';
+
 uses(RefreshDatabase::class);
 
 beforeEach(function () {
@@ -102,7 +104,7 @@ test('E: editing or deleting a segment payment after invoicing updates the invoi
     expectInvoice($invoice, 250_000, 750_000, InvoiceStatus::Partial);
     expect(received($this->project))->toBe(250_000);
 
-    $this->delete(route('payments.destroy', $payment))->assertRedirect();
+    approvedPaymentVoid($payment);
     expectInvoice($invoice, 0, 1_000_000, InvoiceStatus::Unpaid);
     expect(received($this->project))->toBe(0);
 });
@@ -117,7 +119,7 @@ test('F: two invoices on one segment share the segment payment once, oldest firs
     expect(received($this->project))->toBe(1_000_000);
 
     // Partial payment is not credited to both invoices.
-    $this->delete(route('payments.destroy', Payment::sole()))->assertRedirect();
+    approvedPaymentVoid(Payment::sole());
     paySegment($this, $this->segment, '4000');
     expectInvoice($first, 400_000, 600_000, InvoiceStatus::Partial);
     expectInvoice($second, 0, 1_000_000, InvoiceStatus::Unpaid);

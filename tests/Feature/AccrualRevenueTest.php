@@ -176,7 +176,7 @@ it('applies a payment only once and refuses to void a payment that revenue has a
     arEvent($this->project, 'recognition', 1_000_000, ['invoice_id' => $this->invoice->id]);        // applies the 400,000, receivable 600,000
     $payment = Payment::firstOrFail();
 
-    $this->co->post('finance', 'payments.destroy', [], $payment);
+    $this->co->post('finance', 'payments.void-requests.store', ['reason' => 'Duplicate', 'evidence' => 'STMT-9'], $payment);
     expect(Payment::count())->toBe(1)->and(AccrualRevenue::balances($this->project)['advances'])->toBe(0)->and(AccrualRevenue::reconcile()['ok'])->toBeTrue();
     expect(RevenueEvent::where('kind', 'application')->count())->toBe(0);
 });

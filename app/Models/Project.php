@@ -67,7 +67,7 @@ class Project extends Model
      */
     public function canBeDeleted(): bool
     {
-        return ! $this->invoices()->exists() && ! $this->payments()->exists();
+        return ! $this->invoices()->exists() && ! $this->payments()->withoutGlobalScope(Payment::ACTIVE_SCOPE)->exists();
     }
 
     /**

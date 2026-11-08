@@ -7,6 +7,7 @@ use App\Models\FinancialAccount;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
 use App\Models\Payment;
+use App\Models\PaymentVoidRequest;
 use App\Models\Project;
 use App\Models\RevenueAdjustment;
 use App\Models\Segment;
@@ -331,7 +332,7 @@ it('reverses a verified capital entry with a reversing entry and keeps the capit
     rtAssertLedgerSound();
 });
 
-it('reverses and re-posts an edited payment and reverses a voided one, keeping every entry balanced and nothing double counted', function () {
+it('reverses and re-posts an edited payment and refuses to void a journaled one, keeping every entry balanced and nothing double counted', function () {
     [$project, $segment] = rtProject();
     $payment = rtPay($segment, '50000');
 
@@ -348,9 +349,10 @@ it('reverses and re-posts an edited payment and reverses a voided one, keeping e
     $this->co->as('finance')->put(route('payments.update', $payment), ['amount' => '42000', 'paid_on' => '2026-11-06', 'method' => 'cash', 'financial_account_id' => $this->bank->id])->assertSessionHasNoErrors();
     expect(AccountingService::balance($this->bank->id))->toBe(42_000 * BDT)->and(AccountingService::balance($this->cash->id))->toBe(0);
 
-    $this->co->as('finance')->delete(route('payments.destroy', $payment))->assertSessionHasNoErrors();
-    expect(Payment::count())->toBe(0)->and(AccountingService::totalCash())->toBe(0)->and(dr('income'))->toBe(0);
-    expect(ProjectFinancialService::for($project)['payments_received'])->toBe(0);
+    // A journaled payment is protected: it can no longer be voided here (a separately authorised reversal is needed), and nothing moves.
+    $this->co->post('finance', 'payments.void-requests.store', ['reason' => 'Duplicate', 'evidence' => 'STMT-9'], $payment)->assertSessionHas('error');
+    expect(Payment::count())->toBe(1)->and(PaymentVoidRequest::count())->toBe(0)->and(AccountingService::totalCash())->toBe(42_000 * BDT);
+    expect(ProjectFinancialService::for($project)['payments_received'])->toBe(42_000 * BDT);
     rtAssertLedgerSound();
 });
 

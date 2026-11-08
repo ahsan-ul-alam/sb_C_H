@@ -88,8 +88,8 @@
                     </thead>
                     <tbody>
                         @foreach ($payments as $payment)
-                            <tr>
-                                <td class="nowrap">{{ $payment->paid_on->format('j M Y') }}</td>
+                            <tr @if ($payment->isVoided()) style="opacity:.6" @endif>
+                                <td class="nowrap">{{ $payment->paid_on->format('j M Y') }}@if ($payment->isVoided())<span class="secondary">VOIDED {{ $payment->voided_at->format('j M Y') }}</span>@endif</td>
                                 <td class="primary-cell">
                                     <a href="{{ route('projects.show', $payment->project) }}">{{ $payment->project->client->name }}</a>
                                     <span class="secondary">{{ $payment->project->name }}</span>
@@ -98,7 +98,7 @@
                                 <td>{{ $payment->method->label() }}@if ($payment->reference)<span class="secondary">{{ $payment->reference }}</span>@endif</td>
                                 <td class="muted">{{ $payment->allocations->map(fn ($a) => $a->segment->name)->implode(', ') ?: '—' }}</td>
                                 <td class="num strong">{{ Money::format($payment->amount, $payment->project->currency) }}</td>
-                                <td class="num"><a href="{{ route('payments.edit', $payment) }}" class="btn btn-sm btn-ghost"><x-icon name="edit" class="icon-sm" /> Edit</a></td>
+                                <td class="num">@unless ($payment->isVoided())<a href="{{ route('payments.edit', $payment) }}" class="btn btn-sm btn-ghost"><x-icon name="edit" class="icon-sm" /> Edit</a>@endunless</td>
                             </tr>
                         @endforeach
                     </tbody>

@@ -34,6 +34,7 @@ use App\Http\Controllers\OrderCommissionController;
 use App\Http\Controllers\OtherIncomeController;
 use App\Http\Controllers\PartnerController;
 use App\Http\Controllers\PaymentController;
+use App\Http\Controllers\PaymentVoidController;
 use App\Http\Controllers\PayoutController;
 use App\Http\Controllers\PeriodController;
 use App\Http\Controllers\PolicyController;
@@ -119,7 +120,7 @@ Route::middleware('auth')->group(function () {
         Route::post('invoices/{invoice}/mark-paid', [PaymentController::class, 'markPaid'])->name('invoices.mark-paid');
         Route::get('payments/{payment}/edit', [PaymentController::class, 'edit'])->name('payments.edit');
         Route::put('payments/{payment}', [PaymentController::class, 'update'])->name('payments.update');
-        Route::delete('payments/{payment}', [PaymentController::class, 'destroy'])->name('payments.destroy');
+        Route::post('payments/{payment}/void-requests', [PaymentVoidController::class, 'store'])->name('payments.void-requests.store')->middleware('can:payment.void.propose');
 
         Route::get('settings', [SettingsController::class, 'edit'])->name('settings.edit');
         Route::put('settings', [SettingsController::class, 'update'])->name('settings.update');
@@ -337,6 +338,7 @@ Route::middleware('auth')->group(function () {
             Route::get('periods/{period}', [PeriodController::class, 'show'])->name('periods.show');
             Route::get('exits', [ExitController::class, 'index'])->name('exits');
             Route::get('revenue', [RevenueController::class, 'index'])->name('revenue');
+            Route::get('payment-voids', [PaymentVoidController::class, 'index'])->name('payment-voids');
             Route::get('opening', [OpeningController::class, 'index'])->name('opening');
             Route::get('reports', [ReportController::class, 'index'])->name('reports');
             Route::get('investment', [FinancialStatementsController::class, 'investment'])->name('investment');
@@ -449,6 +451,7 @@ Route::middleware('auth')->group(function () {
         Route::post('exits/{exit}/cancel', [ExitController::class, 'cancel'])->name('exits.cancel')->middleware('can:exit.prepare');
         Route::post('revenue/{payment}', [RevenueController::class, 'store'])->name('revenue.store')->middleware('can:revenue.record');
         Route::post('revenue-adjustments/{adjustment}/decide', [RevenueController::class, 'decide'])->name('revenue.decide')->middleware('can:expense.verify');
+        Route::post('payment-voids/{voidRequest}/decide', [PaymentVoidController::class, 'decide'])->name('payment-voids.decide')->middleware('can:payment.void.approve');
         Route::post('opening', [OpeningController::class, 'store'])->name('opening.store')->middleware('can:opening.prepare');
         Route::post('opening/{batch}/lines', [OpeningController::class, 'addLine'])->name('opening.lines')->middleware('can:opening.prepare');
         Route::post('opening/{batch}/approve', [OpeningController::class, 'approve'])->name('opening.approve')->middleware('can:opening.approve');

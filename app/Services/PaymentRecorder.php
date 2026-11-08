@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\FinancialAccount;
 use App\Models\Invoice;
 use App\Models\Payment;
+use App\Models\PaymentVoidRequest;
 use App\Models\Project;
 use App\Models\Segment;
 use App\Support\Money;
@@ -36,6 +37,11 @@ class PaymentRecorder
             return DB::transaction(function () use ($payment, $project, $invoice, $data, $allocations, $segment): Payment {
                 $amount = $data['amount'];
                 $exceptId = $payment->exists ? $payment->id : null;
+
+                // A payment with a void awaiting a decision is frozen, so what the Board approves is what was proposed.
+                if ($exceptId && PaymentVoidRequest::where('payment_id', $exceptId)->where('status', 'pending')->exists()) {
+                    throw ValidationException::withMessages(['amount' => 'A void is pending for this payment, so it cannot be edited. Ask the Board to reject the void first.']);
+                }
 
                 if ($amount <= 0) {
                     throw ValidationException::withMessages(['amount' => 'Amount must be greater than zero.']);
@@ -121,18 +127,6 @@ class PaymentRecorder
         }
     }
 
-    public function delete(Payment $payment): void
-    {
-        DB::transaction(function () use ($payment): void {
-            $invoice = $payment->invoice;
-            $segmentIds = $payment->allocations()->pluck('segment_id')->all();
-            LedgerPostingService::voidPayment($payment, auth()->id());
-            $payment->delete();
-            $invoice?->refreshPaymentStatus();
-            Invoice::refreshBillingSegments($segmentIds, $invoice?->id);
-        });
-    }
-
     /**
      * Spread a payment over the segments billed on the invoice, never beyond what the invoice
      * billed for a segment or what the segment still owes.
@@ -161,6 +155,7 @@ class PaymentRecorder
             $allocatedFromInvoice = (int) DB::table('payment_allocations')
                 ->join('payments', 'payments.id', '=', 'payment_allocations.payment_id')
                 ->where('payments.invoice_id', $invoice->id)
+                ->whereNull('payments.voided_at')
                 ->where('payment_allocations.segment_id', $segmentId)
                 ->when($exceptPaymentId, fn ($q) => $q->where('payments.id', '!=', $exceptPaymentId))
                 ->sum('payment_allocations.amount');

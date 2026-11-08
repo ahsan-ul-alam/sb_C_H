@@ -103,10 +103,9 @@
                                         <td class="num">
                                             <div class="row-actions">
                                                 <a href="{{ route('payments.edit', $payment) }}" class="btn btn-sm btn-ghost" title="Edit payment"><x-icon name="edit" class="icon-sm" /><span class="sr-only">Edit</span></a>
-                                                <form method="POST" action="{{ route('payments.destroy', $payment) }}" data-confirm="Remove this payment of {{ Money::format($payment->amount, $cur) }}? The invoice balance and stamp will be recalculated.">
-                                                    @csrf @method('DELETE')
-                                                    <button type="submit" class="btn btn-sm btn-ghost" title="Remove payment" style="color:var(--danger)"><x-icon name="trash" class="icon-sm" /><span class="sr-only">Remove</span></button>
-                                                </form>
+                                                @can('payment.void.propose')
+                                                    @include('payments.void-form', ['payment' => $payment, 'compact' => true])
+                                                @endcan
                                             </div>
                                         </td>
                                     </tr>

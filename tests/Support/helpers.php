@@ -2,9 +2,25 @@
 
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
+use App\Models\Payment;
+use App\Models\PaymentVoidRequest;
 use App\Models\PolicyVersion;
 use App\Models\User;
+use App\Services\PaymentVoids;
 use Illuminate\Support\Facades\DB;
+use Tests\Support\SellbeesCompany;
+
+if (! function_exists('approvedPaymentVoid')) {
+    /** Void a customer payment through the service workflow with a Finance proposer and a different Board approver (for tests that do not boot a whole company). */
+    function approvedPaymentVoid(Payment $payment): PaymentVoidRequest
+    {
+        $finance = SellbeesCompany::user('void-finance-'.uniqid().'@test.local', 'finance');
+        $board = SellbeesCompany::user('void-board-'.uniqid().'@test.local', 'board_member');
+        $request = PaymentVoids::propose($payment, $finance, 'Duplicate entry', 'STMT-1');
+
+        return PaymentVoids::decide($request, $board, true, null);
+    }
+}
 
 if (! function_exists('disposableDatabaseProblem')) {
     /**
