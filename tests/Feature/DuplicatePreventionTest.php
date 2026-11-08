@@ -9,9 +9,11 @@ use App\Services\DuplicateSubmission;
 use App\Services\Ledger;
 use App\Services\SubmissionGuard;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 use Tests\Support\SellbeesCompany;
 
 uses(RefreshDatabase::class);
@@ -25,10 +27,19 @@ it('creates a capital entry once when the same form is submitted twice, even if 
     $base = ['partner_id' => $co->partner('A')->id, 'amount' => '40000', 'paid_on' => '2026-01-05', 'submission_key' => $key];
 
     $co->post('finance', 'finance.capital.store', [...$base, 'reference' => 'BANK-1'])->assertSessionHasNoErrors();
-    $again = $co->post('finance', 'finance.capital.store', [...$base, 'reference' => 'BANK-2']); // a retry the content check cannot recognise
+    // The identical form sent again is refused too (here by the field-match check, which runs first).
+    $co->as('finance')->post(route('finance.capital.store'), [...$base, 'reference' => 'BANK-1'])->assertSessionHas('error');
     expect(CapitalEntry::count())->toBe(1);
-    $again->assertSessionHas('status', fn ($m) => str_contains($m, 'already recorded') && str_contains($m, 'CapitalEntry #'.CapitalEntry::first()->id));
-    expect(DB::table('audit_logs')->where('action', 'submission.duplicate_blocked')->count())->toBe(1);
+
+    // The same key with different details is never accepted and never treated as "the same form".
+    $co->post('finance', 'finance.capital.store', [...$base, 'reference' => 'BANK-2'])->assertSessionHasErrors('submission_key');
+    expect(CapitalEntry::count())->toBe(1)->and(DB::table('audit_logs')->where('action', 'submission.key_reuse_refused')->count())->toBe(1);
+
+    // Without a valid key nothing is saved at all.
+    foreach ([null, 'not-a-uuid'] as $bad) {
+        $co->as('finance')->post(route('finance.capital.store'), [...Arr::except($base, 'submission_key'), 'reference' => 'BANK-9', ...($bad === null ? [] : ['submission_key' => $bad])])->assertSessionHasErrors('submission_key');
+    }
+    expect(CapitalEntry::count())->toBe(1);
 
     // A genuinely separate entry from a fresh form (new key) is accepted, even with the same amount and date.
     $co->post('finance', 'finance.capital.store', [...$base, 'submission_key' => (string) Str::uuid(), 'reference' => 'BANK-3'])->assertSessionHasNoErrors();
@@ -47,7 +58,7 @@ it('records an expense and its journal once per submission key and releases the 
 
     $co->post('finance', 'finance.expenses.store', $form)->assertSessionHasNoErrors();
     $entries = JournalEntry::count();
-    $co->post('finance', 'finance.expenses.store', [...$form, 'description' => 'January rent (edited)']);
+    $co->post('finance', 'finance.expenses.store', [...$form, 'description' => 'January rent (edited)'])->assertSessionHasErrors('submission_key');
     expect(Expense::count())->toBe(1)->and(JournalEntry::count())->toBe($entries);
 });
 
@@ -59,7 +70,8 @@ it('creates an invoice once per submission key', function () {
     $form = ['issued_on' => '2026-02-01', 'items' => [['description' => 'Design', 'quantity' => '1', 'unit_price' => '5000']], 'submission_key' => $key];
 
     $co->post('finance', 'projects.invoices.store', [...$form, 'number' => 'K-1'], $project)->assertSessionHasNoErrors();
-    $co->post('finance', 'projects.invoices.store', [...$form, 'number' => 'K-2'], $project); // double click that reached the server with another number
+    $co->post('finance', 'projects.invoices.store', [...$form, 'number' => 'K-2'], $project)->assertSessionHasErrors('submission_key'); // same key, different invoice
+    $co->post('finance', 'projects.invoices.store', [...$form, 'number' => 'K-3', 'submission_key' => 'nope'], $project)->assertSessionHasErrors('submission_key');
     expect(Invoice::count())->toBe(1);
 });
 
@@ -67,14 +79,27 @@ it('claims a key only with the work, never leaves a claimed key behind, and name
     $co = SellbeesCompany::boot($this);
     $key = (string) Str::uuid();
 
-    expect(fn () => SubmissionGuard::once($key, 'test', null, fn () => throw new RuntimeException('boom')))->toThrow(RuntimeException::class, 'boom');
+    $payload = ['amount' => 100, 'reference' => 'CONFIDENTIAL-REF-77'];
+
+    expect(fn () => SubmissionGuard::once($key, 'test', 1, $payload, fn () => throw new RuntimeException('boom')))->toThrow(RuntimeException::class, 'boom');
     expect(DB::table('submission_keys')->count())->toBe(0);
 
-    $entry = SubmissionGuard::once($key, 'test', null, fn () => CapitalEntry::create(['partner_id' => $co->partner('A')->id, 'kind' => 'contribution', 'amount' => 100, 'paid_on' => '2026-01-01', 'created_by' => 1]));
-    expect(fn () => SubmissionGuard::once($key, 'test', null, fn () => throw new LogicException('must not run')))->toThrow(DuplicateSubmission::class, 'CapitalEntry #'.$entry->id);
+    $entry = SubmissionGuard::once($key, 'test', 1, $payload, fn () => CapitalEntry::create(['partner_id' => $co->partner('A')->id, 'kind' => 'contribution', 'amount' => 100, 'paid_on' => '2026-01-01', 'created_by' => 1]));
+    $again = fn () => SubmissionGuard::once($key, 'test', 1, ['reference' => 'CONFIDENTIAL-REF-77', 'amount' => 100], fn () => throw new LogicException('must not run')); // field order is irrelevant
+    expect($again)->toThrow(DuplicateSubmission::class, 'CapitalEntry #'.$entry->id);
 
-    // Without a key nothing is claimed (the content checks of the form still apply).
-    expect(SubmissionGuard::once(null, 'test', null, fn () => $entry))->toBe($entry)->and(DB::table('submission_keys')->count())->toBe(1);
+    // The audit entry names the record and the action only: no amount, reference, party or payload.
+    $log = DB::table('audit_logs')->where('action', 'submission.duplicate_blocked')->first();
+    expect(json_encode($log))->not->toContain('CONFIDENTIAL')->not->toContain('100')->and($log->subject)->toBe('CapitalEntry #'.$entry->id);
+
+    // A different payload, user or action cannot use the key; a missing or malformed key is refused and nothing is claimed.
+    foreach ([[1, 'test', ['amount' => 101]], [2, 'test', $payload], [1, 'other', $payload]] as [$user, $action, $data]) {
+        expect(fn () => SubmissionGuard::once($key, $action, $user, $data, fn () => throw new LogicException('must not run')))->toThrow(ValidationException::class);
+    }
+    foreach ([null, '', 'abc'] as $bad) {
+        expect(fn () => SubmissionGuard::once($bad, 'test', 1, $payload, fn () => throw new LogicException('must not run')))->toThrow(ValidationException::class);
+    }
+    expect(DB::table('submission_keys')->count())->toBe(1);
 });
 
 it('refuses a second journal posting from the same source and an unbalanced entry', function () {

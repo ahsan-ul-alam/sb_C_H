@@ -32,6 +32,7 @@ use App\Services\LoanReceivableService;
 use App\Services\Sourcing;
 use App\Services\SourcingArrival;
 use App\Services\SourcingPayments;
+use App\Services\SubmissionGuard;
 use App\Services\SupplierReturnService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
@@ -39,6 +40,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 use Tests\Support\SellbeesCompany;
 
 require_once __DIR__.'/../Support/helpers.php';
@@ -476,4 +478,37 @@ it('approves one enrolment once when two Board members decide at the same moment
 
     expect(collect($results)->where('ok', true)->count())->toBe(1)->and(collect($results)->where('ok', false)->every(fn ($r) => str_contains($r['error'], 'Already decided')))->toBeTrue()
         ->and($enrolment->refresh()->status)->toBe('approved')->and(AuditLog::where('action', 'inventory.engine_approved')->count())->toBe(1)->and(JournalEntry::count())->toBe(1);
+});
+
+// Kept last: the SB-number test above relies on the sequence row seeded by migrate:fresh, which the per-test wipe removes.
+it('creates exactly one capital entry from eight simultaneous submissions of one form, and refuses a reused key with other details', function () {
+    $key = (string) Str::uuid();
+    $partner = $this->co->partner('B')->id;
+    $before = CapitalEntry::count();
+    $results = ccRun('guard_capital', 8, fn () => ['key' => $key, 'partner' => $partner, 'amount' => 777700]);
+
+    expect(collect($results)->where('ok', true)->where('recorded', true))->toHaveCount(1) // one created it, the other seven were told it already exists
+        ->and(collect($results)->where('ok', true)->where('recorded', false))->toHaveCount(7)
+        ->and(CapitalEntry::count())->toBe($before + 1)->and(DB::table('submission_keys')->where('key', $key)->count())->toBe(1);
+
+    // The same key with a different amount is never accepted as "the same form".
+    expect(fn () => SubmissionGuard::once($key, 'capital.record', $this->co->users['finance']->id, ['partner_id' => $partner, 'amount' => 999900], fn () => throw new LogicException('must not run')))
+        ->toThrow(ValidationException::class)
+        ->and(CapitalEntry::count())->toBe($before + 1);
+});
+
+it('keeps submission_keys on InnoDB and rolls a failed save back with its key so a retry succeeds', function () {
+    expect(strtoupper((string) DB::selectOne('select ENGINE as e from information_schema.TABLES where TABLE_SCHEMA = database() and TABLE_NAME = ?', ['submission_keys'])->e))->toBe('INNODB');
+
+    $key = (string) Str::uuid();
+    $payload = ['amount' => 5];
+    expect(fn () => SubmissionGuard::once($key, 'capital.record', 1, $payload, function () {
+        CapitalEntry::create(['partner_id' => $this->co->partner('A')->id, 'kind' => 'contribution', 'amount' => 5, 'paid_on' => '2026-11-09', 'created_by' => 1]);
+
+        throw new RuntimeException('fails after the insert');
+    }))->toThrow(RuntimeException::class, 'fails after the insert');
+    expect(CapitalEntry::count())->toBe(1)->and(DB::table('submission_keys')->where('key', $key)->exists())->toBeFalse(); // only the opening investment remains
+
+    $entry = SubmissionGuard::once($key, 'capital.record', 1, $payload, fn () => CapitalEntry::create(['partner_id' => $this->co->partner('A')->id, 'kind' => 'contribution', 'amount' => 5, 'paid_on' => '2026-11-09', 'created_by' => 1]));
+    expect($entry->exists)->toBeTrue()->and(CapitalEntry::count())->toBe(2);
 });

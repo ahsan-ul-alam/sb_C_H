@@ -66,7 +66,7 @@ it('lets a flexible three-founder team run an expense and an allocation without 
     $c = multiUser('pc', ['board_member', 'partner', 'finance'], 'C');
 
     // A records an expense; A cannot verify it, B (Board) can, and it is posted on verification.
-    $this->actingAs($a)->post(route('finance.expenses.store'), ['category' => 'Rent', 'description' => 'Office', 'amount' => '500', 'spent_on' => today()->toDateString()]);
+    $this->actingAs($a)->post(route('finance.expenses.store'), ['submission_key' => (string) \Illuminate\Support\Str::uuid(), 'category' => 'Rent', 'description' => 'Office', 'amount' => '500', 'spent_on' => today()->toDateString()]);
     $expense = Expense::first();
     $this->actingAs($a)->post(route('finance.expenses.decide', $expense), ['decision' => 'verify'])->assertSessionHas('error');
     expect($expense->fresh()->status)->toBe('pending');

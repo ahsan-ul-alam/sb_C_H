@@ -42,13 +42,13 @@ class PayoutController extends Controller
 
     public function store(Request $request): RedirectResponse
     {
-        $data = $request->validate(['amount' => ['required', 'regex:'.Money::AMOUNT_REGEX], 'note' => ['nullable', 'string', 'max:200'], 'submission_key' => ['nullable', 'uuid']]);
+        $data = $request->validate(['amount' => ['required', 'regex:'.Money::AMOUNT_REGEX], 'note' => ['nullable', 'string', 'max:200'], 'submission_key' => ['required', 'uuid']]);
         $partnerId = $request->user()->partner_id;
         abort_unless($partnerId, 403);
 
         // A repeated submit surfaces as DuplicateSubmission (a RuntimeException): attempt() shows it, naming the payout already created.
         return $this->attempt(function () use ($request, $data, $partnerId) {
-            SubmissionGuard::once($data['submission_key'] ?? null, 'payout.request', $request->user()->id, function () use ($request, $data, $partnerId): Payout {
+            SubmissionGuard::once($data['submission_key'], 'payout.request', $request->user()->id, ['amount' => Money::toMinor($data['amount']), 'note' => $data['note'] ?? null], function () use ($request, $data, $partnerId): Payout {
                 Partner::whereKey($partnerId)->lockForUpdate()->first(); // two requests cannot both pass the entitlement check
                 $amount = Money::toMinor($data['amount']);
                 if ($amount <= 0 || $amount > $this->available($partnerId)) {

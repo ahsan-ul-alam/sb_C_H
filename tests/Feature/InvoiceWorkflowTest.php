@@ -50,7 +50,7 @@ test('segment invoice can be partially paid then fully paid without double count
     expect($segment->amount)->toBe(1_000_000);
 
     // 3. Invoice for that segment starts unpaid with a DUE stamp.
-    $this->post(route('projects.invoices.store', $project), [
+    $this->post(route('projects.invoices.store', $project), [ 'submission_key' => (string) \Illuminate\Support\Str::uuid(),
         'number' => 'INV-2026-0001',
         'issued_on' => '2026-10-29',
         'purpose' => 'Onboarding',

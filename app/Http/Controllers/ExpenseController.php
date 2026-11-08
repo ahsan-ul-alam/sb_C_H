@@ -50,7 +50,7 @@ class ExpenseController extends Controller
             'vendor' => ['nullable', 'string', 'max:120'],
             'document_id' => ['nullable', 'exists:documents,id'],
             'prepaid_months' => ['nullable', 'integer', 'between:1,60', 'required_if:classification,prepaid'],
-            'submission_key' => ['nullable', 'uuid'],
+            'submission_key' => ['required', 'uuid'],
         ]);
         $amount = Money::toMinor($data['amount']);
         if ($amount <= 0) {
@@ -77,7 +77,7 @@ class ExpenseController extends Controller
         $submissionKey = $data['submission_key'] ?? null;
         unset($data['submission_key']);
         try {
-            $expense = SubmissionGuard::once($submissionKey, 'expense.record', $request->user()->id, function () use ($data, $amount, $isAsset, $request): Expense {
+            $expense = SubmissionGuard::once($submissionKey, 'expense.record', $request->user()->id, [...$data, 'amount' => $amount, 'is_asset' => $isAsset], function () use ($data, $amount, $isAsset, $request): Expense {
                 $expense = ExpenseVerifier::record([...array_filter($data, fn ($v) => $v !== null && $v !== ''), 'amount' => $amount, 'is_asset' => $isAsset], $request->user());
                 Audit::log('expense.recorded', 'expense '.$expense->id, (string) $amount);
 

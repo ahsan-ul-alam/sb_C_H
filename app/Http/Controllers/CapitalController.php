@@ -52,7 +52,7 @@ class CapitalController extends Controller
             'financial_account_id' => ['nullable', Rule::exists('financial_accounts', 'id')->where('is_active', true)],
             'method' => ['nullable', 'string', 'max:24'],
             'notes' => ['nullable', 'string', 'max:255'],
-            'submission_key' => ['nullable', 'uuid'],
+            'submission_key' => ['required', 'uuid'],
         ]);
         $data['kind'] ??= 'contribution';
         $amount = Money::toMinor($data['amount']);
@@ -72,7 +72,7 @@ class CapitalController extends Controller
             return back()->with('error', 'An identical capital entry (#'.$duplicate->id.': same partner, amount, date and reference) already exists. If this is a genuine second contribution, give it a different reference.')->withInput();
         }
         try {
-            $entry = SubmissionGuard::once($data['submission_key'] ?? null, 'capital.record', $request->user()->id, function () use ($data, $amount, $request): CapitalEntry {
+            $entry = SubmissionGuard::once($data['submission_key'], 'capital.record', $request->user()->id, [...Arr::except($data, 'submission_key'), 'amount' => $amount], function () use ($data, $amount, $request): CapitalEntry {
                 $entry = CapitalEntry::create([...Arr::except($data, 'submission_key'), 'amount' => $amount, 'created_by' => $request->user()->id]);
                 Audit::log('capital.recorded', 'capital '.$entry->id, $data['kind'].' '.$amount);
 

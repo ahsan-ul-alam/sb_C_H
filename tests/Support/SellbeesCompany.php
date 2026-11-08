@@ -90,6 +90,11 @@ class SellbeesCompany
 
     public function post(string $who, string $route, array $data = [], mixed $param = null): TestResponse
     {
+        // The real forms always carry a fresh submission key; a test that does not care about duplicates gets one too.
+        if (in_array($route, ['finance.capital.store', 'finance.expenses.store', 'finance.payouts.store', 'projects.invoices.store'], true) && ! array_key_exists('submission_key', $data)) {
+            $data['submission_key'] = (string) Str::uuid();
+        }
+
         return $this->as($who)->post(route($route, $param), $data);
     }
 

@@ -110,8 +110,8 @@ it('keeps unauthorised users out of ClientHub, finance posting and period action
     $this->postJson(route('finance.capital.store'), [])->assertUnauthorized();
 
     // Validation failures arrive as structured JSON (what the AJAX layer reads).
-    $this->actingAs($co->users['finance'])->postJson(route('finance.capital.store'), ['amount' => 'abc'])->assertStatus(422)->assertJsonValidationErrors(['partner_id', 'amount', 'paid_on']);
-    $this->actingAs($co->users['finance'])->postJson(route('finance.expenses.store'), ['category' => 'x'])->assertStatus(422)->assertJsonStructure(['message', 'errors' => ['description', 'amount', 'spent_on']]);
+    $this->actingAs($co->users['finance'])->postJson(route('finance.capital.store'), ['submission_key' => (string) \Illuminate\Support\Str::uuid(), 'amount' => 'abc'])->assertStatus(422)->assertJsonValidationErrors(['partner_id', 'amount', 'paid_on']);
+    $this->actingAs($co->users['finance'])->postJson(route('finance.expenses.store'), ['submission_key' => (string) \Illuminate\Support\Str::uuid(), 'category' => 'x'])->assertStatus(422)->assertJsonStructure(['message', 'errors' => ['description', 'amount', 'spent_on']]);
 
     // Multi-role user holds the UNION of finance and client management and nothing more.
     $multi = $co->users['multi'];

@@ -68,7 +68,7 @@ it('notifies only eligible approvers once, and never the preparer or the benefic
     $aud = multiUser('aud', ['auditor']);
 
     // A records an expense: B (Board) is asked to verify; A (creator), Finance-only and Auditor are not.
-    $this->actingAs($a)->postJson(route('finance.expenses.store'), ['category' => 'Rent', 'description' => 'Office', 'amount' => '500', 'spent_on' => today()->toDateString()])->assertOk();
+    $this->actingAs($a)->postJson(route('finance.expenses.store'), ['submission_key' => (string) \Illuminate\Support\Str::uuid(), 'category' => 'Rent', 'description' => 'Office', 'amount' => '500', 'spent_on' => today()->toDateString()])->assertOk();
     $expense = Expense::first();
     expect(unreadFor($b))->toBe(1)->and(unreadFor($a))->toBe(0)->and(unreadFor($fin))->toBe(0)->and(unreadFor($aud))->toBe(0);
 
@@ -91,7 +91,7 @@ it('notifies only eligible approvers once, and never the preparer or the benefic
 it('lets users read only their own notifications', function () {
     $a = multiUser('pa', ['board_member', 'finance'], null);
     $b = multiUser('pb', ['board_member'], null);
-    $this->actingAs($a)->postJson(route('finance.expenses.store'), ['category' => 'Rent', 'description' => 'Office', 'amount' => '5', 'spent_on' => today()->toDateString()]);
+    $this->actingAs($a)->postJson(route('finance.expenses.store'), ['submission_key' => (string) \Illuminate\Support\Str::uuid(), 'category' => 'Rent', 'description' => 'Office', 'amount' => '5', 'spent_on' => today()->toDateString()]);
     $bn = $b->notifications()->first();
 
     $this->actingAs($a)->postJson(route('notifications.read', $bn->id))->assertNotFound();           // someone else's notification
@@ -134,7 +134,7 @@ it('never lets a missing notifications table or a rolled-back save affect the bu
 
     // Notifications table not migrated yet: the expense is still saved and the AJAX call still succeeds.
     Schema::drop('notifications');
-    $this->actingAs($a)->postJson(route('finance.expenses.store'), ['category' => 'Rent', 'description' => 'Office', 'amount' => '500', 'spent_on' => today()->toDateString()])->assertOk();
+    $this->actingAs($a)->postJson(route('finance.expenses.store'), ['submission_key' => (string) \Illuminate\Support\Str::uuid(), 'category' => 'Rent', 'description' => 'Office', 'amount' => '500', 'spent_on' => today()->toDateString()])->assertOk();
     expect(Expense::count())->toBe(1);
     $this->actingAs($b)->getJson(route('notifications.count'))->assertOk()->assertJson(['unread' => 0]);
     $this->actingAs($b)->get(route('notifications.index'))->assertOk();

@@ -171,7 +171,7 @@ it('rejects every invalid payout and reconciles the valid one', function () {
     $cash = dr('cash');
     expect(-dr('partner.payable', $co->partner('A')->id))->toBe(2_000_000);
 
-    $request = fn (string $who, string $amount) => $co->as($who)->post(route('finance.payouts.store'), ['amount' => $amount]);
+    $request = fn (string $who, string $amount) => $co->as($who)->post(route('finance.payouts.store'), ['submission_key' => (string) \Illuminate\Support\Str::uuid(), 'amount' => $amount]);
     $request('employee', '100')->assertForbidden();
     $request('finance', '100')->assertForbidden();           // not a partner
     $request('partnerA', '0')->assertSessionHas('error');

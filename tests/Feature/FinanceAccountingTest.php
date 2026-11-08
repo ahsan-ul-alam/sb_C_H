@@ -139,7 +139,7 @@ it('blocks counting capital twice and records the effective date at policy appro
     $a = Partner::firstWhere('code', 'A');
     $this->actingAs($finance)->post(route('finance.opening.store'), ['type' => 'opening', 'as_of' => '2026-01-01']);
     $this->actingAs($finance)->post(route('finance.opening.lines', OpeningBatch::first()), ['kind' => 'partner_capital', 'partner_id' => $a->id, 'amount' => '1000']);
-    $this->actingAs($finance)->post(route('finance.capital.store'), ['partner_id' => $a->id, 'amount' => '1000', 'paid_on' => '2025-12-01'])->assertSessionHas('error');
+    $this->actingAs($finance)->post(route('finance.capital.store'), ['submission_key' => (string) \Illuminate\Support\Str::uuid(), 'partner_id' => $a->id, 'amount' => '1000', 'paid_on' => '2025-12-01'])->assertSessionHas('error');
     expect(CapitalEntry::count())->toBe(0);
 
     $this->actingAs(financeUser('board_member'))->post(route('finance.policies.approve', $this->policy), ['signed_reference' => 'BR-9'])->assertSessionHasErrors('effective_from');

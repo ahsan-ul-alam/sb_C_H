@@ -150,8 +150,8 @@ it('runs a two-month company through the controllers and reconciles every taka',
         ->and(-dr('partner.payable', $A))->toBe(2_000_000)->and(-dr('partner.payable', $B))->toBe(1_500_000)->and(-dr('partner.payable', $C))->toBe(1_500_000);
 
     // ───────────────────────────── Partner A's payout ─────────────────────────────
-    $co->as('partnerA')->post(route('finance.payouts.store'), ['amount' => '20000.01'])->assertSessionHas('error'); // more than the entitlement
-    $co->as('partnerA')->post(route('finance.payouts.store'), ['amount' => '10000'])->assertSessionHasNoErrors();
+    $co->as('partnerA')->post(route('finance.payouts.store'), ['submission_key' => (string) \Illuminate\Support\Str::uuid(), 'amount' => '20000.01'])->assertSessionHas('error'); // more than the entitlement
+    $co->as('partnerA')->post(route('finance.payouts.store'), ['submission_key' => (string) \Illuminate\Support\Str::uuid(), 'amount' => '10000'])->assertSessionHasNoErrors();
     $payout = Payout::firstOrFail();
     $co->as('partnerA')->post(route('finance.payouts.decide', $payout), ['decision' => 'approve'])->assertForbidden();   // no partner permission
     $co->post('finance', 'finance.payouts.pay', [], $payout)->assertSessionHas('error');                                    // not approved yet

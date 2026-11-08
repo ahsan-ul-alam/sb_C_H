@@ -101,7 +101,7 @@ class InvoiceController extends Controller
         [$data, $items] = $this->validated($request, $project);
 
         try {
-            $invoice = SubmissionGuard::once($request->input('submission_key'), 'invoice.create', $request->user()?->id, fn (): Invoice => DB::transaction(function () use ($project, $data, $items): Invoice {
+            $invoice = SubmissionGuard::once($request->input('submission_key'), 'invoice.create', $request->user()?->id, ['project' => $project->id, 'data' => $data, 'items' => $items], fn (): Invoice => DB::transaction(function () use ($project, $data, $items): Invoice {
                 $invoice = $project->invoices()->make($data);
                 $invoice->currency = $project->currency;
                 $invoice->status = InvoiceStatus::Unpaid;

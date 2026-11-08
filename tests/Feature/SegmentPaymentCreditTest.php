@@ -32,7 +32,7 @@ function paySegment($test, Segment $segment, string $amount): void
 
 function billSegment($test, Project $project, Segment $segment, string $number, string $price = '10000.00'): Invoice
 {
-    $test->post(route('projects.invoices.store', $project), [
+    $test->post(route('projects.invoices.store', $project), [ 'submission_key' => (string) \Illuminate\Support\Str::uuid(),
         'number' => $number, 'issued_on' => '2026-10-29',
         'items' => [['segment_id' => $segment->id, 'description' => 'Onboarding', 'quantity' => '1', 'unit_price' => $price]],
     ])->assertSessionHasNoErrors();

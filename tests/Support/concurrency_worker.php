@@ -21,6 +21,7 @@ use App\Services\AccountingService;
 use App\Services\AdvanceSettlementService;
 use App\Services\ClientInformationOtp;
 use App\Services\CostRecognitionService;
+use App\Services\DuplicateSubmission;
 use App\Services\ExpenseService;
 use App\Services\InventoryEngine;
 use App\Services\InventoryHandoverService;
@@ -29,6 +30,7 @@ use App\Services\LoanReceivableService;
 use App\Services\PaymentRecorder;
 use App\Services\PayoutService;
 use App\Services\SourcingPayments;
+use App\Services\SubmissionGuard;
 use App\Services\SupplierReturnService;
 use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Support\Carbon;
@@ -127,6 +129,17 @@ try {
             LoanReceivableService::decideRepayment(LoanReceivableRepayment::findOrFail($args['repayment']), true, auth()->user());
 
             return true;
+        })(),
+        // The guarded capital form: the same steps as CapitalController::store once its checks pass.
+        'guard_capital' => (function () use ($args) {
+            try {
+                SubmissionGuard::once($args['key'], 'capital.record', auth()->id(), ['partner_id' => $args['partner'], 'amount' => $args['amount']], fn () => CapitalEntry::create([
+                    'partner_id' => $args['partner'], 'kind' => 'contribution', 'amount' => $args['amount'], 'paid_on' => '2026-11-09', 'created_by' => auth()->id()]));
+
+                return true;
+            } catch (DuplicateSubmission) {
+                return false;
+            }
         })(),
         'client_create' => Client::create(['name' => 'Race client '.$args['n'], 'mobile' => '017'])->sb_number,
         'otp_verify' => ClientInformationOtp::verify(ClientApiIntegration::findOrFail($args['integration']), $args['sb'], $args['request_id'], $args['code']) !== null,
