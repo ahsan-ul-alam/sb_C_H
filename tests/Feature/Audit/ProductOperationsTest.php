@@ -27,11 +27,11 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
 use Tests\Support\SellbeesCompany;
 
-require_once __DIR__.'/../../Support/helpers.php';
+require_once __DIR__ . '/../../Support/helpers.php';
 
 uses(RefreshDatabase::class);
 
-afterEach(fn () => Carbon::setTestNow());
+afterEach(fn() => Carbon::setTestNow());
 
 /**
  * A client's own stock, made the way the business makes it: supplier → product → Quick Lot → billed to the client → arrival recorded.
@@ -40,14 +40,19 @@ afterEach(fn () => Carbon::setTestNow());
  */
 function clientStock(SellbeesCompany $co, string $qty = '100', ?string $received = null, ?string $accepted = null, string $clientName = 'Client Stock', string $price = '120', string $arrivedOn = '2026-02-10'): array
 {
-    $co->post('clients', 'sourcing.suppliers.store', ['name' => 'Supplier '.Str::random(4), 'phone' => '017'])->assertSessionHasNoErrors();
+    $co->post('clients', 'sourcing.suppliers.store', ['name' => 'Supplier ' . Str::random(4), 'phone' => '017'])->assertSessionHasNoErrors();
     $supplier = Supplier::latest('id')->first();
-    $co->post('clients', 'sourcing.products.store', ['supplier_id' => $supplier->id, 'name' => 'Hair Oil '.Str::random(3), 'reference_price' => $price])->assertSessionHasNoErrors();
+    $co->post('clients', 'sourcing.products.store', ['supplier_id' => $supplier->id, 'name' => 'Hair Oil ' . Str::random(3), 'reference_price' => $price])->assertSessionHasNoErrors();
     $product = SupplierProduct::latest('id')->first();
     $client = $co->client($clientName);
-    $project = $co->project($client, 'P'.Str::random(3));
-    $co->post('clients', 'sourcing.lots.store', ['supplier_id' => $supplier->id, 'delivery_cost' => '1000', 'submission_key' => (string) Str::uuid(), 'project_id' => $project->id,
-        'items' => [['product_id' => $product->id, 'quantity' => $qty, 'profit' => '20']]])->assertSessionHasNoErrors();
+    $project = $co->project($client, 'P' . Str::random(3));
+    $co->post('clients', 'sourcing.lots.store', [
+        'supplier_id' => $supplier->id,
+        'delivery_cost' => '1000',
+        'submission_key' => (string) Str::uuid(),
+        'project_id' => $project->id,
+        'items' => [['product_id' => $product->id, 'quantity' => $qty, 'profit' => '20']],
+    ])->assertSessionHasNoErrors();
     $lot = SourcingLot::latest('id')->first();
     $line = $lot->lines()->first();
     // Arrival first when some units are short, so the client is billed for what really arrived.
@@ -64,13 +69,18 @@ function clientStock(SellbeesCompany $co, string $qty = '100', ?string $received
 
 function placeOrder(SellbeesCompany $co, $project, $product, string $qty, string $price, string $ref = 'ORD-1')
 {
-    return $co->post('clients', 'product.orders.store', ['project_id' => $project->id, 'reference' => $ref, 'ordered_on' => '2026-03-06', 'customer_name' => 'Customer',
-        'items' => [['product_id' => $product->id, 'quantity' => $qty, 'price' => $price]]]);
+    return $co->post('clients', 'product.orders.store', [
+        'project_id' => $project->id,
+        'reference' => $ref,
+        'ordered_on' => '2026-03-06',
+        'customer_name' => 'Customer',
+        'items' => [['product_id' => $product->id, 'quantity' => $qty, 'price' => $price]],
+    ]);
 }
 
 function orderStep(SellbeesCompany $co, string $step, ClientOrder $order, array $data = [])
 {
-    return $co->post('clients', 'product.orders.'.$step, $data, $order);
+    return $co->post('clients', 'product.orders.' . $step, $data, $order);
 }
 
 function bootProduct($test): SellbeesCompany
@@ -93,8 +103,13 @@ it('keeps the sourcing result and puts only what really arrived into stock', fun
     // Ordered quantity is not stock: a fresh lot has none until its arrival is recorded.
     $co->post('clients', 'sourcing.suppliers.store', ['name' => 'Late Supplier']);
     $co->post('clients', 'sourcing.products.store', ['supplier_id' => Supplier::latest('id')->first()->id, 'name' => 'Soap', 'reference_price' => '10']);
-    $co->post('clients', 'sourcing.lots.store', ['supplier_id' => Supplier::latest('id')->first()->id, 'delivery_cost' => '0', 'submission_key' => (string) Str::uuid(), 'project_id' => $s['project']->id,
-        'items' => [['product_id' => SupplierProduct::latest('id')->first()->id, 'quantity' => '50', 'profit' => '2']]]);
+    $co->post('clients', 'sourcing.lots.store', [
+        'supplier_id' => Supplier::latest('id')->first()->id,
+        'delivery_cost' => '0',
+        'submission_key' => (string) Str::uuid(),
+        'project_id' => $s['project']->id,
+        'items' => [['product_id' => SupplierProduct::latest('id')->first()->id, 'quantity' => '50', 'profit' => '2']],
+    ]);
     $unreceived = SourcingLot::latest('id')->first()->lines()->first();
     expect(Inventory::balances($unreceived)['available'])->toBe('0.00')->and(StockMovement::where('sourcing_lot_line_id', $unreceived->id)->count())->toBe(0);
 });
@@ -137,7 +152,7 @@ it('reserves, dispatches and delivers stock exactly, and earns commission only o
     expect($order->status)->toBe('successful')->and($order->commission)->toBe(100)->and($order->rate_bps)->toBe(100)  // BDT 100 × 1% = BDT 1.00
         ->and($order->invoice->total)->toBe(100)->and(dr('income'))->toBe(0)->and(dr('client.funds'))->toBe(0);          // delivery is not a collection and not revenue
     $key = (string) Str::uuid();
-    $collect = fn (string $amount, string $k) => $co->post('clients', 'product.orders.collect', ['amount' => $amount, 'collected_on' => '2026-02-11', 'idempotency_key' => $k], $order);
+    $collect = fn(string $amount, string $k) => $co->post('clients', 'product.orders.collect', ['amount' => $amount, 'collected_on' => '2026-02-11', 'idempotency_key' => $k], $order);
     $collect('100', $key)->assertSessionHasNoErrors();
     $collect('100', $key);
     $collect('0.01', (string) Str::uuid())->assertSessionHas('error');                  // nothing left to collect
@@ -212,8 +227,13 @@ it('takes the oldest stock first, across lots, and keeps the source lot on each 
     $old = clientStock($co, '30', null, null, 'FIFO Client', '120', '2026-02-01');
     Carbon::setTestNow('2026-02-05 10:00:00');
     // A second lot of the SAME product for the same client, arriving later.
-    $co->post('clients', 'sourcing.lots.store', ['supplier_id' => $old['line']->supplier_id, 'delivery_cost' => '0', 'submission_key' => (string) Str::uuid(), 'project_id' => $old['project']->id,
-        'items' => [['product_id' => $old['product']->id, 'quantity' => '100', 'profit' => '5']]])->assertSessionHasNoErrors();
+    $co->post('clients', 'sourcing.lots.store', [
+        'supplier_id' => $old['line']->supplier_id,
+        'delivery_cost' => '0',
+        'submission_key' => (string) Str::uuid(),
+        'project_id' => $old['project']->id,
+        'items' => [['product_id' => $old['product']->id, 'quantity' => '100', 'profit' => '5']],
+    ])->assertSessionHasNoErrors();
     $newLot = SourcingLot::latest('id')->first();
     $co->post('clients', 'sourcing.lots.bill-client', ['project_id' => $old['project']->id], $newLot)->assertSessionHasNoErrors();
     $co->post('clients', 'sourcing.lines.arrival', ['received_quantity' => '100', 'arrived_on' => '2026-02-05'], $newLot->lines()->first())->assertSessionHasNoErrors();
@@ -233,7 +253,7 @@ it('bills storage monthly only under the Board policy, once per lot and month, n
     $co->post('finance', 'finance.orders.storage', ['storage_rate' => '50', 'storage_threshold' => '100'])->assertSessionHasNoErrors();
     Carbon::setTestNow('2026-03-05 10:00:00');
 
-    expect(fn () => StorageBilling::runMonth('2026-02'))->toThrow(RuntimeException::class, 'not authorised');       // no policy: nothing is charged
+    expect(fn() => StorageBilling::runMonth('2026-02'))->toThrow(RuntimeException::class, 'not authorised');       // no policy: nothing is charged
     $co->standingPolicy('storage');
     $out = StorageBilling::runMonth('2026-02');                                                                    // approved, but the area was never measured
     expect($out['needs_measurement'])->toBe([$s['lot']->number])->and($out['billed'])->toBe([])->and(Invoice::where('purpose', 'Warehouse storage')->count())->toBe(0);
@@ -265,7 +285,7 @@ it('bills storage monthly only under the Board policy, once per lot and month, n
     Carbon::setTestNow('2026-04-05 10:00:00');
     $out = StorageBilling::runMonth('2026-03');
     expect($out['billed'])->toBe([])->and(StorageCharge::where('period', '2026-03')->count())->toBe(0);
-    expect(fn () => StorageBilling::runMonth('2026-04'))->toThrow(RuntimeException::class, 'finished month');
+    expect(fn() => StorageBilling::runMonth('2026-04'))->toThrow(RuntimeException::class, 'finished month');
 });
 
 it('settles a client: collected sales less commission and unpaid storage, partial payouts, balanced books, income recognised once', function () {
@@ -297,7 +317,7 @@ it('settles a client: collected sales less commission and unpaid storage, partia
     $co->as('finance')->get(route('product.settlements.show', $s['client']))->assertOk()->assertSee('9,400.00')->assertSee('Record client settlement');
 
     // Scenario 8: pay 5,000 first, 4,400 stays payable. Real payouts need Finance, a reference and sufficient bank cash.
-    $settle = fn (string $pay, string $key, string $ref = 'TRX-1') => $co->post('finance', 'product.settlements.store', ['pay' => $pay, 'paid_on' => '2026-03-08', 'reference' => $ref, 'idempotency_key' => $key], $s['client']);
+    $settle = fn(string $pay, string $key, string $ref = 'TRX-1') => $co->post('finance', 'product.settlements.store', ['pay' => $pay, 'paid_on' => '2026-03-08', 'reference' => $ref, 'idempotency_key' => $key], $s['client']);
     $co->post('clients', 'product.settlements.store', ['paid_on' => '2026-03-08', 'idempotency_key' => (string) Str::uuid()], $s['client'])->assertForbidden();
     $settle('9400.01', (string) Str::uuid())->assertSessionHas('error');                                                  // more than payable
     $settle('5000', (string) Str::uuid(), '')->assertSessionHas('error');                                                 // a payout needs its transfer reference
