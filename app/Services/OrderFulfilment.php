@@ -286,25 +286,29 @@ class OrderFulfilment
     }
 
     /**
-     * A courier charge that SELLBEES paid for the client is recorded as an actual client-recoverable charge by billing it on the client's invoice (the existing billing,
-     * by an explicit action, never automatic and never back-filled). It can be billed once; the settlement then recovers it by netting that invoice from the money
-     * held for the client, so the client's entitlement and the cash paid out both carry it exactly once.
+     * The courier really refunded part of a delivered order's charge (a returned or undelivered share). Recorded ONCE, with the courier's reference, by someone who may
+     * approve refunds. It can never exceed the part of the charge not passed to the client, so it changes only Sellbees' own unrecovered courier cost: the client's
+     * entitlement, profit and commission are untouched, and nothing is posted (the cash received is booked through the existing expense-reversal or income workflow).
+     * A charge the courier has NOT refunded is never refunded here automatically.
      */
-    public static function billDeliveryCharge(ClientOrder $order, User $user): Invoice
+    public static function recordCourierRefund(ClientOrder $order, int $amount, string $reference, User $user): void
     {
-        return self::locked($order, function (ClientOrder $o) use ($user) {
-            if ($o->delivery_invoice_id) {
-                throw new RuntimeException('The delivery charge of this order is already billed to the client.');
+        self::locked($order, function (ClientOrder $o) use ($amount, $reference, $user) {
+            if ($o->delivery_status !== 'delivered' || $o->delivery_charge_recorded_at === null) {
+                throw new RuntimeException('Only a charge recorded at dispatch on a delivered order can be adjusted.');
             }
-            $amount = $o->recoverableCharge();
-            if ($amount <= 0) {
-                throw new RuntimeException('There is no client-borne courier charge paid by Sellbees to recover on this order (the delivered sale must exist, the client must bear the charge and its status must be "paid by Sellbees").');
+            if ($o->courier_refund > 0) {
+                throw new RuntimeException('A courier refund is already recorded for this order.');
             }
-            [$invoice] = ClientBilling::addCharge($o->project, 'Delivery charge', 'Courier charge paid by Sellbees for the client', null, null, 'Delivery charge', 'Delivery charge paid for order '.$o->reference, '1', null, $amount, $amount);
-            $o->update(['delivery_invoice_id' => $invoice->id]);
-            Audit::log('order.delivery_billed', 'order '.$o->id, $invoice->number.' '.$amount.' by '.$user->name);
-
-            return $invoice;
+            if (trim($reference) === '' || $amount <= 0) {
+                throw new RuntimeException('Enter the refunded amount and the reference the courier gave.');
+            }
+            $room = $o->unrecoveredCourierCost();
+            if ($amount > $room) {
+                throw new RuntimeException('At most '.Money::format($room).' of this charge is not already passed to the client; a refund cannot be larger.');
+            }
+            $o->update(['courier_refund' => $amount, 'courier_refund_reference' => trim($reference), 'courier_refund_by' => $user->id, 'courier_refund_at' => now()]);
+            Audit::log('order.courier_refund', 'order '.$o->id, $amount.' ref '.trim($reference).' by '.$user->name);
         });
     }
 

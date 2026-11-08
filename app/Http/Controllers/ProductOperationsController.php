@@ -280,9 +280,11 @@ class ProductOperationsController extends Controller
         return $this->attempt(fn () => OrderFulfilment::recordUnsuccessfulCharges($order, Money::toMinor($d['failed_delivery_charge'] ?? 0), Money::toMinor($d['return_charge'] ?? 0), $request->user()), 'Courier charge recorded.');
     }
 
-    public function orderBillDelivery(Request $request, ClientOrder $order): RedirectResponse
+    public function orderCourierRefund(Request $request, ClientOrder $order): RedirectResponse
     {
-        return $this->attempt(fn () => OrderFulfilment::billDeliveryCharge($order, $request->user()), 'Delivery charge billed to the client. It is recovered when the client is settled.');
+        $d = $request->validate(['amount' => ['required', 'regex:'.Money::AMOUNT_REGEX], 'reference' => ['required', 'string', 'max:190']]);
+
+        return $this->attempt(fn () => OrderFulfilment::recordCourierRefund($order, Money::toMinor($d['amount']), $d['reference'], $request->user()), 'Courier refund recorded. It reduces only Sellbees\' own unrecovered courier cost.');
     }
 
     public function orderFail(Request $request, ClientOrder $order): RedirectResponse

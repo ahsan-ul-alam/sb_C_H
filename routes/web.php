@@ -262,7 +262,7 @@ Route::middleware('auth')->group(function () {
             Route::post('orders/{order}/dispatch', [ProductOperationsController::class, 'orderDispatch'])->name('orders.dispatch');
             Route::post('orders/{order}/deliver', [ProductOperationsController::class, 'orderDeliver'])->name('orders.deliver');
             Route::post('orders/{order}/courier-charges', [ProductOperationsController::class, 'orderCourierCharges'])->name('orders.courier-charges');
-            Route::post('orders/{order}/bill-delivery', [ProductOperationsController::class, 'orderBillDelivery'])->name('orders.bill-delivery')->middleware('can:commission.manage');
+            Route::post('orders/{order}/courier-refund', [ProductOperationsController::class, 'orderCourierRefund'])->name('orders.courier-refund')->middleware('can:order.refund.approve');
             Route::post('orders/{order}/fail', [ProductOperationsController::class, 'orderFail'])->name('orders.fail');
             Route::post('orders/{order}/cancel', [ProductOperationsController::class, 'orderCancel'])->name('orders.cancel');
             Route::post('orders/{order}/return', [ProductOperationsController::class, 'orderReturn'])->name('orders.return');

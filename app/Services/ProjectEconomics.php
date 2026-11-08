@@ -42,11 +42,11 @@ class ProjectEconomics
     {
         $client = $project->client ?? Client::findOrFail($project->client_id);
         $clientProjectIds = $client->projects()->pluck('id');
-        $orders = ClientOrder::where('project_id', $project->id)->where('fulfilment', 'stock')->with(['items.line.lot', 'invoice', 'deliveryInvoice'])->orderBy('id')->get();
+        $orders = ClientOrder::where('project_id', $project->id)->where('fulfilment', 'stock')->with(['items.line.lot', 'invoice'])->orderBy('id')->get();
         $acquisition = [];
         $rows = [];
         $notes = [];
-        $t = array_fill_keys(['gross', 'delivery', 'refunds', 'net', 'commission', 'invoiced', 'unsuccessful', 'cost_sold', 'estimate', 'entitlement', 'recoverable', 'recovery_billed'], 0);
+        $t = array_fill_keys(['gross', 'delivery', 'refunds', 'net', 'commission', 'invoiced', 'unsuccessful', 'cost_sold', 'estimate', 'entitlement', 'recoverable', 'courier_cost', 'courier_refunded'], 0);
         $t['units_sold'] = '0';
         $costPending = false;
 
@@ -76,9 +76,6 @@ class ProjectEconomics
             if ($o->delivery_charge > 0 && $o->delivery_charge_bearer === 'client' && $o->delivery_charge_status === 'payable' && $o->delivery_charge_recorded_at !== null) {
                 $notes[] = 'Order '.$o->reference.': the delivery charge is recorded but nobody is recorded as having paid it yet (status "not yet paid"); it is deducted from the client once, but how it is settled is still open.';
             }
-            if ($o->delivery_invoice_id && $o->recoverableCharge() !== (int) $o->deliveryInvoice?->total) {
-                $notes[] = 'Order '.$o->reference.': the courier charge billed to the client no longer equals the charge recoverable after later returns; correct it through the invoice, not here.';
-            }
             $estimate = in_array($o->delivery_status, ['confirmed', 'packed', 'dispatched'], true)
                 ? OrderCommission::commission(max(0, $o->orderedValue() - $o->eligibleDeliveryCharge($o->orderedValue())), OrderCommission::rateFor($project)) : 0;
 
@@ -90,7 +87,8 @@ class ProjectEconomics
             $t['cost_sold'] += $cost;
             $t['estimate'] += $estimate;
             $t['recoverable'] += $o->recoverableCharge();
-            $t['recovery_billed'] += $o->delivery_invoice_id ? (int) $o->deliveryInvoice?->total : 0;
+            $t['courier_cost'] += $o->delivery_status === 'delivered' ? $o->unrecoveredCourierCost() : 0;
+            $t['courier_refunded'] += (int) $o->courier_refund;
             $t['units_sold'] = bcadd($t['units_sold'], $units, 2);
         }
 
@@ -122,7 +120,7 @@ class ProjectEconomics
             'entitlement' => $t['entitlement'], 'cost_pending' => $costPending, 'cost_of_sold' => $costPending ? null : $t['cost_sold'],
             'investment_recovered' => $recovered, 'client_profit' => $costPending ? null : $t['net'] - $t['commission'] - $t['unsuccessful'] - $t['cost_sold'],
             'investment_unrecovered' => $recovered === null ? null : max(0, $investment - $recovered),
-            'delivery_to_recover' => $t['recoverable'], 'delivery_billed' => $t['recovery_billed'],
+            'courier_advance_withheld' => $t['recoverable'], 'sellbees_courier_cost' => $t['courier_cost'], 'courier_refunded' => $t['courier_refunded'],
             'sourcing_margin' => $margin, 'client' => self::clientSettlement($client),
         ];
     }

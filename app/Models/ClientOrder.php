@@ -30,11 +30,13 @@ class ClientOrder extends Model
     public function eligibleDeliveryCharge(int $successValue): int
     {
         $ordered = $this->orderedValue();
-        if ((int) $this->delivery_charge <= 0 || $this->delivery_charge_bearer !== 'client' || $ordered <= 0 || $successValue <= 0) {
+        // Only a charge RECORDED at dispatch counts. An order from before this rule (or one whose charge was only typed in when it was created) has no recorded charge,
+        // so no default status or stray figure can put a new deduction on it.
+        if ((int) $this->delivery_charge <= 0 || $this->delivery_charge_recorded_at === null || $this->delivery_charge_bearer !== 'client' || $ordered <= 0 || $successValue <= 0) {
             return 0;
         }
 
-        return min((int) $this->delivery_charge, (int) bcadd(bcdiv(bcmul((string) $this->delivery_charge, (string) min($successValue, $ordered), 0), (string) $ordered, 4), '0.5', 0));
+        return min((int) $this->delivery_charge - (int) $this->courier_refund, (int) bcadd(bcdiv(bcmul((string) $this->delivery_charge, (string) min($successValue, $ordered), 0), (string) $ordered, 4), '0.5', 0));
     }
 
     /** What commission is worked out on: successful product sales (delivered and not returned) less the eligible client-borne delivery charge. */
@@ -81,11 +83,17 @@ class ClientOrder extends Model
     }
 
     /**
-     * @return BelongsTo<Invoice, $this>
+     * The courier charge actually incurred that is NOT passed to the client: what the courier charged less the part carried by the units that were delivered and kept
+     * (the eligible share) less anything the courier genuinely refunded. It is Sellbees' own cost (a returned or undelivered share the courier did not refund, or a charge
+     * Sellbees bears) and is never deducted from the client or refunded automatically. Only a charge recorded at dispatch on a delivered order counts.
      */
-    public function deliveryInvoice(): BelongsTo
+    public function unrecoveredCourierCost(): int
     {
-        return $this->belongsTo(Invoice::class, 'delivery_invoice_id');
+        if ($this->delivery_status !== 'delivered' || $this->delivery_charge_recorded_at === null) {
+            return 0;
+        }
+
+        return max(0, (int) $this->delivery_charge - (int) $this->courier_refund - $this->eligibleDeliveryCharge($this->deliveredValue()));
     }
 
     /** The customer money Sellbees can actually receive for the order: a charge the courier kept before remitting is never collected, so never owed. */

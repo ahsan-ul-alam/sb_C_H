@@ -38,7 +38,19 @@ class ClientSettlementService
 
     public static function settledOut(Client $c): int
     {
-        return (int) ClientSettlement::where('client_id', $c->id)->selectRaw('COALESCE(SUM(commission_netted + storage_netted + delivery_netted + paid),0) s')->value('s');
+        return (int) ClientSettlement::where('client_id', $c->id)->selectRaw('COALESCE(SUM(commission_netted + storage_netted + paid),0) s')->value('s');
+    }
+
+    /**
+     * Courier charges SELLBEES paid for this client (client-borne, status "paid by Sellbees"), which the client's entitlement already carries. The money for them stays in the
+     * client's funds and is never paid out to the client, so the charge is recovered exactly once (this is a constant subtraction, not a movement, so repeating a settlement
+     * can never deduct it twice). It is NOT billed on an invoice or posted as income: moving it out of client funds needs a Finance reclassification that the ledger has no
+     * journal type for, so it stays visible here as money held for Sellbees until Finance books it.
+     */
+    public static function courierAdvanceWithheld(Client $c): int
+    {
+        return (int) ClientOrder::where('fulfilment', 'stock')->where('delivery_charge_status', 'paid_by_sellbees')->whereHas('project', fn ($q) => $q->where('client_id', $c->id))->with('items')->get()
+            ->sum(fn ($o) => $o->recoverableCharge());
     }
 
     /** Customer money held for the client that has not been netted or remitted. */
@@ -65,11 +77,6 @@ class ClientSettlementService
             ->filter(fn ($o) => $o->invoice && $o->invoice->balance() > 0)
             ->map(fn ($o) => ['kind' => 'commission', 'label' => 'Commission — order '.$o->reference, 'invoice' => $o->invoice, 'balance' => $o->invoice->balance()]);
 
-        // A courier charge Sellbees paid for the client, billed once on the client's invoice, is recovered here like any other fee.
-        $rows = $rows->concat(ClientOrder::where('fulfilment', 'stock')->whereNotNull('delivery_invoice_id')->whereHas('project', fn ($q) => $q->where('client_id', $c->id))->with('deliveryInvoice')->orderBy('id')->get()
-            ->filter(fn ($o) => $o->deliveryInvoice && $o->deliveryInvoice->balance() > 0)
-            ->map(fn ($o) => ['kind' => 'delivery', 'label' => 'Delivery charge — order '.$o->reference, 'invoice' => $o->deliveryInvoice, 'balance' => $o->deliveryInvoice->balance()]));
-
         if (BusinessSetting::current()->storage_deduct) {
             $rows = $rows->concat(StorageCharge::where('client_id', $c->id)->where('status', 'billed')->whereNotNull('invoice_id')->with(['invoice', 'lot'])->orderBy('id')->get()
                 ->filter(fn ($s) => $s->invoice && $s->invoice->balance() > 0)
@@ -86,15 +93,15 @@ class ClientSettlementService
         $dues = self::dues($c);
         $commission = (int) $dues->where('kind', 'commission')->sum('balance');
         $storage = (int) $dues->where('kind', 'storage')->sum('balance');
-        $delivery = (int) $dues->where('kind', 'delivery')->sum('balance');
-        $netting = min($held, $commission + $storage + $delivery);
+        $netting = min($held, $commission + $storage);
+        $withheld = self::courierAdvanceWithheld($c);
         $orders = ClientOrder::where('fulfilment', 'stock')->whereHas('project', fn ($q) => $q->where('client_id', $c->id))->with('items')->get();
 
         return [
             'delivered_sales' => (int) $orders->where('delivery_status', 'delivered')->sum(fn ($o) => $o->deliveredValue()),
-            'collected' => self::collected($c), 'commission_due' => $commission, 'delivery_due' => $delivery, 'storage_due' => $storage,
+            'collected' => self::collected($c), 'commission_due' => $commission, 'courier_advance_withheld' => $withheld, 'storage_due' => $storage,
             'storage_not_deductible' => BusinessSetting::current()->storage_deduct ? 0 : (int) StorageCharge::where('client_id', $c->id)->where('status', 'billed')->with('invoice')->get()->sum(fn ($s) => $s->invoice?->balance() ?? 0),
-            'settled' => self::settledOut($c), 'funds_held' => $held, 'netting' => $netting, 'payable' => $held - $netting, 'dues' => $dues,
+            'settled' => self::settledOut($c), 'funds_held' => $held, 'netting' => $netting, 'payable' => max(0, $held - $netting - $withheld), 'dues' => $dues,
             'history' => ClientSettlement::where('client_id', $c->id)->latest('id')->get(),
         ];
     }
@@ -113,19 +120,14 @@ class ClientSettlementService
                 if (AccountingService::isClosed($date)) {
                     throw new RuntimeException('That month is already closed; record it in an open month.');
                 }
-                // Money held for the client may not be paid out while a courier charge Sellbees paid for them is still unbilled: it would be paid to the client and never recovered.
-                $unbilled = ClientOrder::where('fulfilment', 'stock')->whereNull('delivery_invoice_id')->where('delivery_charge_status', 'paid_by_sellbees')->whereHas('project', fn ($q) => $q->where('client_id', $client->id))->with('items')->get()
-                    ->filter(fn ($o) => $o->recoverableCharge() > 0);
-                if ($unbilled->isNotEmpty()) {
-                    throw new RuntimeException('Bill the courier charge Sellbees paid for order '.$unbilled->first()->reference.' to the client before settling, so it is recovered once.');
-                }
                 $held = self::fundsHeld($client);
                 $dues = self::dues($client);
                 $netting = min($held, (int) $dues->sum('balance'));
-                $payable = $held - $netting;
+                $withheld = self::courierAdvanceWithheld($client);
+                $payable = max(0, $held - $netting - $withheld);
                 $pay ??= $payable;
                 if ($pay < 0 || $pay > $payable) {
-                    throw new RuntimeException('The most that can be paid to the client now is '.Money::format($payable).' (money held '.Money::format($held).', fees netted '.Money::format($netting).').');
+                    throw new RuntimeException('The most that can be paid to the client now is '.Money::format($payable).' (money held '.Money::format($held).', fees netted '.Money::format($netting).($withheld > 0 ? ', kept for the courier charges Sellbees paid on the client\'s behalf '.Money::format($withheld) : '').').');
                 }
                 if ($netting + $pay <= 0) {
                     throw new RuntimeException('There is nothing to settle: no collected money is held for this client.');
@@ -141,7 +143,7 @@ class ClientSettlementService
                     'financial_account_id' => $accountId, 'idempotency_key' => $key, 'created_by' => $user->id]);
 
                 $left = $netting;
-                $byKind = ['commission' => 0, 'storage' => 0, 'delivery' => 0];
+                $byKind = ['commission' => 0, 'storage' => 0];
                 foreach ($dues as $due) {
                     if ($left <= 0) {
                         break;
@@ -151,11 +153,11 @@ class ClientSettlementService
                         'amount' => $take, 'paid_on' => $date, 'method' => 'other', 'reference' => 'Netted from client sales proceeds (settlement #'.$settlement->id.')',
                         'notes' => $due['label'], 'idempotency_key' => (string) str()->uuid(),
                     ], null);
-                    ReceiptClassification::create(['payment_id' => $payment->id, 'nature' => $due['kind'] === 'delivery' ? 'other' : 'service', 'notes' => $due['kind'] === 'delivery' ? 'Courier charge paid by Sellbees for the client, recovered from sales proceeds' : 'Fee netted from client sales proceeds', 'classified_by' => $user->id]);
+                    ReceiptClassification::create(['payment_id' => $payment->id, 'nature' => 'service', 'notes' => 'Fee netted from client sales proceeds', 'classified_by' => $user->id]);
                     $byKind[$due['kind']] += $take;
                     $left -= $take;
                 }
-                $settlement->update(['commission_netted' => $byKind['commission'], 'storage_netted' => $byKind['storage'], 'delivery_netted' => $byKind['delivery']]);
+                $settlement->update(['commission_netted' => $byKind['commission'], 'storage_netted' => $byKind['storage']]);
 
                 // One balanced entry. The netted part never leaves the bank (it becomes company money); it is reclassified out of client funds
                 // and the month-end close books the matching income. The remitted part is the only real cash out.

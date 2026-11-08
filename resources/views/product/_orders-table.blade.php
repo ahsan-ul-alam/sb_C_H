@@ -47,8 +47,8 @@
                             @foreach ($o->items as $it)<input name="returned[{{ $it->id }}]" size="5" inputmode="decimal" placeholder="return" title="Units of {{ $it->description }} sent back">@endforeach
                             <button class="btn btn-sm">Customer return</button></form>
                     @endif
-                    @if ($o->recoverableCharge() > 0 && ! $o->delivery_invoice_id)
-                        @can('commission.manage')<form method="POST" action="{{ route('product.orders.bill-delivery', $o) }}" class="inline-form" data-confirm="Bill the courier charge Sellbees paid to the client? It can be billed once.">@csrf<button class="btn btn-sm">Bill delivery charge {{ Money::format($o->recoverableCharge()) }}</button></form>@endcan
+                    @if ($o->delivery_status === 'delivered' && $o->courier_refund == 0 && $o->unrecoveredCourierCost() > 0)
+                        @can('order.refund.approve')<form method="POST" action="{{ route('product.orders.courier-refund', $o) }}" class="inline-form" data-confirm="Record that the courier really refunded part of this charge? It can be recorded once.">@csrf<input name="amount" size="6" inputmode="decimal" placeholder="courier refund (max {{ App\Support\Money::toDecimal($o->unrecoveredCourierCost()) }})" required><input name="reference" size="12" placeholder="courier reference" required><button class="btn btn-sm">Courier refunded</button></form>@endcan
                     @endif
                     @if ($o->delivery_status === 'failed' || ($o->delivery_status === 'delivered' && $o->items->contains(fn ($i) => $i->returned_quantity > 0)))
                         @if ($o->failed_delivery_charge == 0 || $o->return_charge == 0)
