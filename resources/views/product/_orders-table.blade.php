@@ -30,7 +30,7 @@
                             <input name="courier" size="9" placeholder="courier" maxlength="80" aria-label="Courier"><input name="tracking_reference" size="11" placeholder="tracking no." maxlength="120" aria-label="Tracking reference">
                             <input name="delivery_charge" size="6" inputmode="decimal" placeholder="delivery charge" value="{{ $o->delivery_charge > 0 ? App\Support\Money::toDecimal($o->delivery_charge) : '' }}" aria-label="Delivery charge (recorded once)">
                             <select name="delivery_charge_bearer" aria-label="Who bears the delivery charge"><option value="client">Client bears</option><option value="sellbees">Sellbees bears</option><option value="customer">Customer pays extra</option></select>
-                            <select name="delivery_charge_status" aria-label="How the delivery charge is settled"><option value="payable">Not yet paid</option><option value="paid_by_sellbees">Paid by Sellbees</option><option value="courier_deducted">Courier deducts it</option></select>
+                            <select name="delivery_charge_status" aria-label="How the delivery charge is settled"><option value="payable">Not yet paid</option><option value="paid_by_sellbees">Paid by Sellbees</option><option value="courier_deducted">Courier deducts it</option><option value="paid_by_client">Client paid the courier</option></select>
                             <button class="btn btn-sm btn-primary">Dispatched</button></form>
                     @endif
                     @if ($o->delivery_status === 'dispatched')
@@ -46,6 +46,9 @@
                         <form method="POST" action="{{ route('product.orders.return', $o) }}" class="inline-form">@csrf
                             @foreach ($o->items as $it)<input name="returned[{{ $it->id }}]" size="5" inputmode="decimal" placeholder="return" title="Units of {{ $it->description }} sent back">@endforeach
                             <button class="btn btn-sm">Customer return</button></form>
+                    @endif
+                    @if ($o->recoverableCharge() > 0 && ! $o->delivery_invoice_id)
+                        @can('commission.manage')<form method="POST" action="{{ route('product.orders.bill-delivery', $o) }}" class="inline-form" data-confirm="Bill the courier charge Sellbees paid to the client? It can be billed once.">@csrf<button class="btn btn-sm">Bill delivery charge {{ Money::format($o->recoverableCharge()) }}</button></form>@endcan
                     @endif
                     @if ($o->delivery_status === 'failed' || ($o->delivery_status === 'delivered' && $o->items->contains(fn ($i) => $i->returned_quantity > 0)))
                         @if ($o->failed_delivery_charge == 0 || $o->return_charge == 0)

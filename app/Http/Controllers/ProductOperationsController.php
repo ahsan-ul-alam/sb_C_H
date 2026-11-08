@@ -259,7 +259,7 @@ class ProductOperationsController extends Controller
     public function orderDispatch(Request $request, ClientOrder $order): RedirectResponse
     {
         $d = $request->validate(['courier' => ['nullable', 'string', 'max:80'], 'tracking_reference' => ['nullable', 'string', 'max:120'], 'delivery_charge' => ['nullable', 'regex:'.Money::AMOUNT_REGEX],
-            'delivery_charge_bearer' => ['nullable', Rule::in(['client', 'sellbees', 'customer'])], 'delivery_charge_status' => ['nullable', Rule::in(['payable', 'paid_by_sellbees', 'courier_deducted'])]]);
+            'delivery_charge_bearer' => ['nullable', Rule::in(['client', 'sellbees', 'customer'])], 'delivery_charge_status' => ['nullable', Rule::in(['payable', 'paid_by_sellbees', 'courier_deducted', 'paid_by_client'])]]);
         $charge = array_filter(['amount' => ($d['delivery_charge'] ?? '') !== '' ? Money::toMinor($d['delivery_charge']) : null, 'bearer' => $d['delivery_charge_bearer'] ?? null, 'status' => $d['delivery_charge_status'] ?? null], fn ($v) => $v !== null);
 
         return $this->attempt(fn () => OrderFulfilment::dispatch($order, $request->user(), $d['courier'] ?? null, $d['tracking_reference'] ?? null, $charge), 'Order dispatched. The delivery charge is now recorded and is not deducted again at delivery.');
@@ -278,6 +278,11 @@ class ProductOperationsController extends Controller
         $d = $request->validate(['failed_delivery_charge' => ['nullable', 'regex:'.Money::AMOUNT_REGEX], 'return_charge' => ['nullable', 'regex:'.Money::AMOUNT_REGEX]]);
 
         return $this->attempt(fn () => OrderFulfilment::recordUnsuccessfulCharges($order, Money::toMinor($d['failed_delivery_charge'] ?? 0), Money::toMinor($d['return_charge'] ?? 0), $request->user()), 'Courier charge recorded.');
+    }
+
+    public function orderBillDelivery(Request $request, ClientOrder $order): RedirectResponse
+    {
+        return $this->attempt(fn () => OrderFulfilment::billDeliveryCharge($order, $request->user()), 'Delivery charge billed to the client. It is recovered when the client is settled.');
     }
 
     public function orderFail(Request $request, ClientOrder $order): RedirectResponse

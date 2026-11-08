@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\ClientOrder;
 use App\Models\ClientOrderItem;
 use App\Models\InventoryHandover;
+use App\Models\Invoice;
 use App\Models\OrderCollection;
 use App\Models\Project;
 use App\Models\SourcingLot;
@@ -146,7 +147,7 @@ class OrderFulfilment
             self::expect($o, 'confirmed', 'packed');
             $bearer = $charge['bearer'] ?? $o->delivery_charge_bearer;
             $status = $charge['status'] ?? $o->delivery_charge_status;
-            if (! in_array($bearer, ['client', 'sellbees', 'customer'], true) || ! in_array($status, ['payable', 'paid_by_sellbees', 'courier_deducted'], true)) {
+            if (! in_array($bearer, ['client', 'sellbees', 'customer'], true) || ! in_array($status, ['payable', 'paid_by_sellbees', 'courier_deducted', 'paid_by_client'], true)) {
                 throw new RuntimeException('Choose who bears the delivery charge and how it is settled.');
             }
             if ($o->delivery_charge_recorded_at !== null) {
@@ -281,6 +282,29 @@ class OrderFulfilment
             }
             $o->update(['net_value' => $base]);
             Audit::log('order.returned', 'order '.$o->id, 'delivered value now '.$value);
+        });
+    }
+
+    /**
+     * A courier charge that SELLBEES paid for the client is recorded as an actual client-recoverable charge by billing it on the client's invoice (the existing billing,
+     * by an explicit action, never automatic and never back-filled). It can be billed once; the settlement then recovers it by netting that invoice from the money
+     * held for the client, so the client's entitlement and the cash paid out both carry it exactly once.
+     */
+    public static function billDeliveryCharge(ClientOrder $order, User $user): Invoice
+    {
+        return self::locked($order, function (ClientOrder $o) use ($user) {
+            if ($o->delivery_invoice_id) {
+                throw new RuntimeException('The delivery charge of this order is already billed to the client.');
+            }
+            $amount = $o->recoverableCharge();
+            if ($amount <= 0) {
+                throw new RuntimeException('There is no client-borne courier charge paid by Sellbees to recover on this order (the delivered sale must exist, the client must bear the charge and its status must be "paid by Sellbees").');
+            }
+            [$invoice] = ClientBilling::addCharge($o->project, 'Delivery charge', 'Courier charge paid by Sellbees for the client', null, null, 'Delivery charge', 'Delivery charge paid for order '.$o->reference, '1', null, $amount, $amount);
+            $o->update(['delivery_invoice_id' => $invoice->id]);
+            Audit::log('order.delivery_billed', 'order '.$o->id, $invoice->number.' '.$amount.' by '.$user->name);
+
+            return $invoice;
         });
     }
 

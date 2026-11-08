@@ -45,6 +45,49 @@ class ClientOrder extends Model
         return max(0, $sales - $this->eligibleDeliveryCharge($sales));
     }
 
+    /** Courier charges of a failed delivery and of a return that the client bears. */
+    public function unsuccessfulCharges(): int
+    {
+        return $this->delivery_charge_bearer === 'client' ? (int) $this->failed_delivery_charge + (int) $this->return_charge : 0;
+    }
+
+    /**
+     * What reduces the money Sellbees owes the client for this order, given how the charge is settled. A charge the courier kept, one Sellbees paid or one still to be
+     * paid is deducted from the client's entitlement ONCE; one the client paid the courier directly is never deducted again, and one Sellbees bears never is.
+     * (Failed and return charges follow a charge Sellbees pays or that is still payable.) The client's profit deducts every client-borne charge once, whoever paid it.
+     */
+    public function settlementDeduction(int $eligible): int
+    {
+        if ($this->delivery_charge_bearer !== 'client') {
+            return 0;
+        }
+        $deduction = in_array($this->delivery_charge_status, ['payable', 'paid_by_sellbees', 'courier_deducted'], true) ? $eligible : 0;
+        if (in_array($this->delivery_charge_status, ['payable', 'paid_by_sellbees'], true)) {
+            $deduction += $this->unsuccessfulCharges();
+        }
+
+        return $deduction;
+    }
+
+    /** The part of a charge Sellbees paid for the client that is still to be recovered (billed on an invoice and netted at settlement). */
+    public function recoverableCharge(): int
+    {
+        if ($this->delivery_charge_bearer !== 'client' || $this->delivery_charge_status !== 'paid_by_sellbees') {
+            return 0;
+        }
+        $sales = $this->delivery_status === 'delivered' ? $this->deliveredValue() : 0;
+
+        return $this->eligibleDeliveryCharge($sales) + $this->unsuccessfulCharges();
+    }
+
+    /**
+     * @return BelongsTo<Invoice, $this>
+     */
+    public function deliveryInvoice(): BelongsTo
+    {
+        return $this->belongsTo(Invoice::class, 'delivery_invoice_id');
+    }
+
     /** The customer money Sellbees can actually receive for the order: a charge the courier kept before remitting is never collected, so never owed. */
     public function collectibleValue(): int
     {

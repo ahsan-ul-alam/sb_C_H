@@ -8,6 +8,8 @@ use App\Models\ClientOrderItem;
 use App\Models\ClientSettlement;
 use App\Models\Expense;
 use App\Models\Invoice;
+use App\Models\JournalEntry;
+use App\Models\JournalLine;
 use App\Models\Partner;
 use App\Models\Payment;
 use App\Models\Project;
@@ -708,7 +710,7 @@ it('limits users to their assigned projects and bound client, enforced on pages 
 // ───────────── the owner's mug example: delivery charge once, commission base, client profit vs settlement ─────────────
 
 /** Place, confirm, dispatch (recording the delivery charge once) and optionally deliver one order. */
-function mugOrder(SellbeesCompany $co, array $s, string $ref, string $qty, string $charge, string $bearer = 'client', string $status = 'payable', bool $deliver = true, string $price = '10'): ClientOrder
+function mugOrder(SellbeesCompany $co, array $s, string $ref, string $qty, string $charge, string $bearer = 'client', string $status = 'courier_deducted', bool $deliver = true, string $price = '10'): ClientOrder
 {
     placeOrder($co, $s['project'], $s['product'], $qty, $price, $ref)->assertSessionMissing('error');
     $o = ClientOrder::where('reference', $ref)->firstOrFail();
@@ -816,7 +818,8 @@ it('earns no commission on a failed delivery, records its courier charge once, a
     expect($o->refresh()->failed_delivery_charge)->toBe(250);
 
     $e = ProjectEconomics::for($s['project']);
-    expect($e['net_sales'])->toBe(0)->and($e['commission'])->toBe(0)->and($e['unsuccessful_charges'])->toBe(250)->and($e['entitlement'])->toBe(-250)->and($e['units_sold'])->toBe('0.00');
+    expect($e['net_sales'])->toBe(0)->and($e['commission'])->toBe(0)->and($e['unsuccessful_charges'])->toBe(250)->and($e['units_sold'])->toBe('0.00')
+        ->and($e['client_profit'])->toBe(-250)->and($e['entitlement'])->toBe(0);       // a cost to the client's profit, but the courier kept nothing from any remittance
 });
 
 it('rounds commission half-up in whole paisa and keeps a zero rate valid', function () {
@@ -826,4 +829,147 @@ it('rounds commission half-up in whole paisa and keeps a zero rate valid', funct
     $o->setRelation('items', collect([new ClientOrderItem(['quantity' => '3', 'unit_price' => 333, 'unit_discount' => 0])]));   // 9.99 ordered, 1.00 charge
     expect($o->orderedValue())->toBe(999)->and($o->eligibleDeliveryCharge(333))->toBe(33)->and($o->eligibleDeliveryCharge(666))->toBe(67)->and($o->eligibleDeliveryCharge(999))->toBe(100);
     // Shares of one charge never add up to more than the charge: 33 + 67 = 100.
+});
+
+// ───────────── delivery charge routes: courier-deducted, Sellbees-paid, client-paid, Sellbees-borne ─────────────
+
+function settleClient(SellbeesCompany $co, $client, string $pay, ?string $key = null)
+{
+    return $co->post('finance', 'product.settlements.store', ['pay' => $pay, 'paid_on' => '2026-02-12', 'reference' => 'TRX-'.Str::random(4), 'idempotency_key' => $key ?? (string) Str::uuid()], $client);
+}
+
+function collectAll(SellbeesCompany $co, ClientOrder $o, string $amount)
+{
+    return $co->post('clients', 'product.orders.collect', ['amount' => $amount, 'collected_on' => '2026-02-11', 'idempotency_key' => (string) Str::uuid()], $o);
+}
+
+it('A: a charge the courier kept is deducted from the courier remittance once and never again from the client settlement', function () {
+    $co = bootProduct($this);
+    $s = mugClient($co);
+    $o = mugOrder($co, $s, 'A-1', '10', '10', 'client', 'courier_deducted');
+    collectAll($co, $o, '90')->assertSessionMissing('error');                               // the courier remits 90.00 of the 100.00
+    settleClient($co, $s['client'], '89.10')->assertSessionMissing('error');                  // held 90.00 - 0.90 commission netted = 89.10
+    $e = ProjectEconomics::for($s['project']);
+    expect($e['entitlement'])->toBe(8_910)->and($e['client']['settled'])->toBe(8_910)->and($e['client']['outstanding'])->toBe(0)->and($e['client_profit'])->toBe(3_910)
+        ->and(ClientSettlementService::fundsHeld($s['client']))->toBe(0)->and(ClientSettlementService::statement($s['client'])['delivery_due'])->toBe(0);
+    expect(fn () => OrderFulfilment::billDeliveryCharge($o, $co->users['finance']))->toThrow(RuntimeException::class, 'no client-borne courier charge');   // nothing for Sellbees to recover
+});
+
+it('B: a charge Sellbees paid is billed once and recovered once at settlement, and the client profit still deducts it only once', function () {
+    $co = bootProduct($this);
+    $s = mugClient($co);
+    $o = mugOrder($co, $s, 'B-1', '10', '10', 'client', 'paid_by_sellbees');
+    collectAll($co, $o, '100')->assertSessionMissing('error');                              // the customer paid the full 100.00 to Sellbees
+    settleClient($co, $s['client'], '1')->assertSessionHas('error');                       // refused: the charge Sellbees paid is not billed yet
+
+    $journals = JournalEntry::count();
+    $co->post('clients', 'product.orders.bill-delivery', [], $o)->assertSessionMissing('error');
+    $co->post('clients', 'product.orders.bill-delivery', [], $o)->assertSessionHas('error');      // billed once, never twice
+    $o->refresh();
+    expect($o->deliveryInvoice->total)->toBe(1_000)->and(JournalEntry::count())->toBe($journals);  // an invoice only: nothing is posted until money moves
+
+    $st = ClientSettlementService::statement($s['client']);
+    expect([$st['commission_due'], $st['delivery_due'], $st['netting'], $st['payable']])->toBe([90, 1_000, 1_090, 8_910]);   // 100.00 held - 0.90 - 10.00 = 89.10
+    settleClient($co, $s['client'], '89.11')->assertSessionHas('error');                      // cannot pay more than the entitlement
+    $key = (string) Str::uuid();
+    settleClient($co, $s['client'], '89.10', $key)->assertSessionMissing('error');
+    settleClient($co, $s['client'], '89.10', $key);                                           // the same submission twice
+    settleClient($co, $s['client'], '0.01')->assertSessionHas('error');                       // nothing left
+
+    $settlement = ClientSettlement::firstOrFail();
+    expect(ClientSettlement::count())->toBe(1)->and([$settlement->commission_netted, $settlement->delivery_netted, $settlement->paid])->toBe([90, 1_000, 8_910])
+        ->and($o->deliveryInvoice->refresh()->balance())->toBe(0)->and(ClientSettlementService::fundsHeld($s['client']))->toBe(0);
+    $e = ProjectEconomics::for($s['project']);
+    expect($e['entitlement'])->toBe(8_910)->and($e['client']['outstanding'])->toBe(0)->and($e['client_profit'])->toBe(3_910)   // 90.00 - 0.90 - 50.00: the charge is deducted once
+        ->and($e['delivery_billed'])->toBe(1_000)->and($e['notes'])->toBe([]);
+});
+
+it('B: a partial delivery recovers only its share, and a later return is flagged instead of silently re-billed', function () {
+    $co = bootProduct($this);
+    $s = mugClient($co);
+    $o = mugOrder($co, $s, 'B-2', '10', '10', 'client', 'paid_by_sellbees', deliver: false);
+    orderStep($co, 'deliver', $o, ['delivered' => [$o->items()->first()->id => '6']])->assertSessionMissing('error');
+    $co->post('clients', 'product.orders.bill-delivery', [], $o)->assertSessionMissing('error');
+    expect($o->refresh()->deliveryInvoice->total)->toBe(600);                                  // 6/10 of the 10.00 charge
+    orderStep($co, 'return', $o, ['returned' => [$o->items()->first()->id => '2']])->assertSessionMissing('error');
+    $e = ProjectEconomics::for($s['project']);
+    expect(collect($e['notes'])->contains(fn ($n) => str_contains($n, 'no longer equals')))->toBeTrue()->and($o->refresh()->recoverableCharge())->toBe(400);
+});
+
+it('C: a charge the client paid the courier directly is not deducted from Sellbees cash or the client entitlement, only from profit', function () {
+    $co = bootProduct($this);
+    $s = mugClient($co);
+    $o = mugOrder($co, $s, 'C-1', '10', '10', 'client', 'paid_by_client');
+    expect($o->net_value)->toBe(9_000)->and($o->commission)->toBe(90);                          // the commission base is still sales less the client-borne charge
+    collectAll($co, $o, '100')->assertSessionMissing('error');                               // the customer paid Sellbees the whole 100.00
+    $e = ProjectEconomics::for($s['project']);
+    expect($e['entitlement'])->toBe(9_910)->and($e['client_profit'])->toBe(3_910)->and($o->recoverableCharge())->toBe(0);   // 100.00 - 0.90 owed; profit 90.00 - 0.90 - 50.00
+    expect(fn () => OrderFulfilment::billDeliveryCharge($o, $co->users['finance']))->toThrow(RuntimeException::class);
+    settleClient($co, $s['client'], '99.10')->assertSessionMissing('error');                 // all of it, no second deduction
+    expect(ClientSettlementService::fundsHeld($s['client']))->toBe(0)->and(ProjectEconomics::for($s['project'])['client']['outstanding'])->toBe(0);
+});
+
+it('D: a charge Sellbees bears reduces neither the client profit nor the client entitlement nor the commission base', function () {
+    $co = bootProduct($this);
+    $s = mugClient($co);
+    $o = mugOrder($co, $s, 'D-1', '10', '10', 'sellbees', 'paid_by_sellbees');
+    expect($o->net_value)->toBe(10_000)->and($o->commission)->toBe(100);
+    $e = ProjectEconomics::for($s['project']);
+    expect($e['delivery_charges'])->toBe(0)->and($e['entitlement'])->toBe(9_900)->and($e['client_profit'])->toBe(4_900)->and($o->recoverableCharge())->toBe(0);
+    collectAll($co, $o, '100')->assertSessionMissing('error');
+    settleClient($co, $s['client'], '99')->assertSessionMissing('error');
+});
+
+it('uses only the approved, billed client price for cost: unapproved or mismatched pricing shows pending verification, never a guessed profit', function () {
+    $co = bootProduct($this);
+    $s = mugClient($co);
+    mugOrder($co, $s, 'P-1', '2', '2');
+    expect(ProjectEconomics::for($s['project'])['client_profit'])->toBe(1_782 - 1_000);        // net 18.00 - commission 0.18 - cost 2 x 5.00
+    $e = ProjectEconomics::for($s['project']);
+    expect($e['cost_of_sold'])->toBe(1_000)->and($e['cost_pending'])->toBeFalse();
+
+    $s['line']->update(['approved_price' => null]);                                           // history without an approval snapshot, a draft sell_price still present
+    expect($s['line']->refresh()->sell_price)->not->toBeNull();
+    $e = ProjectEconomics::for($s['project']);
+    expect($e['cost_pending'])->toBeTrue()->and($e['client_profit'])->toBeNull()->and($e['cost_of_sold'])->toBeNull()->and($e['investment_recovered'])->toBeNull()
+        ->and($e['entitlement'])->toBe(1_782)->and($e['notes'][0])->toContain('approved client price');                         // what is owed does not depend on cost
+    $co->as('clients')->get(route('product.projects.show', $s['project']))->assertOk()->assertSee('Cost pending verification');
+
+    $s['line']->update(['approved_price' => 500]);                                            // approved again, but the billed allocation was at another price
+    SourcingAllocation::where('sourcing_lot_line_id', $s['line']->id)->update(['unit_price' => 499]);
+    expect(ProjectEconomics::for($s['project'])['cost_pending'])->toBeTrue();
+});
+
+it('keeps project entitlement separate from client-wide settlement and never allocates a settlement to a project', function () {
+    $co = bootProduct($this);
+    $co->post('finance', 'finance.orders.rates', ['default_percent' => '1']);
+    $one = clientStock($co, '10', clientName: 'Twin client', price: '3', profit: '2', deliveryCost: '0');
+    $two = clientStock($co, '10', clientName: 'Twin client', price: '3', profit: '2', deliveryCost: '0');
+    expect($two['client']->id)->toBe($one['client']->id)->and($two['project']->id)->not->toBe($one['project']->id);
+    $a = mugOrder($co, $one, 'T-1', '10', '10', 'client', 'courier_deducted');
+    mugOrder($co, $two, 'T-2', '4', '4', 'client', 'courier_deducted');
+    collectAll($co, $a, '90')->assertSessionMissing('error');
+    settleClient($co, $one['client'], '50')->assertSessionMissing('error');                   // a client-wide payment, tied to no project
+
+    $e1 = ProjectEconomics::for($one['project']);
+    $e2 = ProjectEconomics::for($two['project']);
+    expect($e1['entitlement'])->toBe(8_910)->and($e2['entitlement'])->toBe(3_564)             // 40.00 - 4.00 - 0.36
+        ->and($e1['client']['entitlement'])->toBe(12_474)->and($e2['client']['entitlement'])->toBe(12_474)   // the same client-wide figure on both pages
+        ->and($e1['client']['settled'])->toBe(5_000)->and($e2['client']['settled'])->toBe(5_000)->and($e1['client']['outstanding'])->toBe(7_474)
+        ->and($e1['client_profit'])->toBe(3_910)->and($e2['client_profit'])->toBe(1_564);
+    $page = $co->as('clients')->get(route('product.projects.show', $one['project']))->assertOk();
+    $page->assertSee('Client-wide settlement paid (not allocated to any project)')->assertSee('Project settlement entitlement');
+});
+
+it('reads and bills without changing any historical financial record', function () {
+    $co = bootProduct($this);
+    $s = mugClient($co);
+    $o = mugOrder($co, $s, 'H-1', '10', '10', 'client', 'paid_by_sellbees');
+    collectAll($co, $o, '100');
+    $before = [JournalEntry::count(), JournalLine::count(), Payment::count(), Invoice::count(), Expense::count(), (int) JournalEntry::sum('id')];
+    ProjectEconomics::for($s['project']);
+    $co->as('clients')->get(route('product.projects.show', $s['project']))->assertOk();
+    expect([JournalEntry::count(), JournalLine::count(), Payment::count(), Invoice::count(), Expense::count(), (int) JournalEntry::sum('id')])->toBe($before);   // reading posts nothing
+    $co->post('clients', 'product.orders.bill-delivery', [], $o);
+    expect([JournalEntry::count(), Payment::count(), Expense::count()])->toBe([$before[0], $before[2], $before[4]])->and(Invoice::count())->toBe($before[3] + 1);   // one new invoice, no posting
 });
