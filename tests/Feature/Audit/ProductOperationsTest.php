@@ -44,11 +44,11 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
 use Tests\Support\SellbeesCompany;
 
-require_once __DIR__.'/../../Support/helpers.php';
+require_once __DIR__ . '/../../Support/helpers.php';
 
 uses(RefreshDatabase::class);
 
-afterEach(fn () => Carbon::setTestNow());
+afterEach(fn() => Carbon::setTestNow());
 
 /**
  * A client's own stock, made the way the business makes it: supplier → product → Quick Lot → billed to the client → arrival recorded.
@@ -57,12 +57,12 @@ afterEach(fn () => Carbon::setTestNow());
  */
 function clientStock(SellbeesCompany $co, string $qty = '100', ?string $received = null, ?string $accepted = null, string $clientName = 'Client Stock', string $price = '120', string $arrivedOn = '2026-02-10', string $profit = '20', string $deliveryCost = '1000'): array
 {
-    $co->post('clients', 'sourcing.suppliers.store', ['name' => 'Supplier '.Str::random(4), 'phone' => '017'])->assertSessionHasNoErrors();
+    $co->post('clients', 'sourcing.suppliers.store', ['name' => 'Supplier ' . Str::random(4), 'phone' => '017'])->assertSessionHasNoErrors();
     $supplier = Supplier::latest('id')->first();
-    $co->post('clients', 'sourcing.products.store', ['supplier_id' => $supplier->id, 'name' => 'Hair Oil '.Str::random(3), 'reference_price' => $price])->assertSessionHasNoErrors();
+    $co->post('clients', 'sourcing.products.store', ['supplier_id' => $supplier->id, 'name' => 'Hair Oil ' . Str::random(3), 'reference_price' => $price])->assertSessionHasNoErrors();
     $product = SupplierProduct::latest('id')->first();
     $client = $co->client($clientName);
-    $project = $co->project($client, 'P'.Str::random(3));
+    $project = $co->project($client, 'P' . Str::random(3));
     $co->post('clients', 'sourcing.lots.store', [
         'supplier_id' => $supplier->id,
         'delivery_cost' => $deliveryCost,
@@ -97,7 +97,7 @@ function placeOrder(SellbeesCompany $co, $project, $product, string $qty, string
 
 function orderStep(SellbeesCompany $co, string $step, ClientOrder $order, array $data = [])
 {
-    return $co->post('clients', 'product.orders.'.$step, $data, $order);
+    return $co->post('clients', 'product.orders.' . $step, $data, $order);
 }
 
 function bootProduct($test): SellbeesCompany
@@ -169,7 +169,7 @@ it('reserves, dispatches and delivers stock exactly, and earns commission only o
     expect($order->status)->toBe('successful')->and($order->commission)->toBe(100)->and($order->rate_bps)->toBe(100)  // BDT 100 × 1% = BDT 1.00
         ->and($order->invoice->total)->toBe(100)->and(dr('income'))->toBe(0)->and(dr('client.funds'))->toBe(0);          // delivery is not a collection and not revenue
     $key = (string) Str::uuid();
-    $collect = fn (string $amount, string $k) => $co->post('clients', 'product.orders.collect', ['amount' => $amount, 'collected_on' => '2026-02-11', 'idempotency_key' => $k], $order);
+    $collect = fn(string $amount, string $k) => $co->post('clients', 'product.orders.collect', ['amount' => $amount, 'collected_on' => '2026-02-11', 'idempotency_key' => $k], $order);
     $collect('100', $key)->assertSessionHasNoErrors();
     $collect('100', $key);
     $collect('0.01', (string) Str::uuid())->assertSessionHas('error');                  // nothing left to collect
@@ -274,7 +274,7 @@ it('bills storage monthly only under the Board policy, once per lot and month, n
     $co->post('finance', 'finance.orders.storage', ['storage_rate' => '50', 'storage_threshold' => '100'])->assertSessionHasNoErrors();
     Carbon::setTestNow('2026-03-05 10:00:00');
 
-    expect(fn () => StorageBilling::runMonth('2026-02'))->toThrow(RuntimeException::class, 'not authorised');       // no policy: nothing is charged
+    expect(fn() => StorageBilling::runMonth('2026-02'))->toThrow(RuntimeException::class, 'not authorised');       // no policy: nothing is charged
     $co->standingPolicy('storage');
     $out = StorageBilling::runMonth('2026-02');                                                                    // approved, but the area was never measured
     expect($out['needs_measurement'])->toBe([$s['lot']->number])->and($out['billed'])->toBe([])->and(Invoice::where('purpose', 'Warehouse storage')->count())->toBe(0);
@@ -306,7 +306,7 @@ it('bills storage monthly only under the Board policy, once per lot and month, n
     Carbon::setTestNow('2026-04-05 10:00:00');
     $out = StorageBilling::runMonth('2026-03');
     expect($out['billed'])->toBe([])->and(StorageCharge::where('period', '2026-03')->count())->toBe(0);
-    expect(fn () => StorageBilling::runMonth('2026-04'))->toThrow(RuntimeException::class, 'finished month');
+    expect(fn() => StorageBilling::runMonth('2026-04'))->toThrow(RuntimeException::class, 'finished month');
 });
 
 it('settles a client: collected sales less commission and unpaid storage, partial payouts, balanced books, income recognised once', function () {
@@ -338,7 +338,7 @@ it('settles a client: collected sales less commission and unpaid storage, partia
     $co->as('finance')->get(route('product.settlements.show', $s['client']))->assertOk()->assertSee('9,400.00')->assertSee('Record client settlement');
 
     // Scenario 8: pay 5,000 first, 4,400 stays payable. Real payouts need Finance, a reference and sufficient bank cash.
-    $settle = fn (string $pay, string $key, string $ref = 'TRX-1') => $co->post('finance', 'product.settlements.store', ['pay' => $pay, 'paid_on' => '2026-03-08', 'reference' => $ref, 'idempotency_key' => $key], $s['client']);
+    $settle = fn(string $pay, string $key, string $ref = 'TRX-1') => $co->post('finance', 'product.settlements.store', ['pay' => $pay, 'paid_on' => '2026-03-08', 'reference' => $ref, 'idempotency_key' => $key], $s['client']);
     $co->post('clients', 'product.settlements.store', ['paid_on' => '2026-03-08', 'idempotency_key' => (string) Str::uuid()], $s['client'])->assertForbidden();
     $settle('9400.01', (string) Str::uuid())->assertSessionHas('error');                                                  // more than payable
     $settle('5000', (string) Str::uuid(), '')->assertSessionHas('error');                                               // a payout needs its transfer reference
@@ -556,8 +556,8 @@ it('never edits or deletes a stock movement, and shows a project only its own in
     orderStep($co, 'confirm', ClientOrder::where('reference', 'MINE-1')->first());
 
     $movement = StockMovement::where('sourcing_lot_line_id', $s['line']->id)->first();
-    expect(fn () => $movement->update(['reason' => 'tamper']))->toThrow(LogicException::class)
-        ->and(fn () => $movement->delete())->toThrow(LogicException::class);
+    expect(fn() => $movement->update(['reason' => 'tamper']))->toThrow(LogicException::class)
+        ->and(fn() => $movement->delete())->toThrow(LogicException::class);
 
     $page = $co->as('clients')->get(route('product.projects.show', $s['project']))->assertOk()->assertSee('MINE-1')->assertSee($s['product']->name);
     $page->assertDontSee($other['product']->name);
@@ -609,26 +609,26 @@ it('re-checks the limit when an order is confirmed, and when an allocation is ta
     orderStep($co, 'confirm', ClientOrder::where('reference', 'D2')->first())->assertSessionHas('error');   // but the limit holds at confirmation
     expect(Inventory::balances($s['line'])['reserved'])->toBe('15.00');
 
-    expect(fn () => ProjectStockAllocation::cancel($alloc, $finance))->toThrow(RuntimeException::class, 'already used');   // 15 of the 20 are in use
+    expect(fn() => ProjectStockAllocation::cancel($alloc, $finance))->toThrow(RuntimeException::class, 'already used');   // 15 of the 20 are in use
     $unused = ProjectStockAllocation::allocate($s['line'], $s['third'], '10', 'Share', $finance);
     placeOrder($co, $s['third'], $s['product'], '10', '10', 'THIRD')->assertSessionMissing('error');
     ProjectStockAllocation::cancel($unused, $finance);                                                // nothing used yet: allowed
     orderStep($co, 'confirm', ClientOrder::where('reference', 'THIRD')->first())->assertSessionHas('error');   // the draft lost its entitlement
-    expect(fn () => ProjectStockAllocation::cancel($unused, $finance))->toThrow(RuntimeException::class, 'already cancelled');
-    expect(fn () => $unused->delete())->toThrow(LogicException::class);
+    expect(fn() => ProjectStockAllocation::cancel($unused, $finance))->toThrow(RuntimeException::class, 'already cancelled');
+    expect(fn() => $unused->delete())->toThrow(LogicException::class);
 
     // Only free units of a client's own lot can move, and only within that client.
-    expect(fn () => ProjectStockAllocation::allocate($s['line'], $s['third'], '81', 'Too many', $finance))->toThrow(RuntimeException::class, 'free to allocate');
+    expect(fn() => ProjectStockAllocation::allocate($s['line'], $s['third'], '81', 'Too many', $finance))->toThrow(RuntimeException::class, 'free to allocate');
     $stranger = $co->project($co->client('Other client'), 'Elsewhere');
-    expect(fn () => ProjectStockAllocation::allocate($s['line'], $stranger, '1', 'Wrong client', $finance))->toThrow(RuntimeException::class, 'same client');
-    expect(fn () => ProjectStockAllocation::allocate($s['line'], $s['second'], '0', 'Nothing', $finance))->toThrow(RuntimeException::class);
+    expect(fn() => ProjectStockAllocation::allocate($s['line'], $stranger, '1', 'Wrong client', $finance))->toThrow(RuntimeException::class, 'same client');
+    expect(fn() => ProjectStockAllocation::allocate($s['line'], $s['second'], '0', 'Nothing', $finance))->toThrow(RuntimeException::class);
 });
 
 it('gives a cancelled, failed or returned order\'s units back to the project that owned them, and none to another', function () {
     $co = bootProduct($this);
     $s = sharedLot($co);
     ProjectStockAllocation::allocate($s['line'], $s['second'], '20', 'Share', $co->users['finance']);
-    $left = fn ($p) => ProjectStockAllocation::remaining($s['line'], $p->id);
+    $left = fn($p) => ProjectStockAllocation::remaining($s['line'], $p->id);
 
     placeOrder($co, $s['second'], $s['product'], '20', '10', 'R1');
     $o = ClientOrder::where('reference', 'R1')->first();
@@ -699,7 +699,7 @@ it('limits users to their assigned projects and bound client, enforced on pages 
         expect($this->actingAs($staff)->get(route($page))->status())->toBe(403, $page);                    // pages that mix projects
     }
     foreach (['confirm', 'pack', 'dispatch', 'cancel', 'collect', 'refunds'] as $action) {
-        $route = $action === 'refunds' ? 'product.refunds.store' : 'product.orders.'.$action;
+        $route = $action === 'refunds' ? 'product.refunds.store' : 'product.orders.' . $action;
         $this->actingAs($staff)->post(route($route, $rival), ['amount' => '1'])->assertForbidden();
     }
     $this->actingAs($staff)->post(route('product.orders.store'), ['project_id' => $other['project']->id, 'reference' => 'SNEAK', 'ordered_on' => '2026-03-06', 'items' => [['product_id' => $other['product']->id, 'quantity' => '1', 'price' => '10']]])->assertForbidden();
@@ -785,7 +785,7 @@ it('records the delivery charge once, never deducts it again at delivery, and ne
     orderStep($co, 'dispatch', $o, ['delivery_charge' => '99'])->assertSessionHas('error');                   // already dispatched: no second recording
     expect($o->refresh()->delivery_charge)->toBe(800);
 
-    $collect = fn (string $amount) => $co->post('clients', 'product.orders.collect', ['amount' => $amount, 'collected_on' => '2026-02-11', 'idempotency_key' => (string) Str::uuid()], $o);
+    $collect = fn(string $amount) => $co->post('clients', 'product.orders.collect', ['amount' => $amount, 'collected_on' => '2026-02-11', 'idempotency_key' => (string) Str::uuid()], $o);
     $collect('72.01')->assertSessionHas('error');                                                             // the courier's 8.00 is not owed to Sellbees
     $collect('72')->assertSessionMissing('error');
     $state = OrderFulfilment::collectionState($o->refresh()->load('items'));
@@ -827,7 +827,7 @@ it('earns no commission on a failed delivery, records its courier charge once, a
     $o->refresh();
     expect($o->delivery_status)->toBe('failed')->and($o->commission)->toBe(0)->and($o->billed_invoice_id)->toBeNull();
 
-    $charges = fn (array $d) => $co->post('clients', 'product.orders.courier-charges', $d, $o);
+    $charges = fn(array $d) => $co->post('clients', 'product.orders.courier-charges', $d, $o);
     $charges(['return_charge' => '3'])->assertSessionHas('error');                                       // no returned units on this order
     $charges(['failed_delivery_charge' => '2.50'])->assertSessionMissing('error');
     $charges(['failed_delivery_charge' => '9'])->assertSessionHas('error');                              // recorded once, never overwritten
@@ -851,7 +851,7 @@ it('rounds commission half-up in whole paisa and keeps a zero rate valid', funct
 
 function settleClient(SellbeesCompany $co, $client, ?string $pay, ?string $key = null, ?int $account = null)
 {
-    return $co->post('finance', 'product.settlements.store', ['pay' => $pay, 'paid_on' => '2026-02-12', 'reference' => 'TRX-'.Str::random(4), 'idempotency_key' => $key ?? (string) Str::uuid(), 'financial_account_id' => $account], $client);
+    return $co->post('finance', 'product.settlements.store', ['pay' => $pay, 'paid_on' => '2026-02-12', 'reference' => 'TRX-' . Str::random(4), 'idempotency_key' => $key ?? (string) Str::uuid(), 'financial_account_id' => $account], $client);
 }
 
 function collectAll(SellbeesCompany $co, ClientOrder $o, string $amount)
@@ -916,7 +916,7 @@ it('refunds nothing automatically; a courier refund is recorded once, by an auth
     $o = mugOrder($co, $s, 'R-1', '10', '10', 'client', 'paid_by_sellbees', deliver: false);
     orderStep($co, 'deliver', $o, ['delivered' => [$o->items()->first()->id => '6']])->assertSessionMissing('error');
     $before = ProjectEconomics::for($s['project']);
-    $refund = fn (string $amount, string $ref = 'CR-1') => $co->post('finance', 'product.orders.courier-refund', ['amount' => $amount, 'reference' => $ref], $o);
+    $refund = fn(string $amount, string $ref = 'CR-1') => $co->post('finance', 'product.orders.courier-refund', ['amount' => $amount, 'reference' => $ref], $o);
 
     expect($o->refresh()->courier_refund)->toBe(0)->and($before['sellbees_courier_cost'])->toBe(400)->and($before['courier_refunded'])->toBe(0);   // nothing refunded by itself
     $co->post('clients', 'product.orders.courier-refund', ['amount' => '1', 'reference' => 'X'], $o)->assertForbidden();   // Client Management cannot approve refunds
@@ -1037,7 +1037,7 @@ it('reading the project economics and settling never changes a historical financ
 /** Sellbees pays the courier (an ordinary expense), Finance proposes it as a client advance and a different person verifies it. */
 function courierAdvanceFor(SellbeesCompany $co, ClientOrder $o, string $paid = '10'): CourierAdvance
 {
-    $expense = $co->expense('Courier', 'Courier charge for order '.$o->reference, $paid, '2026-02-10');
+    $expense = $co->expense('Courier', 'Courier charge for order ' . $o->reference, $paid, '2026-02-10');
     $co->post('finance', 'product.orders.courier-advance', ['expense_id' => $expense->id], $o)->assertSessionMissing('error');
     $advance = CourierAdvance::where('client_order_id', $o->id)->firstOrFail();
     $co->post('board', 'product.courier-advances.decide', ['decision' => 'approve'], $advance)->assertSessionMissing('error');
@@ -1053,7 +1053,7 @@ function courierBooks(SellbeesCompany $co): void
 
 function journalOf(string $type): array
 {
-    return JournalEntry::where('source_type', $type)->orderBy('id')->get()->map(fn ($e) => $e->lines()->orderBy('id')->get()->map(fn ($l) => [$l->account, (int) $l->debit, (int) $l->credit])->all())->all();
+    return JournalEntry::where('source_type', $type)->orderBy('id')->get()->map(fn($e) => $e->lines()->orderBy('id')->get()->map(fn($l) => [$l->account, (int) $l->debit, (int) $l->credit])->all())->all();
 }
 
 it('clears the withheld client money against a courier advance: zero client liability, zero receivable, commission the only income', function () {
@@ -1109,9 +1109,9 @@ it('requires a second person for a courier advance and links only a genuine paid
 
     $small = $co->expense('Courier', 'Too small', '4', '2026-02-10');
     $o2 = mugOrder($co, $s, 'CA-3', '1', '1', 'client', 'paid_by_sellbees');
-    expect(fn () => CourierAdvanceService::propose($o2, $small, $co->users['finance']))->not->toThrow(RuntimeException::class);   // 1.00 fits in a 4.00 expense
+    expect(fn() => CourierAdvanceService::propose($o2, $small, $co->users['finance']))->not->toThrow(RuntimeException::class);   // 1.00 fits in a 4.00 expense
     $o3 = mugOrder($co, $s, 'CA-4', '1', '4', 'client', 'paid_by_sellbees');
-    expect(fn () => CourierAdvanceService::propose($o3, $small, $co->users['finance']))->toThrow(RuntimeException::class, 'not large enough');   // 1.00 + 1.00 would be fine, but this one is 4.00 on its own
+    expect(fn() => CourierAdvanceService::propose($o3, $small, $co->users['finance']))->toThrow(RuntimeException::class, 'not large enough');   // 1.00 + 1.00 would be fine, but this one is 4.00 on its own
 });
 
 it('returns the excess to expense when later returns shrink what the client owes, leaving no receivable', function () {
