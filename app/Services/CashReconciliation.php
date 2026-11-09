@@ -60,6 +60,24 @@ class CashReconciliation
     }
 
     /**
+     * Net cash of loan repayments (and any reversal of them) posted after the baseline's own journal entry but dated on or before the cutoff date.
+     *
+     * @param  array<string, mixed>  $baseline
+     */
+    private static function repaymentsBookedAfterBaseline(array $baseline): int
+    {
+        $entryId = (int) ($baseline['journal_entry_id'] ?? 0);
+        if ($entryId <= 0) {
+            return 0;
+        }
+        $row = JournalLine::query()->join('journal_entries as e', 'e.id', '=', 'journal_lines.journal_entry_id')->where('journal_lines.account', 'cash')
+            ->whereIn('e.source_type', ['loan_receivable_repayment', 'loan_receivable_repayment_rev'])->where('e.id', '>', $entryId)->whereDate('e.entry_date', '<=', $baseline['cutoff_date'])
+            ->selectRaw('COALESCE(SUM(journal_lines.debit),0) d, COALESCE(SUM(journal_lines.credit),0) c')->first();
+
+        return (int) $row->d - (int) $row->c;
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public static function snapshot(): array
@@ -69,7 +87,9 @@ class CashReconciliation
         $snapshot['baseline'] = $baseline;
         // With no complete set of verified statements (or only older ones) the owner-authorized baseline is the actual balance, labelled as owner-confirmed.
         if ($baseline !== null && ($snapshot['cutoff'] === null || $baseline['cutoff_date'] > $snapshot['cutoff'])) {
-            $expected = self::expectedCash((string) config('finance.currency'), $baseline['cutoff_date']);
+            // The owner's balance is compared with what the books held when it was struck. Cash is dated by day, so a verified loan repayment booked AFTER the baseline entry but dated
+            // the cutoff day is later business, not part of that balance: it is left out here (it stays in today's expected cash). Every other entry is compared as before.
+            $expected = self::expectedCash((string) config('finance.currency'), $baseline['cutoff_date']) - self::repaymentsBookedAfterBaseline($baseline);
             $difference = (int) $baseline['owner_cash'] - $expected;
 
             return array_merge($snapshot, [

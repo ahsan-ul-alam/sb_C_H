@@ -474,3 +474,25 @@ it('still stops the baseline for any later cash entry that is not a verified loa
     expect(ProductionFix::baselineMarker())->toBeNull()->and(DB::table('journal_entries')->where('source_type', ProductionFix::BASELINE_SOURCE)->count())->toBe(0)
         ->and(DB::table('payments')->whereNotNull('voided_at')->count())->toBe(0);
 });
+
+it('keeps the baseline reconciled when loan repayments dated the same day as the cutoff are verified after it was applied', function () {
+    // Production's real state: the baseline was applied on 2026-11-08 (cutoff that day), and the two loan repayments were recorded and verified LATER, dated that same day.
+    $this->artisan('sellbees:production-fix', pfBaselineOptions())->assertExitCode(0);
+    expect(CashReconciliation::snapshot()['difference'])->toBe(0);
+    foreach ([1 => '8000', 2 => '500'] as $loanId => $amount) {
+        $repayment = LoanReceivableService::recordRepayment(LoanReceivable::findOrFail($loanId), ['amount' => (int) $amount * 100, 'repaid_on' => '2026-11-08', 'idempotency_key' => (string) Str::uuid()], $this->co->users['finance']);
+        if ($loanId === 1) {
+            expect(CashReconciliation::snapshot()['difference'])->toBe(0)->and(CashReconciliation::expectedCash('BDT'))->toBe(4_900_000);   // pending: not cash yet
+        }
+        LoanReceivableService::decideRepayment($repayment, true, $this->co->users['board']);
+    }
+
+    $snap = CashReconciliation::snapshot();
+    expect(CashReconciliation::expectedCash('BDT'))->toBe(5_750_000)                                                    // 49,000 + 8,500 = 57,500 today
+        ->and($snap['actual'])->toBe(4_900_000)->and($snap['expected'])->toBe(4_900_000)->and($snap['difference'])->toBe(0)->and($snap['status'])->toBe('reconciled')   // the owner's 49,000 is still compared with the 49,000 the books held when it was struck
+        ->and(BusinessDashboard::build(null, CarbonImmutable::parse('2026-11-08'))['funding']['remaining'])->toBe(5_750_000);
+
+    // Anything else booked after the baseline on the cutoff date is still a visible difference: only the verified repayments are treated as later business.
+    $this->co->expense('Rent', 'Booked after the baseline, same date', '100', '2026-11-08');
+    expect(CashReconciliation::snapshot()['difference'])->toBe(10_000)->and(CashReconciliation::expectedCash('BDT'))->toBe(5_740_000);
+});
