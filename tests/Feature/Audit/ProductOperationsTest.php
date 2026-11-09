@@ -13,6 +13,7 @@ use App\Models\FinancialAccount;
 use App\Models\Invoice;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
+use App\Models\OrderCollection;
 use App\Models\Partner;
 use App\Models\Payment;
 use App\Models\Project;
@@ -24,6 +25,7 @@ use App\Models\StockMovement;
 use App\Models\StorageCharge;
 use App\Models\Supplier;
 use App\Models\SupplierProduct;
+use App\Services\AccountingService;
 use App\Services\ClientSettlementService;
 use App\Services\CourierAdvanceService;
 use App\Services\FinancialStatements;
@@ -32,6 +34,7 @@ use App\Services\Ledger;
 use App\Services\LotFinancials;
 use App\Services\OrderCommission;
 use App\Services\OrderFulfilment;
+use App\Services\PeriodProcessor;
 use App\Services\ProjectEconomics;
 use App\Services\ProjectStockAllocation;
 use App\Services\RevenueRecognition;
@@ -839,9 +842,9 @@ it('rounds commission half-up in whole paisa and keeps a zero rate valid', funct
 
 // ───────────── delivery charge routes: courier-deducted, Sellbees-paid, client-paid, Sellbees-borne ─────────────
 
-function settleClient(SellbeesCompany $co, $client, ?string $pay, ?string $key = null)
+function settleClient(SellbeesCompany $co, $client, ?string $pay, ?string $key = null, ?int $account = null)
 {
-    return $co->post('finance', 'product.settlements.store', ['pay' => $pay, 'paid_on' => '2026-02-12', 'reference' => 'TRX-'.Str::random(4), 'idempotency_key' => $key ?? (string) Str::uuid()], $client);
+    return $co->post('finance', 'product.settlements.store', ['pay' => $pay, 'paid_on' => '2026-02-12', 'reference' => 'TRX-'.Str::random(4), 'idempotency_key' => $key ?? (string) Str::uuid(), 'financial_account_id' => $account], $client);
 }
 
 function collectAll(SellbeesCompany $co, ClientOrder $o, string $amount)
@@ -1165,4 +1168,101 @@ it('keeps the contractual payer of failed-delivery and return charges and never 
     $co->post('clients', 'product.orders.courier-charges', ['failed_delivery_charge' => '3'], $client)->assertSessionMissing('error');
     expect($client->refresh()->unsuccessfulCharges())->toBe(300)->and($client->delivery_charge)->toBe(400)->and($client->courier_refund)->toBe(0)   // the charge incurred stays as it was and nothing was refunded
         ->and($client->recoverableCharge())->toBe(300);                                                  // only what the client bears, and only the failed-delivery charge it incurred
+});
+
+// ───────────── account-level cash proof of the courier-advance scenario ─────────────
+
+function ledgerCash(): int
+{
+    return (int) JournalLine::where('account', 'cash')->sum('debit') - (int) JournalLine::where('account', 'cash')->sum('credit');
+}
+
+/** The money that really crossed the company's boundary, read from the records and not from the netting lines. */
+function externalCash(): int
+{
+    return (int) OrderCollection::sum('amount') - (int) Expense::where('category', 'Courier')->sum('amount') - (int) ClientSettlement::sum('paid');
+}
+
+it('proves the 0.90 commission is an internal reclassification, not a cash outflow: legacy month, income booked at month-end close', function () {
+    $co = bootProduct($this);
+    courierBooks($co);
+    $s = mugClient($co);
+    $base = ledgerCash();                                                                          // the capital already in the books
+    $o = mugOrder($co, $s, 'CP-1', '10', '10', 'client', 'paid_by_sellbees');
+    courierAdvanceFor($co, $o);
+    collectAll($co, $o, '100');
+    settleClient($co, $s['client'], '89.10')->assertSessionMissing('error');
+
+    // Before the month closes the ledger holds the commission as money already moved out of client funds, income not yet booked.
+    expect(externalCash())->toBe(90)->and(ClientSettlement::sum('paid'))->toBe(8_910)                  // +100.00 collected, -10.00 courier, -89.10 client = +0.90 really
+        ->and(ledgerCash() - $base)->toBe(0)                                                           // 10,000 - 1,000 - 90 netting - 8,910: the 0.90 is not yet on the cash line
+        ->and(Ledger::creditBalance('client.funds'))->toBe(0)->and(Ledger::debitBalance('assets.client_courier_advance'))->toBe(0);
+    // Month-end close books the matching debit and the income, once.
+    Carbon::setTestNow('2026-03-02 10:00:00');
+    PeriodProcessor::close('2026-02', $co->users['finance']);
+    expect(ledgerCash() - $base)->toBe(90)->and(ledgerCash() - $base)->toBe(externalCash())                              // company cash is +0.90, exactly the real movement
+        ->and(Ledger::creditBalance('income'))->toBe(90)                                               // commission recognised once; the courier reimbursement is not income
+        ->and(journalOf('period'))->toBe([[['cash', 90, 0], ['income', 0, 90]]]);
+    foreach (JournalEntry::with('lines')->get() as $e) {
+        expect((int) $e->lines->sum('debit'))->toBe((int) $e->lines->sum('credit'));
+    }
+});
+
+it('proves the same in a real-time month: the commission payment debits cash at once, income once, nothing left for close', function () {
+    config(['finance.realtime_from' => '2026-02-01']);
+    $co = bootProduct($this);
+    courierBooks($co);
+    $s = mugClient($co);
+    $base = ledgerCash();
+    $o = mugOrder($co, $s, 'CP-2', '10', '10', 'client', 'paid_by_sellbees');
+    courierAdvanceFor($co, $o);
+    collectAll($co, $o, '100');
+    settleClient($co, $s['client'], '89.10')->assertSessionMissing('error');
+
+    expect(journalOf('payment'))->toBe([[['cash', 90, 0], ['income', 0, 90]]])                          // the netted commission payment: Dr cash 0.90 / Cr income 0.90
+        ->and(ledgerCash() - $base)->toBe(90)->and(ledgerCash() - $base)->toBe(externalCash())->and(ClientSettlement::sum('paid'))->toBe(8_910)
+        ->and(Ledger::creditBalance('income'))->toBe(90)->and(Ledger::creditBalance('client.funds'))->toBe(0)->and(Ledger::debitBalance('assets.client_courier_advance'))->toBe(0);
+    Carbon::setTestNow('2026-03-02 10:00:00');
+    PeriodProcessor::close('2026-02', $co->users['finance']);
+    expect(Ledger::creditBalance('income'))->toBe(90)->and(ledgerCash() - $base)->toBe(90)->and(journalOf('period'))->toBe([]);   // closing adds nothing: no duplicate revenue
+});
+
+it('proves it with the client paid from a bank account and the courier from cash: each account true, the total +0.90', function () {
+    config(['finance.realtime_from' => '2026-02-01']);
+    $co = bootProduct($this);
+    courierBooks($co);
+    $bank = FinancialAccount::factory()->bank()->create(['name' => 'City Bank']);
+    $cashAccount = FinancialAccount::where('is_default', true)->firstOrFail();
+    $cashBefore = AccountingService::balance($cashAccount->id);
+    $s = mugClient($co);
+    $o = mugOrder($co, $s, 'CP-3', '10', '10', 'client', 'paid_by_sellbees');
+    courierAdvanceFor($co, $o);                                                                     // the courier was paid from the default cash account
+    $co->post('clients', 'product.orders.collect', ['amount' => '100', 'collected_on' => '2026-02-11', 'idempotency_key' => (string) Str::uuid(), 'financial_account_id' => $bank->id], $o)->assertSessionMissing('error');
+    settleClient($co, $s['client'], '89.10', null, $bank->id)->assertSessionMissing('error');          // and the client is paid from the bank
+
+    $bankBalance = AccountingService::balance($bank->id);
+    $cashBalance = AccountingService::balance($cashAccount->id) - $cashBefore;
+    expect($bankBalance)->toBe(10_000 - 8_910)->and($cashBalance)->toBe(-1_000)->and($bankBalance + $cashBalance)->toBe(90)->and(externalCash())->toBe(90)   // the 10.90 left in the bank repays the cash the courier took
+        ->and(Ledger::creditBalance('client.funds'))->toBe(0)->and(Ledger::debitBalance('assets.client_courier_advance'))->toBe(0)->and(Ledger::creditBalance('income'))->toBe(90);
+});
+
+it('never writes the courier reclassification into a closed month: it is dated in the open period and flagged', function () {
+    $co = bootProduct($this);
+    courierBooks($co);
+    $s = mugClient($co);
+    $o = mugOrder($co, $s, 'CP-4', '10', '10', 'client', 'paid_by_sellbees');
+    $expense = $co->expense('Courier', 'Courier charge for order CP-4', '10', '2026-02-10');
+    $co->post('finance', 'product.orders.courier-advance', ['expense_id' => $expense->id], $o)->assertSessionMissing('error');
+    Carbon::setTestNow('2026-03-02 10:00:00');
+    PeriodProcessor::close('2026-02', $co->users['finance']);                           // February is now final
+    $feb = JournalEntry::whereDate('entry_date', '<=', '2026-02-28')->count();
+    $febSum = (int) JournalLine::sum('debit');
+
+    Carbon::setTestNow('2026-03-05 10:00:00');
+    $advance = CourierAdvance::firstOrFail();
+    $co->post('board', 'product.courier-advances.decide', ['decision' => 'approve'], $advance)->assertSessionMissing('error');
+    $entry = JournalEntry::where('source_type', 'courier_advance')->firstOrFail();
+    expect($entry->entry_date->toDateString())->toBe('2026-03-05')->and($entry->memo)->toContain('closed; recorded in the open period')
+        ->and(JournalEntry::whereDate('entry_date', '<=', '2026-02-28')->count())->toBe($feb)       // nothing was added to or changed in February
+        ->and((int) $entry->lines->sum('debit'))->toBe((int) $entry->lines->sum('credit'));
 });

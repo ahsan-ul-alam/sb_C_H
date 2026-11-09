@@ -153,6 +153,10 @@ class ClientSettlementService
                     'financial_account_id' => $accountId, 'idempotency_key' => $key, 'created_by' => $user->id, 'courier_applied' => $apply, 'courier_released' => $plan['release']]);
                 CourierAdvanceService::commit($plan, $settlement->id, $date, $user->id);
 
+                // In a real-time month a payment must name its account, and the netted commission is booked to that same account on both sides (Cr here, Dr in the payment's own
+                // entry), so each account stays true and the company's cash falls by nothing. Before the cut-over nothing changes: no account, the default one, income at month-end close.
+                $netAccount = LedgerPostingService::isRealtime($date) ? AccountingService::activeAccountId($accountId) : null;
+
                 $left = $netting;
                 $byKind = ['commission' => 0, 'storage' => 0];
                 foreach ($dues as $due) {
@@ -162,7 +166,7 @@ class ClientSettlementService
                     $take = min($left, $due['balance']);
                     $payment = app(PaymentRecorder::class)->save(new Payment, $due['invoice']->project, $due['invoice'], [
                         'amount' => $take, 'paid_on' => $date, 'method' => 'other', 'reference' => 'Netted from client sales proceeds (settlement #'.$settlement->id.')',
-                        'notes' => $due['label'], 'idempotency_key' => (string) str()->uuid(),
+                        'notes' => $due['label'], 'idempotency_key' => (string) str()->uuid(), 'financial_account_id' => $netAccount,
                     ], null);
                     ReceiptClassification::create(['payment_id' => $payment->id, 'nature' => 'service', 'notes' => 'Fee netted from client sales proceeds', 'classified_by' => $user->id]);
                     $byKind[$due['kind']] += $take;
@@ -174,7 +178,7 @@ class ClientSettlementService
                 // and the month-end close books the matching income. The remitted part is the only real cash out.
                 Ledger::post($date, 'Client settlement #'.$settlement->id.' — '.$client->name, 'client_settlement', $settlement->id, [
                     ['client.funds', null, $netting + $pay + $apply, 0],
-                    ['cash', null, 0, $netting],
+                    $netAccount === null ? ['cash', null, 0, $netting] : ['cash', null, 0, $netting, $netAccount],
                     ['cash', null, 0, $pay, AccountingService::activeAccountId($accountId)],
                     // The withheld client money repays the courier advance: client funds down, receivable down, cash untouched, no income.
                     [CourierAdvanceService::ACCOUNT, null, 0, $apply],

@@ -8,6 +8,7 @@ use App\Models\CourierAdvance;
 use App\Models\Expense;
 use App\Models\JournalEntry;
 use App\Models\User;
+use App\Support\BusinessDate;
 use App\Support\Money;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -74,7 +75,9 @@ class CourierAdvanceService
                 if ($order->recoverableCharge() < (int) $advance->amount) {
                     throw new RuntimeException('The charge recoverable from the client is now lower than this proposal (a later return); propose it again.');
                 }
-                Ledger::post($expense->spent_on->toDateString(), 'Expense #'.$expense->id.' reclassified as a courier charge recoverable from the client (order '.$order->reference.')', 'courier_advance', $advance->id, [
+                $date = self::postingDate($expense);
+                $late = $date !== $expense->spent_on->toDateString() ? ' - the expense month is closed; recorded in the open period, flagged for review' : '';
+                Ledger::post($date, 'Expense #'.$expense->id.' reclassified as a courier charge recoverable from the client (order '.$order->reference.')'.$late, 'courier_advance', $advance->id, [
                     [self::ACCOUNT, null, (int) $advance->amount, 0],
                     ['expense', null, 0, (int) $advance->amount],
                 ], $user->id);
@@ -178,8 +181,19 @@ class CourierAdvanceService
         if (! JournalEntry::where('source_type', 'expense')->where('source_id', $expense->id)->exists()) {
             throw new RuntimeException('This expense has no journal entry, so no cash left through the books.');
         }
-        if (AccountingService::isClosed($expense->spent_on->toDateString())) {
-            throw new RuntimeException('The month of this expense is closed; closed periods are never changed.');
+    }
+
+    /**
+     * The date of the reclassification: the expense's own date while that month is open, otherwise today (the open period). A closed period is never written into, and
+     * if even today's month is closed nothing is posted.
+     */
+    private static function postingDate(Expense $expense): string
+    {
+        $date = AccountingService::isClosed($expense->spent_on->toDateString()) ? BusinessDate::today() : $expense->spent_on->toDateString();
+        if (AccountingService::isClosed($date)) {
+            throw new RuntimeException('The current month is closed as well; open it before reclassifying this expense.');
         }
+
+        return $date;
     }
 }

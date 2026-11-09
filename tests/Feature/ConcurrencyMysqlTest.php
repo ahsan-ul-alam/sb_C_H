@@ -577,6 +577,7 @@ it('never lets simultaneous allocations hand out more units than the home projec
 it('clears a courier advance exactly once when two settlements run at the same moment', function () {
     $s = ccProjectStock();
     $co = test()->co;
+    $co->post('finance', 'finance.orders.rates', ['default_percent' => '1'])->assertSessionHasNoErrors();   // so the settlement nets a commission payment, in a real-time month with accounts
     $id = ccDraft($s, $s['project'], 'CA-M', '10');
     $order = ClientOrder::findOrFail($id);
     $co->post('clients', 'product.orders.confirm', [], $order)->assertSessionMissing('error');
@@ -593,7 +594,9 @@ it('clears a courier advance exactly once when two settlements run at the same m
     expect(collect($results)->where('ok', true)->where('recorded', true))->toHaveCount(1)                  // one settlement does the work, the other finds nothing left
         ->and(ClientSettlement::count())->toBe(1)->and($advance->refresh()->applied)->toBe(1_000)->and($advance->open())->toBe(0)
         ->and(Ledger::creditBalance('client.funds'))->toBe(0)->and(Ledger::debitBalance('assets.client_courier_advance'))->toBe(0)
-        ->and(JournalEntry::where('source_type', 'client_settlement')->count())->toBe(1)->and(JournalEntry::where('source_type', 'courier_advance_release')->count())->toBe(0);
+        ->and(JournalEntry::where('source_type', 'client_settlement')->count())->toBe(1)->and(JournalEntry::where('source_type', 'courier_advance_release')->count())->toBe(0)
+        ->and(Payment::count())->toBe(1)->and((int) Payment::sum('amount'))->toBe(90)                       // the netted commission (1% of 90.00 = 0.90), booked once
+        ->and(Ledger::creditBalance('income'))->toBe(90);
     foreach (JournalEntry::with('lines')->get() as $e) {
         expect((int) $e->lines->sum('debit'))->toBe((int) $e->lines->sum('credit'));
     }
