@@ -267,7 +267,12 @@ class ProductionFix
             } catch (RuntimeException $e) {
                 $problems[] = $e->getMessage();
             }
-            $lastCash = DB::table('journal_entries as e')->join('journal_lines as l', 'l.journal_entry_id', '=', 'e.id')->where('l.account', 'cash')->max('e.entry_date');
+            // Verified loan repayments dated AFTER the cutoff are later business, not part of the owner's balance: the expected cash is computed as of the cutoff date, so they
+            // cannot disturb the comparison, and they are neither touched nor reposted. Any other later cash entry still stops the correction.
+            $laterRepayments = DB::table('loan_receivable_repayments')->where('status', 'verified')->whereDate('repaid_on', '>', $date)->pluck('amount', 'id');
+            $plan['later_repayments'] = $laterRepayments->map(fn ($a) => (int) $a)->all();
+            $lastCash = DB::table('journal_entries as e')->join('journal_lines as l', 'l.journal_entry_id', '=', 'e.id')->where('l.account', 'cash')
+                ->where(fn ($q) => $q->where('e.source_type', '!=', 'loan_receivable_repayment')->orWhereNotIn('e.source_id', $laterRepayments->keys()->all()))->max('e.entry_date');
             $lastPayment = DB::table('payments')->whereNull('voided_at')->max('paid_on');
             foreach (['a journal cash entry' => $lastCash, 'a customer payment' => $lastPayment] as $what => $latest) {
                 if ($latest !== null && substr((string) $latest, 0, 10) > $date) {
@@ -296,6 +301,8 @@ class ProductionFix
             $plan['expected_after'] = $plan['expected_before'] - $plan['void_total'];
             if ($plan['owner_cash'] !== null) {
                 $plan['adjustment'] = $plan['owner_cash'] - $plan['expected_after'];
+                // What the dashboard will read today: the owner's balance at the cutoff plus everything that really happened after it (e.g. the verified loan repayments).
+                $plan['expected_today_after'] = CashReconciliation::expectedCash($currency) - $plan['void_total'] + $plan['adjustment'];
             }
             if ($plan['supplied_expected'] !== null && $plan['supplied_expected'] !== $plan['expected_after']) {
                 $problems[] = 'the expected cash after the corrections is '.self::money($plan['expected_after']).', not the '.self::money($plan['supplied_expected']).' you supplied: the correction stops';
@@ -396,8 +403,9 @@ class ProductionFix
                 if (self::journalHash($maxEntry) !== $journalBefore || DB::table('journal_entries')->where('id', '>', $maxEntry)->count() !== ($adjustment === 0 ? 0 : 1)) {
                     throw new RuntimeException('The journal changed beyond the single baseline entry: rolled back.');
                 }
-                if (self::loanTotals() !== $loansBefore || $loansBefore['outstanding'] !== 850_000) {
-                    throw new RuntimeException('Loans receivable are not as expected (BDT 8,500): rolled back.');
+                // The loans the owner's balance was struck against: BDT 8,500 outstanding AT THE CUTOFF. Repayments verified later are post-baseline business and stay as they are.
+                if (self::loanTotals() !== $loansBefore || self::loanOutstandingAsOf((string) $plan['cutoff_date']) !== 850_000) {
+                    throw new RuntimeException('Loans receivable are not as expected (BDT 8,500 outstanding at the cutoff): rolled back.');
                 }
                 if (CashReconciliation::expectedCash((string) config('finance.currency'), $plan['cutoff_date']) !== $plan['owner_cash']) {
                     throw new RuntimeException('Expected cash does not equal the owner-confirmed balance after the adjustment: rolled back.');
@@ -765,6 +773,18 @@ class ProductionFix
         $repaid = (int) DB::table('loan_receivable_repayments')->where('status', 'verified')->sum('amount');
 
         return ['count' => (int) (clone $verified)->count(), 'principal' => (int) (clone $verified)->sum('principal'), 'outstanding' => (int) (clone $verified)->sum('principal') - $repaid];
+    }
+
+    /** Principal of the verified loans lent by a date, less the verified repayments received by that date. */
+    private static function loanOutstandingAsOf(string $date): int
+    {
+        if (! Schema::hasTable('loan_receivables')) {
+            return 0;
+        }
+        $principal = (int) DB::table('loan_receivables')->where('status', 'verified')->whereDate('lent_on', '<=', $date)->sum('principal');
+        $repaid = (int) DB::table('loan_receivable_repayments')->where('status', 'verified')->whereDate('repaid_on', '<=', $date)->sum('amount');
+
+        return $principal - $repaid;
     }
 
     /** @param array<int, array{state: string}> $voids @param array<int, ?array<string, mixed>> $invoices */

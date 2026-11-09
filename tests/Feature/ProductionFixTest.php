@@ -7,12 +7,17 @@
 
 use App\Models\FinancialAccount;
 use App\Models\Invoice;
+use App\Models\LoanReceivable;
+use App\Models\LoanReceivableRepayment;
 use App\Models\Payment;
 use App\Models\PaymentVoidRequest;
 use App\Models\ReconciliationException;
 use App\Services\BusinessDashboard;
 use App\Services\CashReconciliation;
 use App\Services\IntegrityGate;
+use App\Services\Ledger;
+use App\Services\LoanReceivableService;
+use App\Services\LoanRecoveryAllocationService;
 use App\Services\ProductionFix;
 use App\Services\ReconciliationExceptions;
 use App\Services\StatementReconciliationService;
@@ -21,6 +26,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Tests\Support\SellbeesCompany;
 
 require_once __DIR__.'/../Support/production_fix_rows.php';
@@ -404,4 +410,67 @@ it('refuses while another run holds the lock', function () {
     $this->artisan('sellbees:production-fix', pfApplyOptions())->expectsOutputToContain('Another run of this repair is in progress')->assertExitCode(1);
     $lock->release();
     expect(ProductionFix::marker())->toBeNull();
+});
+
+/* ---------------------------------------------------------------- loan repayments verified AFTER the baseline cutoff */
+
+/** The two loans of the backup repaid in full on 2026-11-09, verified, with an investor tracking allocation on the larger one: business that happened after the cutoff. */
+function pfLaterRepayments(): array
+{
+    Carbon::setTestNow('2026-11-09 12:00:00');
+    $ids = [];
+    foreach ([1 => '8000', 2 => '500'] as $loanId => $amount) {
+        $repayment = LoanReceivableService::recordRepayment(LoanReceivable::findOrFail($loanId), ['amount' => (int) $amount * 100, 'repaid_on' => '2026-11-09', 'idempotency_key' => (string) Str::uuid()], test()->co->users['finance']);
+        LoanReceivableService::decideRepayment($repayment, true, test()->co->users['board']);
+        $ids[$loanId] = $repayment->id;
+    }
+    $allocation = LoanRecoveryAllocationService::propose(LoanReceivableRepayment::findOrFail($ids[1]), test()->co->partner('C'), 800_000, 'Owner tracking request', null, null, test()->co->users['finance']);
+    LoanRecoveryAllocationService::decide($allocation, true, test()->co->users['board']);
+
+    return ['repayments' => $ids, 'allocation' => $allocation->id];
+}
+
+/** @return array<string, mixed> everything about the repayments and the allocation that the baseline must leave alone */
+function pfRepaymentState(): array
+{
+    return [DB::table('loan_receivable_repayments')->orderBy('id')->get()->map(fn ($r) => (array) $r)->all(), DB::table('loan_recovery_allocations')->orderBy('id')->get()->map(fn ($r) => (array) $r)->all(),
+        DB::table('journal_entries')->where('source_type', 'loan_receivable_repayment')->orderBy('id')->get()->map(fn ($e) => (array) $e + ['lines' => DB::table('journal_lines')->where('journal_entry_id', $e->id)->orderBy('id')->get()->map(fn ($l) => (array) $l)->all()])->all()];
+}
+
+it('previews and applies the baseline when verified loan repayments exist after the cutoff, leaving them and the investor allocation untouched', function () {
+    $later = pfLaterRepayments();
+    expect(CashReconciliation::expectedCash('BDT'))->toBe(8_127_100);                                         // the 81,271 an unfixed database shows today
+    $repaymentsBefore = pfRepaymentState();
+    $backup = pfBackup();
+
+    $this->artisan('sellbees:production-fix', ['--baseline' => true, '--cutoff' => '2026-11-08 12:00', '--owner-cash' => '49000', '--expected-cash' => '43571', '--backup-file' => $backup])
+        ->expectsOutputToContain('before corrections: BDT 72,771.00')->expectsOutputToContain('Reconstructed historical cash after corrections: BDT 43,571.00')
+        ->expectsOutputToContain('Legacy Opening Balance Adjustment / Historical Cash Difference: +BDT 5,429.00')->expectsOutputToContain('verified loan repayment #'.$later['repayments'][2].'): +BDT 500.00')
+        ->expectsOutputToContain('verified loan repayment #'.$later['repayments'][1].'): +BDT 8,000.00')->expectsOutputToContain('what happened after it): BDT 57,500.00')
+        ->doesntExpectOutputToContain('Cannot apply yet')->assertExitCode(0);
+    expect(pfRepaymentState())->toEqual($repaymentsBefore);                                                    // the preview changed nothing
+
+    $this->artisan('sellbees:production-fix', pfBaselineOptions(['--backup-file' => $backup, '--as' => $this->operator]))
+        ->expectsOutputToContain('payment #8 (BDT 10,000.00) voided by administrative correction')->expectsOutputToContain('payment #13 (BDT 19,200.00) voided by administrative correction')
+        ->expectsOutputToContain('Legacy Opening Balance Adjustment +BDT 5,429.00 posted')->assertExitCode(0);
+
+    expect(pfRepaymentState())->toEqual($repaymentsBefore)                                                     // repayments, their journals and the allocation are exactly as before
+        ->and(DB::table('loan_receivable_repayments')->count())->toBe(2)->and(DB::table('journal_entries')->where('source_type', 'loan_receivable_repayment')->count())->toBe(2)
+        ->and(DB::table('journal_entries')->where('source_type', ProductionFix::BASELINE_SOURCE)->count())->toBe(1)
+        ->and(CashReconciliation::expectedCash('BDT', '2026-11-08'))->toBe(4_900_000)                           // the owner's 49,000 at the cutoff
+        ->and(CashReconciliation::expectedCash('BDT'))->toBe(5_750_000)                                          // 57,500 today
+        ->and(CashReconciliation::snapshot()['difference'])->toBe(0)->and(DB::table('capital_entries')->where('status', 'verified')->sum('amount'))->toEqual(DB::table('capital_entries')->where('status', 'verified')->sum('amount'));
+    $dash = BusinessDashboard::build(null, CarbonImmutable::parse('2026-11-09'));
+    expect($dash['fund']['available_cash'])->toBe(5_750_000)->and($dash['fund']['loans_receivable'])->toBe(Ledger::debitBalance('assets.loans_receivable'))->and($dash['fund']['loan_recovery_allocated'])->toBe(800_000)
+        ->and($dash['funding']['remaining'])->toBe(5_750_000)->and(ProductionFix::baselineMarker())->not->toBeNull();
+});
+
+it('still stops the baseline for any later cash entry that is not a verified loan repayment', function () {
+    pfLaterRepayments();
+    $this->co->expense('Rent', 'Later office rent', '100', '2026-11-09');                                       // a real later expense: the owner's balance cannot be compared with it
+    $this->artisan('sellbees:production-fix', ['--baseline' => true, '--cutoff' => '2026-11-08 12:00', '--owner-cash' => '49000', '--expected-cash' => '43571', '--backup-file' => pfBackup()])
+        ->expectsOutputToContain('Cannot apply yet: the ERP has a journal cash entry dated 2026-11-09, after the cutoff date')->assertExitCode(0);
+    $this->artisan('sellbees:production-fix', pfBaselineOptions(['--expected-cash' => '43571']))->expectsOutputToContain('after the cutoff date')->assertExitCode(1);
+    expect(ProductionFix::baselineMarker())->toBeNull()->and(DB::table('journal_entries')->where('source_type', ProductionFix::BASELINE_SOURCE)->count())->toBe(0)
+        ->and(DB::table('payments')->whereNotNull('voided_at')->count())->toBe(0);
 });

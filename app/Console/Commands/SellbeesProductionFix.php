@@ -117,6 +117,10 @@ class SellbeesProductionFix extends Command
                 $this->line('  Owner-confirmed actual cash (Bank + bKash + Cash in Hand): '.$this->money($plan['owner_cash']).' (NOT independently bank-verified)');
                 $this->line('  Legacy Opening Balance Adjustment / Historical Cash Difference: '.($plan['adjustment'] >= 0 ? '+' : '-').$this->money(abs((int) $plan['adjustment'])).' (one balanced entry, Dr/Cr cash and opening equity; never revenue, profit, expense, loan, supplier payment or capital)');
                 $this->line('  Cash after: ledger '.$this->money((int) $plan['ledger_cash_before'] + (int) $plan['adjustment']).'; expected cash at the cutoff '.$this->money($plan['owner_cash']).'; unreconciled difference 0 at the cutoff.');
+                foreach ($plan['later_repayments'] ?? [] as $id => $amount) {
+                    $this->line('  after the cutoff, kept exactly as recorded (verified loan repayment #'.$id.'): +'.$this->money((int) $amount));
+                }
+                $this->line('  Expected cash TODAY once the baseline is applied (owner balance at the cutoff + what happened after it): '.$this->money((int) $plan['expected_today_after']));
             }
             $this->line('  Backup: '.($plan['backup'] ? $plan['backup']['path'].' ('.$plan['backup']['modified'].', sha256 '.substr((string) $plan['backup']['sha256'], 0, 16).'...)' : 'none given (--backup-file is required to apply)'));
         }
