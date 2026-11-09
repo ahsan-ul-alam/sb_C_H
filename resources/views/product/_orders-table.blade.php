@@ -68,6 +68,21 @@
                         @endforeach
                     @endif
                 @endcan
+                @if ($o->delivery_status === 'delivered' && $o->delivery_charge_status === 'paid_by_sellbees' && $o->recoverableCharge() > 0)
+                    @php($adv = \App\Models\CourierAdvance::where('client_order_id', $o->id)->whereIn('status', ['pending', 'verified'])->first())
+                    @if (! $adv)
+                        @can('loan.record')
+                        <form method="POST" action="{{ route('product.orders.courier-advance', $o) }}" class="inline-form" style="margin-top:.3rem">@csrf
+                            <select name="expense_id" required aria-label="The expense that paid the courier"><option value="">Courier payment expense…</option>@foreach (($courierExpenses ??= \App\Services\CourierAdvanceService::candidateExpenses()) as $ex)<option value="{{ $ex->id }}">#{{ $ex->id }} {{ $ex->spent_on->format('d M') }} {{ Str::limit($ex->description, 28) }} {{ Money::format($ex->amount) }}</option>@endforeach</select>
+                            <button class="btn btn-sm">Record courier advance {{ Money::format($o->recoverableCharge()) }}</button></form>
+                        @endcan
+                    @elseif ($adv->status === 'pending')
+                        <span class="muted">Courier advance {{ Money::format($adv->amount) }} awaiting verification</span>
+                        @can('loan.verify')@if ($adv->created_by !== auth()->id())<form method="POST" action="{{ route('product.courier-advances.decide', $adv) }}" class="inline-form">@csrf<input type="hidden" name="decision" value="approve"><button class="btn btn-sm btn-primary">Verify courier advance</button></form>@endif @endcan
+                    @else
+                        <span class="muted">Courier advance {{ Money::format($adv->amount) }}: cleared {{ Money::format($adv->applied) }}</span>
+                    @endif
+                @endif
                 @can('collection.record')
                     @if ($cs['outstanding'] > 0)
                         <form method="POST" action="{{ route('product.orders.collect', $o) }}" class="inline-form" style="margin-top:.3rem">@csrf

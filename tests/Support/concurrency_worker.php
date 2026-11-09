@@ -22,6 +22,7 @@ use App\Models\User;
 use App\Services\AccountingService;
 use App\Services\AdvanceSettlementService;
 use App\Services\ClientInformationOtp;
+use App\Services\ClientSettlementService;
 use App\Services\CostRecognitionService;
 use App\Services\DuplicateSubmission;
 use App\Services\ExpenseService;
@@ -156,6 +157,8 @@ try {
 
             return true;
         })(),
+        // A client settlement: pays the client what is owed after fees and clears withheld money against a courier advance.
+        'client_settle' => ClientSettlementService::record(Client::findOrFail($args['client']), null, $args['date'], 'race-'.$args['key'], null, $args['key'], auth()->user()) !== null,
         'client_create' => Client::create(['name' => 'Race client '.$args['n'], 'mobile' => '017'])->sb_number,
         'otp_verify' => ClientInformationOtp::verify(ClientApiIntegration::findOrFail($args['integration']), $args['sb'], $args['request_id'], $args['code']) !== null,
         'payment' => (function () use ($args) {

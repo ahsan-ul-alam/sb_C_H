@@ -6,6 +6,7 @@ use App\Models\BusinessSetting;
 use App\Models\Client;
 use App\Models\ClientOrder;
 use App\Models\ClientSettlement;
+use App\Models\CourierAdvance;
 use App\Models\Invoice;
 use App\Models\OrderCollection;
 use App\Models\OrderRefund;
@@ -38,19 +39,27 @@ class ClientSettlementService
 
     public static function settledOut(Client $c): int
     {
-        return (int) ClientSettlement::where('client_id', $c->id)->selectRaw('COALESCE(SUM(commission_netted + storage_netted + paid),0) s')->value('s');
+        return (int) ClientSettlement::where('client_id', $c->id)->selectRaw('COALESCE(SUM(commission_netted + storage_netted + courier_applied + paid),0) s')->value('s');
     }
 
     /**
-     * Courier charges SELLBEES paid for this client (client-borne, status "paid by Sellbees"), which the client's entitlement already carries. The money for them stays in the
-     * client's funds and is never paid out to the client, so the charge is recovered exactly once (this is a constant subtraction, not a movement, so repeating a settlement
-     * can never deduct it twice). It is NOT billed on an invoice or posted as income: moving it out of client funds needs a Finance reclassification that the ledger has no
-     * journal type for, so it stays visible here as money held for Sellbees until Finance books it.
+     * What a settlement does with the courier charges Sellbees paid for this client, given the money held and the fees netted first. Unrecorded charges (no verified
+     * advance yet) stay withheld from the payout without moving; verified advances are cleared out of client funds up to what is owed and held (see CourierAdvanceService).
+     *
+     * @return array{rows: list<array{advance: CourierAdvance, apply: int, release: int}>, apply: int, release: int, unrecorded: int, withheld: int}
      */
+    public static function courierPlan(Client $c, int $held, int $netting, bool $lock = false): array
+    {
+        $first = CourierAdvanceService::plan($c, PHP_INT_MAX, $lock);
+
+        return CourierAdvanceService::plan($c, max(0, $held - $netting - $first['unrecorded']), $lock);
+    }
+
+    /** Everything still withheld from the client's payout for courier charges Sellbees paid (not yet cleared against a verified advance). */
     public static function courierAdvanceWithheld(Client $c): int
     {
         return (int) ClientOrder::where('fulfilment', 'stock')->where('delivery_charge_status', 'paid_by_sellbees')->whereHas('project', fn ($q) => $q->where('client_id', $c->id))->with('items')->get()
-            ->sum(fn ($o) => $o->recoverableCharge());
+            ->sum(fn ($o) => CourierAdvanceService::stillWithheld($o));
     }
 
     /** Customer money held for the client that has not been netted or remitted. */
@@ -94,14 +103,14 @@ class ClientSettlementService
         $commission = (int) $dues->where('kind', 'commission')->sum('balance');
         $storage = (int) $dues->where('kind', 'storage')->sum('balance');
         $netting = min($held, $commission + $storage);
-        $withheld = self::courierAdvanceWithheld($c);
+        $plan = self::courierPlan($c, $held, $netting);
         $orders = ClientOrder::where('fulfilment', 'stock')->whereHas('project', fn ($q) => $q->where('client_id', $c->id))->with('items')->get();
 
         return [
             'delivered_sales' => (int) $orders->where('delivery_status', 'delivered')->sum(fn ($o) => $o->deliveredValue()),
-            'collected' => self::collected($c), 'commission_due' => $commission, 'courier_advance_withheld' => $withheld, 'storage_due' => $storage,
+            'collected' => self::collected($c), 'commission_due' => $commission, 'courier_advance_withheld' => $plan['withheld'], 'courier_advance_cleared_now' => $plan['apply'], 'storage_due' => $storage,
             'storage_not_deductible' => BusinessSetting::current()->storage_deduct ? 0 : (int) StorageCharge::where('client_id', $c->id)->where('status', 'billed')->with('invoice')->get()->sum(fn ($s) => $s->invoice?->balance() ?? 0),
-            'settled' => self::settledOut($c), 'funds_held' => $held, 'netting' => $netting, 'payable' => max(0, $held - $netting - $withheld), 'dues' => $dues,
+            'settled' => self::settledOut($c), 'funds_held' => $held, 'netting' => $netting, 'payable' => max(0, $held - $netting - $plan['withheld']), 'dues' => $dues,
             'history' => ClientSettlement::where('client_id', $c->id)->latest('id')->get(),
         ];
     }
@@ -123,13 +132,14 @@ class ClientSettlementService
                 $held = self::fundsHeld($client);
                 $dues = self::dues($client);
                 $netting = min($held, (int) $dues->sum('balance'));
-                $withheld = self::courierAdvanceWithheld($client);
-                $payable = max(0, $held - $netting - $withheld);
+                $plan = self::courierPlan($client, $held, $netting, true);
+                $apply = $plan['apply'];
+                $payable = max(0, $held - $netting - $plan['withheld']);
                 $pay ??= $payable;
                 if ($pay < 0 || $pay > $payable) {
-                    throw new RuntimeException('The most that can be paid to the client now is '.Money::format($payable).' (money held '.Money::format($held).', fees netted '.Money::format($netting).($withheld > 0 ? ', kept for the courier charges Sellbees paid on the client\'s behalf '.Money::format($withheld) : '').').');
+                    throw new RuntimeException('The most that can be paid to the client now is '.Money::format($payable).' (money held '.Money::format($held).', fees netted '.Money::format($netting).($plan['withheld'] > 0 ? ', kept for the courier charges Sellbees paid on the client\'s behalf '.Money::format($plan['withheld']) : '').').');
                 }
-                if ($netting + $pay <= 0) {
+                if ($netting + $pay + $apply <= 0) {
                     throw new RuntimeException('There is nothing to settle: no collected money is held for this client.');
                 }
                 if ($pay > 0 && trim((string) $reference) === '') {
@@ -140,7 +150,8 @@ class ClientSettlementService
                 }
 
                 $settlement = ClientSettlement::create(['client_id' => $client->id, 'funds_before' => $held, 'paid' => $pay, 'paid_on' => $date, 'reference' => $reference,
-                    'financial_account_id' => $accountId, 'idempotency_key' => $key, 'created_by' => $user->id]);
+                    'financial_account_id' => $accountId, 'idempotency_key' => $key, 'created_by' => $user->id, 'courier_applied' => $apply, 'courier_released' => $plan['release']]);
+                CourierAdvanceService::commit($plan, $settlement->id, $date, $user->id);
 
                 $left = $netting;
                 $byKind = ['commission' => 0, 'storage' => 0];
@@ -162,9 +173,11 @@ class ClientSettlementService
                 // One balanced entry. The netted part never leaves the bank (it becomes company money); it is reclassified out of client funds
                 // and the month-end close books the matching income. The remitted part is the only real cash out.
                 Ledger::post($date, 'Client settlement #'.$settlement->id.' — '.$client->name, 'client_settlement', $settlement->id, [
-                    ['client.funds', null, $netting + $pay, 0],
+                    ['client.funds', null, $netting + $pay + $apply, 0],
                     ['cash', null, 0, $netting],
                     ['cash', null, 0, $pay, AccountingService::activeAccountId($accountId)],
+                    // The withheld client money repays the courier advance: client funds down, receivable down, cash untouched, no income.
+                    [CourierAdvanceService::ACCOUNT, null, 0, $apply],
                 ], $user->id);
                 Audit::log('client.settled', 'client '.$client->id, "netted $netting, paid $pay, held after ".($held - $netting - $pay));
 

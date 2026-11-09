@@ -11,7 +11,7 @@ class ClientSettlement extends Model
 
     protected function casts(): array
     {
-        return ['paid_on' => 'date', 'funds_before' => 'integer', 'commission_netted' => 'integer', 'storage_netted' => 'integer', 'paid' => 'integer'];
+        return ['paid_on' => 'date', 'funds_before' => 'integer', 'commission_netted' => 'integer', 'storage_netted' => 'integer', 'courier_applied' => 'integer', 'courier_released' => 'integer', 'paid' => 'integer'];
     }
 
     /** @return BelongsTo<Client, $this> */

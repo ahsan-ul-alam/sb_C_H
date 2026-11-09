@@ -7,7 +7,9 @@ use App\Models\Client;
 use App\Models\ClientOrder;
 use App\Models\ClientOrderItem;
 use App\Models\ClientSettlement;
+use App\Models\CourierAdvance;
 use App\Models\Expense;
+use App\Models\FinancialAccount;
 use App\Models\Invoice;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
@@ -23,8 +25,10 @@ use App\Models\StorageCharge;
 use App\Models\Supplier;
 use App\Models\SupplierProduct;
 use App\Services\ClientSettlementService;
+use App\Services\CourierAdvanceService;
 use App\Services\FinancialStatements;
 use App\Services\Inventory;
+use App\Services\Ledger;
 use App\Services\LotFinancials;
 use App\Services\OrderCommission;
 use App\Services\OrderFulfilment;
@@ -835,7 +839,7 @@ it('rounds commission half-up in whole paisa and keeps a zero rate valid', funct
 
 // ───────────── delivery charge routes: courier-deducted, Sellbees-paid, client-paid, Sellbees-borne ─────────────
 
-function settleClient(SellbeesCompany $co, $client, string $pay, ?string $key = null)
+function settleClient(SellbeesCompany $co, $client, ?string $pay, ?string $key = null)
 {
     return $co->post('finance', 'product.settlements.store', ['pay' => $pay, 'paid_on' => '2026-02-12', 'reference' => 'TRX-'.Str::random(4), 'idempotency_key' => $key ?? (string) Str::uuid()], $client);
 }
@@ -1016,4 +1020,149 @@ it('reading the project economics and settling never changes a historical financ
     $ids = JournalEntry::orderBy('id')->pluck('id')->all();
     settleClient($co, $s['client'], '89.10')->assertSessionMissing('error');
     expect(array_slice(JournalEntry::orderBy('id')->pluck('id')->all(), 0, count($ids)))->toBe($ids)->and(JournalEntry::count())->toBe(count($ids) + 1);   // the earlier entry is untouched; one settlement entry added
+});
+
+// ───────────── courier advance: clearing the withheld client funds against the receivable ─────────────
+
+/** Sellbees pays the courier (an ordinary expense), Finance proposes it as a client advance and a different person verifies it. */
+function courierAdvanceFor(SellbeesCompany $co, ClientOrder $o, string $paid = '10'): CourierAdvance
+{
+    $expense = $co->expense('Courier', 'Courier charge for order '.$o->reference, $paid, '2026-02-10');
+    $co->post('finance', 'product.orders.courier-advance', ['expense_id' => $expense->id], $o)->assertSessionMissing('error');
+    $advance = CourierAdvance::where('client_order_id', $o->id)->firstOrFail();
+    $co->post('board', 'product.courier-advances.decide', ['decision' => 'approve'], $advance)->assertSessionMissing('error');
+
+    return $advance->refresh();
+}
+
+function courierBooks(SellbeesCompany $co): void
+{
+    FinancialAccount::factory()->asDefault()->create(['name' => 'Office Cash']);
+    $co->invest('A', '100000', '2026-02-02');
+}
+
+function journalOf(string $type): array
+{
+    return JournalEntry::where('source_type', $type)->orderBy('id')->get()->map(fn ($e) => $e->lines()->orderBy('id')->get()->map(fn ($l) => [$l->account, (int) $l->debit, (int) $l->credit])->all())->all();
+}
+
+it('clears the withheld client money against a courier advance: zero client liability, zero receivable, commission the only income', function () {
+    $co = bootProduct($this);
+    courierBooks($co);
+    $s = mugClient($co);
+    $o = mugOrder($co, $s, 'CA-1', '10', '10', 'client', 'paid_by_sellbees');
+    courierAdvanceFor($co, $o);                                                                    // the 10.00 paid to the courier is reclassified from expense to a receivable
+    collectAll($co, $o, '100')->assertSessionMissing('error');                                       // the customer paid 100.00
+    $st = ClientSettlementService::statement($s['client']);
+    expect([$st['funds_held'], $st['commission_due'], $st['courier_advance_withheld'], $st['payable']])->toBe([10_000, 90, 1_000, 8_910]);
+
+    settleClient($co, $s['client'], '89.10')->assertSessionMissing('error');
+
+    // The balanced entries, exactly once each.
+    expect(journalOf('expense'))->toBe([[['expense', 1_000, 0], ['cash', 0, 1_000]]])                                  // 1. the courier payment, an ordinary expense
+        ->and(journalOf('courier_advance'))->toBe([[['assets.client_courier_advance', 1_000, 0], ['expense', 0, 1_000]]])  // 2. reclassified, not paid or counted twice
+        ->and(journalOf('order_collection'))->toBe([[['cash', 10_000, 0], ['client.funds', 0, 10_000]]])                  // 3. the customer's money, held for the client
+        ->and(journalOf('client_settlement'))->toBe([[['client.funds', 10_000, 0], ['cash', 0, 90], ['cash', 0, 8_910], ['assets.client_courier_advance', 0, 1_000]]])   // 4. payout, commission netting, advance cleared
+        ->and(journalOf('courier_advance_release'))->toBe([]);
+    foreach (JournalEntry::with('lines')->get() as $e) {
+        expect((int) $e->lines->sum('debit'))->toBe((int) $e->lines->sum('credit'));                    // every entry balances
+    }
+    expect(Ledger::creditBalance('client.funds'))->toBe(0)->and(Ledger::debitBalance('assets.client_courier_advance'))->toBe(0)->and(Ledger::debitBalance('expense'))->toBe(0)
+        ->and(CourierAdvanceService::openReceivable())->toBe(0)->and(ClientSettlementService::fundsHeld($s['client']))->toBe(0)
+        ->and(RevenueRecognition::figures('2026-02')['collected'])->toBe(90)->and(Payment::count())->toBe(1);       // only the 0.90 commission reached income; no courier revenue
+    $advance = CourierAdvance::firstOrFail();
+    expect([$advance->amount, $advance->applied, $advance->released, $advance->open()])->toBe([1_000, 1_000, 0, 0]);
+
+    // The Mug figures are unchanged.
+    $e = ProjectEconomics::for($s['project']);
+    expect([$e['entitlement'], $e['client_profit'], $e['sourcing_margin'], $e['commission'], $e['courier_advance_withheld']])->toBe([8_910, 3_910, 2_000, 90, 0]);
+
+    // Repeating the recovery, the settlement or the verification changes nothing.
+    settleClient($co, $s['client'], '0.01')->assertSessionHas('error');
+    $co->post('board', 'product.courier-advances.decide', ['decision' => 'approve'], $advance)->assertSessionHas('error');
+    $co->post('finance', 'product.orders.courier-advance', ['expense_id' => Expense::firstOrFail()->id], $o);
+    expect(CourierAdvance::count())->toBe(1)->and(ClientSettlement::count())->toBe(1)->and(Ledger::debitBalance('assets.client_courier_advance'))->toBe(0);
+});
+
+it('requires a second person for a courier advance and links only a genuine paid expense, once', function () {
+    $co = bootProduct($this);
+    courierBooks($co);
+    $s = mugClient($co);
+    $o = mugOrder($co, $s, 'CA-2', '4', '4', 'client', 'paid_by_sellbees');
+    $expense = $co->expense('Courier', 'Courier charge', '10', '2026-02-10');
+    $co->post('finance', 'product.orders.courier-advance', ['expense_id' => $expense->id], $o)->assertSessionMissing('error');
+    $advance = CourierAdvance::firstOrFail();
+    $co->post('finance', 'product.courier-advances.decide', ['decision' => 'approve'], $advance)->assertForbidden();     // Finance cannot verify (loan.verify is Board's)
+    expect(journalOf('courier_advance'))->toBe([]);                                                                      // nothing is posted until a different person verifies
+    $co->post('finance', 'product.orders.courier-advance', ['expense_id' => $expense->id], $o);
+    expect(CourierAdvance::count())->toBe(1);                                                                // proposing again returns the same proposal
+
+    $small = $co->expense('Courier', 'Too small', '4', '2026-02-10');
+    $o2 = mugOrder($co, $s, 'CA-3', '1', '1', 'client', 'paid_by_sellbees');
+    expect(fn () => CourierAdvanceService::propose($o2, $small, $co->users['finance']))->not->toThrow(RuntimeException::class);   // 1.00 fits in a 4.00 expense
+    $o3 = mugOrder($co, $s, 'CA-4', '1', '4', 'client', 'paid_by_sellbees');
+    expect(fn () => CourierAdvanceService::propose($o3, $small, $co->users['finance']))->toThrow(RuntimeException::class, 'not large enough');   // 1.00 + 1.00 would be fine, but this one is 4.00 on its own
+});
+
+it('returns the excess to expense when later returns shrink what the client owes, leaving no receivable', function () {
+    $co = bootProduct($this);
+    courierBooks($co);
+    $s = mugClient($co);
+    $o = mugOrder($co, $s, 'CA-5', '10', '10', 'client', 'paid_by_sellbees');
+    courierAdvanceFor($co, $o);                                                                    // 10.00 reclassified
+    orderStep($co, 'return', $o, ['returned' => [$o->items()->first()->id => '4']])->assertSessionMissing('error');   // 4 units back before any money was collected
+    expect($o->refresh()->recoverableCharge())->toBe(600);
+    collectAll($co, $o, '60')->assertSessionMissing('error');
+    settleClient($co, $s['client'], null)->assertSessionMissing('error');
+
+    expect(journalOf('courier_advance_release'))->toBe([[['expense', 400, 0], ['assets.client_courier_advance', 0, 400]]])   // the 4.00 the client no longer owes is Sellbees' own cost again
+        ->and(Ledger::debitBalance('assets.client_courier_advance'))->toBe(0)->and(Ledger::creditBalance('client.funds'))->toBe(0)->and(Ledger::debitBalance('expense'))->toBe(400)
+        ->and(CourierAdvanceService::openReceivable())->toBe(0);
+    $a = CourierAdvance::firstOrFail();
+    expect([$a->applied, $a->released])->toBe([600, 400])->and($o->refresh()->unrecoveredCourierCost())->toBe(400);
+});
+
+it('never takes client funds below zero: a short collection clears part of the advance and the rest is cleared at the next settlement', function () {
+    $co = bootProduct($this);
+    courierBooks($co);
+    $s = mugClient($co);
+    $o = mugOrder($co, $s, 'CA-6', '10', '10', 'client', 'paid_by_sellbees');
+    $a = courierAdvanceFor($co, $o);
+    collectAll($co, $o, '5')->assertSessionMissing('error');                                         // only 5.00 of the 100.00 has arrived
+    settleClient($co, $s['client'], null)->assertSessionMissing('error');                           // commission 0.90 first, then 4.10 against the advance, nothing to the client
+    expect($a->refresh()->applied)->toBe(410)->and($a->open())->toBe(590)->and(Ledger::creditBalance('client.funds'))->toBe(0)->and(Ledger::debitBalance('assets.client_courier_advance'))->toBe(590);
+    collectAll($co, $o, '95')->assertSessionMissing('error');
+    settleClient($co, $s['client'], null)->assertSessionMissing('error');
+    expect($a->refresh()->applied)->toBe(1_000)->and($a->open())->toBe(0)->and(Ledger::creditBalance('client.funds'))->toBe(0)->and(Ledger::debitBalance('assets.client_courier_advance'))->toBe(0)
+        ->and(ClientSettlement::sum('paid'))->toBe(8_910);                                           // the client received exactly the entitlement
+});
+
+it('rolls a failed settlement back completely, including the courier clearing', function () {
+    $co = bootProduct($this);
+    courierBooks($co);
+    $s = mugClient($co);
+    $o = mugOrder($co, $s, 'CA-7', '10', '10', 'client', 'paid_by_sellbees');
+    $a = courierAdvanceFor($co, $o);
+    collectAll($co, $o, '100');
+    // Make the settlement's journal collide with an existing entry so it fails AFTER the advance and payments were updated.
+    JournalEntry::create(['entry_date' => '2026-02-12', 'memo' => 'collision', 'source_type' => 'client_settlement', 'source_id' => (int) (ClientSettlement::max('id') ?? 0) + 1, 'posted_by' => 1]);
+    $payments = Payment::count();
+    settleClient($co, $s['client'], '89.10')->assertSessionHas('error');
+    expect($a->refresh()->applied)->toBe(0)->and($a->released)->toBe(0)->and(ClientSettlement::count())->toBe(0)->and(Payment::count())->toBe($payments)
+        ->and(ClientSettlementService::fundsHeld($s['client']))->toBe(10_000)->and(Ledger::debitBalance('assets.client_courier_advance'))->toBe(1_000);
+});
+
+it('keeps the contractual payer of failed-delivery and return charges and never refunds a successful delivery fee by itself', function () {
+    $co = bootProduct($this);
+    $s = mugClient($co);
+    $mine = mugOrder($co, $s, 'PAY-1', '4', '4', 'sellbees', 'paid_by_sellbees', deliver: false);
+    orderStep($co, 'fail', $mine)->assertSessionMissing('error');
+    $co->post('clients', 'product.orders.courier-charges', ['failed_delivery_charge' => '3'], $mine)->assertSessionMissing('error');
+    expect($mine->refresh()->failed_delivery_charge)->toBe(300)->and($mine->unsuccessfulCharges())->toBe(0)->and($mine->settlementDeduction(0))->toBe(0)->and($mine->recoverableCharge())->toBe(0);   // Sellbees' contract: not the client's
+
+    $client = mugOrder($co, $s, 'PAY-2', '4', '4', 'client', 'paid_by_sellbees', deliver: false);
+    orderStep($co, 'fail', $client)->assertSessionMissing('error');
+    $co->post('clients', 'product.orders.courier-charges', ['failed_delivery_charge' => '3'], $client)->assertSessionMissing('error');
+    expect($client->refresh()->unsuccessfulCharges())->toBe(300)->and($client->delivery_charge)->toBe(400)->and($client->courier_refund)->toBe(0)   // the charge incurred stays as it was and nothing was refunded
+        ->and($client->recoverableCharge())->toBe(300);                                                  // only what the client bears, and only the failed-delivery charge it incurred
 });

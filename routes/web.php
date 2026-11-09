@@ -268,6 +268,8 @@ Route::middleware('auth')->group(function () {
             Route::post('orders/{order}/return', [ProductOperationsController::class, 'orderReturn'])->name('orders.return');
             Route::post('order-items/{item}/inspect', [ProductOperationsController::class, 'itemInspect'])->name('items.inspect');
         });
+        Route::post('orders/{order}/courier-advance', [ProductOperationsController::class, 'courierAdvanceStore'])->name('orders.courier-advance')->middleware('can:loan.record');
+        Route::post('courier-advances/{advance}/decide', [ProductOperationsController::class, 'courierAdvanceDecide'])->name('courier-advances.decide')->middleware('can:loan.verify');
         Route::post('orders/{order}/collect', [ProductOperationsController::class, 'orderCollect'])->name('orders.collect')->middleware('can:collection.record');
         Route::get('refunds', [ProductOperationsController::class, 'refunds'])->name('refunds')->middleware('cross.project');
         Route::post('orders/{order}/refunds', [ProductOperationsController::class, 'refundStore'])->name('refunds.store')->middleware('can:orders.manage');

@@ -86,7 +86,7 @@ class ProjectEconomics
             $t['invoiced'] += $o->billed_invoice_id ? $f['commission'] : 0;
             $t['cost_sold'] += $cost;
             $t['estimate'] += $estimate;
-            $t['recoverable'] += $o->recoverableCharge();
+            $t['recoverable'] += CourierAdvanceService::stillWithheld($o);
             $t['courier_cost'] += $o->delivery_status === 'delivered' ? $o->unrecoveredCourierCost() : 0;
             $t['courier_refunded'] += (int) $o->courier_refund;
             $t['units_sold'] = bcadd($t['units_sold'], $units, 2);

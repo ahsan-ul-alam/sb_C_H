@@ -7,6 +7,8 @@ use App\Models\Client;
 use App\Models\ClientOrder;
 use App\Models\ClientOrderItem;
 use App\Models\CommissionAdjustment;
+use App\Models\CourierAdvance;
+use App\Models\Expense;
 use App\Models\FinancialAccount;
 use App\Models\OrderRefund;
 use App\Models\OrderRefundAllocation;
@@ -19,6 +21,7 @@ use App\Models\StorageCharge;
 use App\Models\Supplier;
 use App\Services\Audit;
 use App\Services\ClientSettlementService;
+use App\Services\CourierAdvanceService;
 use App\Services\Inventory;
 use App\Services\OrderFulfilment;
 use App\Services\OrderRefunds;
@@ -62,6 +65,7 @@ class ProductOperationsController extends Controller
                 $value instanceof ClientOrder => $value->project_id,
                 $value instanceof ClientOrderItem => $value->order->project_id,
                 $value instanceof OrderRefund => $value->order->project_id,
+                $value instanceof CourierAdvance => $value->order->project_id,
                 default => false,
             };
             if ($project !== false) {
@@ -285,6 +289,20 @@ class ProductOperationsController extends Controller
         $d = $request->validate(['amount' => ['required', 'regex:'.Money::AMOUNT_REGEX], 'reference' => ['required', 'string', 'max:190']]);
 
         return $this->attempt(fn () => OrderFulfilment::recordCourierRefund($order, Money::toMinor($d['amount']), $d['reference'], $request->user()), 'Courier refund recorded. It reduces only Sellbees\' own unrecovered courier cost.');
+    }
+
+    public function courierAdvanceStore(Request $request, ClientOrder $order): RedirectResponse
+    {
+        $d = $request->validate(['expense_id' => ['required', 'exists:expenses,id']]);
+
+        return $this->attempt(fn () => CourierAdvanceService::propose($order, Expense::findOrFail($d['expense_id']), $request->user()), 'Courier advance proposed. A different user must verify it before it is posted.');
+    }
+
+    public function courierAdvanceDecide(Request $request, CourierAdvance $advance): RedirectResponse
+    {
+        $d = $request->validate(['decision' => ['required', Rule::in(['approve', 'reject'])], 'note' => ['nullable', 'string', 'max:255']]);
+
+        return $this->attempt(fn () => CourierAdvanceService::decide($advance, $d['decision'] === 'approve', $request->user(), $d['note'] ?? null), 'Decision recorded.');
     }
 
     public function orderFail(Request $request, ClientOrder $order): RedirectResponse

@@ -145,6 +145,8 @@ class ReconciliationService
         $receivable = (int) LoanReceivable::where('status', 'verified')->get()->sum(fn ($l) => $l->outstanding());
         $add('Loans', 'Loans receivable: ledger vs verified principal minus repayments', Ledger::debitBalance('assets.loans_receivable'), $receivable, 'Every verified reclassification and repayment must be journaled once.', 'Review the loan receivable records without a journal entry.');
 
+        $add('Client funds', 'Courier advances recoverable from clients: ledger vs verified advances not yet cleared or released', Ledger::debitBalance(CourierAdvanceService::ACCOUNT), CourierAdvanceService::openReceivable(), 'Every verified courier advance, its clearing at settlement and any release must be journaled once; nothing may remain after full recovery.', 'Review the courier advances and settlements without their journal lines.');
+
         // 12. The profit the dashboard reports against the journal, and against what was frozen for distribution.
         $months = AccountingPeriod::orderBy('month')->pluck('month');
         for ($m = $effective; $m && $m->lte(CarbonImmutable::today()->startOfMonth()); $m = $m->addMonth()) {

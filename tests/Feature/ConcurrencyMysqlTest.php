@@ -8,7 +8,9 @@ use App\Models\CapitalEntry;
 use App\Models\Client;
 use App\Models\ClientInfoChallenge;
 use App\Models\ClientOrder;
+use App\Models\ClientSettlement;
 use App\Models\CostRecognition;
+use App\Models\CourierAdvance;
 use App\Models\Expense;
 use App\Models\ExpensePayment;
 use App\Models\FinancialAccount;
@@ -570,4 +572,29 @@ it('never lets simultaneous allocations hand out more units than the home projec
     expect(collect($results)->where('ok', true))->toHaveCount(1)                                              // 7 + 7 > 10: exactly one fits
         ->and(StockAllocation::whereNull('cancelled_at')->sum('quantity'))->toEqual(7)
         ->and(ProjectStockAllocation::remaining($s['line']->refresh(), $s['project']->id))->toBe('3.00');
+});
+
+it('clears a courier advance exactly once when two settlements run at the same moment', function () {
+    $s = ccProjectStock();
+    $co = test()->co;
+    $id = ccDraft($s, $s['project'], 'CA-M', '10');
+    $order = ClientOrder::findOrFail($id);
+    $co->post('clients', 'product.orders.confirm', [], $order)->assertSessionMissing('error');
+    $co->post('clients', 'product.orders.dispatch', ['delivery_charge' => '10', 'delivery_charge_bearer' => 'client', 'delivery_charge_status' => 'paid_by_sellbees'], $order)->assertSessionMissing('error');
+    $co->post('clients', 'product.orders.deliver', [], $order)->assertSessionMissing('error');
+    $co->post('clients', 'product.orders.collect', ['amount' => '100', 'collected_on' => '2026-11-10', 'idempotency_key' => (string) Str::uuid()], $order)->assertSessionMissing('error');
+    $expense = $co->expense('Courier', 'Courier charge CA-M', '10', '2026-11-10');
+    $co->post('finance', 'product.orders.courier-advance', ['expense_id' => $expense->id], $order)->assertSessionMissing('error');
+    $advance = CourierAdvance::firstOrFail();
+    $co->post('board', 'product.courier-advances.decide', ['decision' => 'approve'], $advance)->assertSessionMissing('error');
+
+    $results = ccRun('client_settle', 2, fn (int $i) => ['client' => $s['client']->id, 'key' => (string) Str::uuid(), 'date' => '2026-11-10']);
+
+    expect(collect($results)->where('ok', true)->where('recorded', true))->toHaveCount(1)                  // one settlement does the work, the other finds nothing left
+        ->and(ClientSettlement::count())->toBe(1)->and($advance->refresh()->applied)->toBe(1_000)->and($advance->open())->toBe(0)
+        ->and(Ledger::creditBalance('client.funds'))->toBe(0)->and(Ledger::debitBalance('assets.client_courier_advance'))->toBe(0)
+        ->and(JournalEntry::where('source_type', 'client_settlement')->count())->toBe(1)->and(JournalEntry::where('source_type', 'courier_advance_release')->count())->toBe(0);
+    foreach (JournalEntry::with('lines')->get() as $e) {
+        expect((int) $e->lines->sum('debit'))->toBe((int) $e->lines->sum('credit'));
+    }
 });
