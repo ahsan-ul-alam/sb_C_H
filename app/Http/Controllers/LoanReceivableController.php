@@ -2,12 +2,15 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Document;
 use App\Models\Expense;
 use App\Models\FinancialAccount;
 use App\Models\LoanReceivable;
 use App\Models\LoanReceivableRepayment;
+use App\Models\LoanRecoveryAllocation;
 use App\Models\Partner;
 use App\Services\LoanReceivableService;
+use App\Services\LoanRecoveryAllocationService;
 use App\Support\Money;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -24,7 +27,8 @@ class LoanReceivableController extends Controller
             'loans' => LoanReceivable::with(['repayments.account', 'partner', 'expense'])->latest('id')->get(),
             'candidates' => Expense::where('status', 'verified')->whereNull('reverses_id')->where('payment_status', 'paid')->where('is_asset', false)
                 ->whereIn('classification', ['operating', 'other'])->whereNotIn('id', $linked)->latest('spent_on')->limit(200)->get(),
-            'partners' => Partner::orderBy('sort')->get(),
+            'partners' => Partner::orderBy('sort')->get(), 'documents' => Document::latest('id')->limit(100)->get(),
+            'allocations' => LoanRecoveryAllocation::with(['partner', 'creator', 'document'])->latest('id')->get()->groupBy('loan_receivable_repayment_id'),
             'accounts' => FinancialAccount::where('is_active', true)->orderBy('name')->get(),
         ]);
     }
@@ -65,6 +69,34 @@ class LoanReceivableController extends Controller
                 throw new RuntimeException('This repayment was already recorded.');
             }
         }, 'Recorded; awaiting verification by a Board member.');
+    }
+
+    public function allocate(Request $request, LoanReceivableRepayment $repayment): RedirectResponse
+    {
+        $d = $request->validate(['partner_id' => ['required', 'exists:partners,id'], 'amount' => ['required', 'regex:'.Money::AMOUNT_REGEX], 'reason' => ['required', 'string', 'max:200'],
+            'reference' => ['nullable', 'string', 'max:120'], 'document_id' => ['nullable', 'exists:documents,id'], 'idempotency_key' => ['nullable', 'uuid']]);
+
+        return $this->attempt(fn () => LoanRecoveryAllocationService::propose($repayment, Partner::findOrFail($d['partner_id']), Money::toMinor($d['amount']), $d['reason'], $d['reference'] ?? null, $d['document_id'] ?? null, $request->user(), $d['idempotency_key'] ?? null),
+            'Allocation proposed for tracking only: no cash, capital or income is created. A Board member must verify it.');
+    }
+
+    public function decideAllocation(Request $request, LoanRecoveryAllocation $allocation): RedirectResponse
+    {
+        $approve = $request->input('decision') === 'verify';
+
+        return $this->attempt(fn () => LoanRecoveryAllocationService::decide($allocation, $approve, $request->user(), $request->input('reason')), $approve ? 'Verified as a tracking allocation. Nothing was posted.' : 'Rejected.');
+    }
+
+    public function reverseAllocation(Request $request, LoanRecoveryAllocation $allocation): RedirectResponse
+    {
+        $d = $request->validate(['reason' => ['required', 'string', 'max:200']]);
+
+        return $this->attempt(fn () => LoanRecoveryAllocationService::reverse($allocation, $d['reason'], $request->user()), 'Allocation reversed; the amount is free again.');
+    }
+
+    public function allocationAsCapital(LoanRecoveryAllocation $allocation): RedirectResponse
+    {
+        return $this->attempt(fn () => LoanRecoveryAllocationService::refuseCapitalConversion($allocation), '');
     }
 
     public function decideRepayment(Request $request, LoanReceivableRepayment $repayment): RedirectResponse

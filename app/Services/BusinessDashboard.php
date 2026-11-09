@@ -444,7 +444,9 @@ class BusinessDashboard
         })->all();
 
         return ['available_cash' => $available, 'loans_receivable' => $position['loans_receivable'], 'cash_plus_receivables' => $available + $position['loans_receivable'],
-            'total_net_assets' => $balance['assets'] - $balance['liabilities'] + $unjournaled, 'collections_not_journaled' => $unjournaled, 'loans' => $loans];
+            'total_net_assets' => $balance['assets'] - $balance['liabilities'] + $unjournaled, 'collections_not_journaled' => $unjournaled, 'loans' => $loans,
+            // Four separate figures, never merged: loan recoveries tracked against investors are NOT capital and are not in the capital total.
+            'verified_investor_capital' => (int) FinancialStatements::capital()['total'], 'loan_recovery_allocated' => (int) LoanRecoveryAllocationService::verifiedByPartner()->sum()];
     }
 
     /** @return array<string, mixed> */

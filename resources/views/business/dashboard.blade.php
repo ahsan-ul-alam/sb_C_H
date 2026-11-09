@@ -170,6 +170,8 @@
                     <li><span>+ Loans receivable (lent out, recoverable, not spendable)</span><span class="n">{{ $m($data['fund']['loans_receivable']) }}</span></li>
                     <li><span class="t">Cash + loans receivable</span><span class="n t">{{ $m($data['fund']['cash_plus_receivables']) }}</span></li>
                     <li><span class="t">Total net assets (all assets less liabilities)</span><span class="n t">{{ $m($data['fund']['total_net_assets']) }}</span></li>
+                    <li><span class="t">Verified investor capital contributions</span><span class="n t">{{ $m($data['fund']['verified_investor_capital']) }}</span></li>
+                    <li><span class="m">Loan recoveries allocated to investors (tracking only, not capital, not cash)</span><span class="n m">{{ $m($data['fund']['loan_recovery_allocated']) }}</span></li>
                     @foreach ($data['fund']['loans'] as $loan)
                         <li><span class="m">Loan to {{ $loan['borrower'] }} ({{ $loan['lent_on'] }}): lent {{ $m($loan['principal']) }}, repaid {{ $m($loan['repaid']) }}, {{ $loan['status'] }}</span><span class="n m">{{ $m($loan['outstanding']) }}</span></li>
                     @endforeach

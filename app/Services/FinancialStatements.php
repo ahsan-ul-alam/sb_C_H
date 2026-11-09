@@ -218,6 +218,7 @@ class FinancialStatements
 
             return [
                 'partner' => $p, 'target_bps' => $policy?->investment_bps[$p->code] ?? null, 'contributed' => $contributed,
+                'loan_recovery_allocated' => (int) (LoanRecoveryAllocationService::verifiedByPartner()[$p->id] ?? 0), // tracking only: never part of contributed or any capital figure
                 'pending' => $entrySum($p->id, 'pending'), 'withdrawn' => $withdrawn,
                 'loss_charged' => $lossCharged, 'capital_balance' => $contributed - $lossCharged - $withdrawn,
                 'accrued' => $accrued, 'paid_out' => $paidOut, 'outstanding' => $accrued - $paidOut,

@@ -341,7 +341,7 @@ it('settles a client: collected sales less commission and unpaid storage, partia
     $settle = fn (string $pay, string $key, string $ref = 'TRX-1') => $co->post('finance', 'product.settlements.store', ['pay' => $pay, 'paid_on' => '2026-03-08', 'reference' => $ref, 'idempotency_key' => $key], $s['client']);
     $co->post('clients', 'product.settlements.store', ['paid_on' => '2026-03-08', 'idempotency_key' => (string) Str::uuid()], $s['client'])->assertForbidden();
     $settle('9400.01', (string) Str::uuid())->assertSessionHas('error');                                                  // more than payable
-    $settle('5000', (string) Str::uuid(), '')->assertSessionHas('error');                                                 // a payout needs its transfer reference
+    $settle('5000', (string) Str::uuid(), '')->assertSessionHas('error');                                               // a payout needs its transfer reference
     $key = (string) Str::uuid();
     $settle('5000', $key)->assertSessionHasNoErrors();
     $settle('5000', $key);                                                                                                // duplicate request
@@ -491,8 +491,15 @@ it('keeps one project\'s stock away from another project of the same client unle
     expect(ClientOrder::where('reference', 'X-PROJ')->exists())->toBeFalse()->and(Inventory::balances($s['line'])['reserved'])->toBe('0.00');
     placeOrder($co, $s['project'], $s['product'], '5', '10', 'OWN')->assertSessionHasNoErrors();   // its own project still can
 
-    SourcingAllocation::create(['sourcing_lot_id' => $s['lot']->id, 'project_id' => $second->id, 'kind' => 'sale', 'description' => 'Agreed share', 'quantity' => '10', 'unit_price' => 1_000,
-        'created_by' => $co->users['finance']->id]);
+    SourcingAllocation::create([
+        'sourcing_lot_id' => $s['lot']->id,
+        'project_id' => $second->id,
+        'kind' => 'sale',
+        'description' => 'Agreed share',
+        'quantity' => '10',
+        'unit_price' => 1_000,
+        'created_by' => $co->users['finance']->id,
+    ]);
     placeOrder($co, $second, $s['product'], '5', '10', 'BILLING-ONLY')->assertSessionHas('error');   // a billing allocation gives the project no stock
     ProjectStockAllocation::allocate($s['line'], $second, '10', 'Agreed share', $co->users['finance']);
     placeOrder($co, $second, $s['product'], '5', '10', 'ALLOCATED')->assertSessionHasNoErrors();   // an explicit stock allocation does

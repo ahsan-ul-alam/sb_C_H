@@ -18,6 +18,7 @@ use App\Models\InventoryEngineEnrolment;
 use App\Models\JournalEntry;
 use App\Models\LoanReceivable;
 use App\Models\LoanReceivableRepayment;
+use App\Models\LoanRecoveryAllocation;
 use App\Models\Payment;
 use App\Models\Payout;
 use App\Models\StockAllocation;
@@ -600,4 +601,23 @@ it('clears a courier advance exactly once when two settlements run at the same m
     foreach (JournalEntry::with('lines')->get() as $e) {
         expect((int) $e->lines->sum('debit'))->toBe((int) $e->lines->sum('credit'));
     }
+});
+
+it('lets exactly the free repayment amount through when two investor allocations race, and posts nothing', function () {
+    $co = test()->co;
+    $expense = $co->expense('Loan', 'Loan for Ahsan', '8000', '2026-10-26');
+    $co->post('finance', 'finance.loans-receivable.store', ['expense_id' => $expense->id, 'borrower_partner_id' => $co->partner('B')->id])->assertSessionHasNoErrors();
+    $loan = LoanReceivable::firstOrFail();
+    $co->post('board', 'finance.loans-receivable.decide', ['decision' => 'verify'], $loan)->assertSessionHasNoErrors();
+    $co->post('finance', 'finance.loans-receivable.repay', ['amount' => '8000', 'repaid_on' => '2026-11-06', 'idempotency_key' => (string) Str::uuid()], $loan)->assertSessionHasNoErrors();
+    $repayment = LoanReceivableRepayment::firstOrFail();
+    $co->post('board', 'finance.loans-receivable.repayments.decide', ['decision' => 'verify'], $repayment)->assertSessionHasNoErrors();
+    $journals = JournalEntry::count();
+    $cash = Ledger::debitBalance('cash');
+
+    $results = ccRun('loan_alloc', 2, fn (int $i) => ['repayment' => $repayment->id, 'partner' => $co->partner('C')->id, 'amount' => 800_000, 'key' => (string) Str::uuid()]);
+
+    expect(collect($results)->where('ok', true))->toHaveCount(1)                                                      // 8,000 + 8,000 > 8,000: exactly one fits
+        ->and(LoanRecoveryAllocation::count())->toBe(1)->and((int) LoanRecoveryAllocation::sum('amount'))->toBe(800_000)
+        ->and(JournalEntry::count())->toBe($journals)->and(Ledger::debitBalance('cash'))->toBe($cash);                 // an allocation is never a posting
 });

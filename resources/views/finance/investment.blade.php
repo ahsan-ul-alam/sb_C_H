@@ -16,20 +16,21 @@
     <section class="panel">
         <div class="panel-head"><h2>Capital by partner</h2><span class="sub">Policy: {{ $policy?->name ?? '—' }}</span></div>
         <div class="table-wrap"><table class="table table-min-760">
-            <thead><tr><th>Partner</th><th class="num">Target share</th><th class="num">Actual share</th><th class="num">Paid-in capital (not revenue)</th><th class="num">Target amount*</th><th class="num">Contribution gap (target − paid-in)</th><th class="num">Pending entries</th><th class="num">Loss charged (capital account)</th><th class="num">Capital account balance</th></tr></thead>
+            <thead><tr><th>Partner</th><th class="num">Target share</th><th class="num">Actual share</th><th class="num">Capital contributed (paid-in, not revenue)</th><th class="num">Loan recovery allocated (tracking only, not capital)</th><th class="num">Target amount*</th><th class="num">Contribution gap (target − paid-in)</th><th class="num">Pending entries</th><th class="num">Loss charged (capital account)</th><th class="num">Capital account balance</th></tr></thead>
             <tbody>
             @foreach ($rows as $r)
                 <tr><td class="primary-cell"><a href="{{ route('finance.partners.show', $r['partner']) }}">{{ $r['partner']->code }} · {{ $r['partner']->name }}</a></td>
                     <td class="num">{{ $r['target_bps'] === null ? '—' : number_format($r['target_bps'] / 100, 2).'%' }}</td>
                     <td class="num">{{ $r['actual_bps'] === null ? '—' : number_format($r['actual_bps'] / 100, 2).'%' }}</td>
                     <td class="num">{{ Money::format($r['contributed']) }}</td>
+                    <td class="num muted">{{ Money::format($r['loan_recovery_allocated']) }}</td>
                     <td class="num">{{ $r['target_amount'] === null ? '—' : Money::format($r['target_amount']) }}</td>
                     <td class="num {{ ($r['gap'] ?? 0) > 0 ? 'text-danger' : '' }}">{{ $r['gap'] === null ? '—' : Money::format($r['gap']) }}</td>
                     <td class="num">{{ Money::format($r['pending']) }}</td><td class="num">{{ Money::format($r['loss_charged']) }}</td>
                     <td class="num strong">{{ Money::format($r['capital_balance']) }}</td></tr>
             @endforeach
             </tbody>
-            <tfoot><tr><td>Total</td><td></td><td></td><td class="num">{{ Money::format($total) }}</td><td colspan="2"></td><td class="num">{{ Money::format((int) $rows->sum('pending')) }}</td><td class="num">{{ Money::format((int) $rows->sum('loss_charged')) }}</td><td class="num">{{ Money::format((int) $rows->sum('capital_balance')) }}</td></tr></tfoot>
+            <tfoot><tr><td>Total</td><td></td><td></td><td class="num">{{ Money::format($total) }}</td><td class="num muted">{{ Money::format((int) $rows->sum('loan_recovery_allocated')) }}</td><td colspan="2"></td><td class="num">{{ Money::format((int) $rows->sum('pending')) }}</td><td class="num">{{ Money::format((int) $rows->sum('loss_charged')) }}</td><td class="num">{{ Money::format((int) $rows->sum('capital_balance')) }}</td></tr></tfoot>
         </table></div>
         <div class="panel-foot muted">*Target amount = total paid-in × target share. A positive gap is what that partner would still add to match the policy proportions at today's total.</div>
     </section>

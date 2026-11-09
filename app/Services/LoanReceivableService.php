@@ -6,6 +6,7 @@ use App\Models\Expense;
 use App\Models\JournalEntry;
 use App\Models\LoanReceivable;
 use App\Models\LoanReceivableRepayment;
+use App\Models\LoanRecoveryAllocation;
 use App\Models\Partner;
 use App\Models\User;
 use App\Support\Money;
@@ -193,6 +194,9 @@ class LoanReceivableService
                 throw new RuntimeException('You cannot reverse an entry you recorded.');
             }
             self::assertNotBorrower($loan, $user);
+            if (LoanRecoveryAllocation::where('loan_receivable_repayment_id', $repayment->id)->whereIn('status', LoanRecoveryAllocationService::LIVE)->exists()) {
+                throw new RuntimeException('This repayment is allocated to an investor (or awaiting verification); reverse that allocation first.');
+            }
             $original = JournalEntry::where('source_type', 'loan_receivable_repayment')->where('source_id', $repayment->id)->firstOrFail();
             AccountingService::assertCanSpend($original->lines()->where('account', 'cash')->value('financial_account_id'), (int) $repayment->amount);
             Ledger::reverse($original, $original->entry_date->toDateString(), 'Reversal of loan repayment #'.$repayment->id.': '.$reason, 'loan_receivable_repayment_rev', $repayment->id, $user->id);

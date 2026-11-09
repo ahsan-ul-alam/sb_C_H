@@ -438,6 +438,10 @@ Route::middleware('auth')->group(function () {
         Route::post('loans-receivable', [LoanReceivableController::class, 'store'])->name('loans-receivable.store')->middleware('can:loan.record');
         Route::post('loans-receivable/{loan}/decide', [LoanReceivableController::class, 'decide'])->name('loans-receivable.decide')->middleware('can:loan.verify');
         Route::post('loans-receivable/{loan}/reverse', [LoanReceivableController::class, 'reverse'])->name('loans-receivable.reverse')->middleware('can:loan.verify');
+        Route::post('loan-receivable-repayments/{repayment}/allocations', [LoanReceivableController::class, 'allocate'])->name('loans-receivable.allocations.store')->middleware('can:loan.record');
+        Route::post('loan-recovery-allocations/{allocation}/decide', [LoanReceivableController::class, 'decideAllocation'])->name('loans-receivable.allocations.decide')->middleware('can:loan.verify');
+        Route::post('loan-recovery-allocations/{allocation}/reverse', [LoanReceivableController::class, 'reverseAllocation'])->name('loans-receivable.allocations.reverse')->middleware('can:loan.verify');
+        Route::post('loan-recovery-allocations/{allocation}/as-capital', [LoanReceivableController::class, 'allocationAsCapital'])->name('loans-receivable.allocations.capital')->middleware('can:loan.record');
         Route::post('loans-receivable/{loan}/repayments', [LoanReceivableController::class, 'repay'])->name('loans-receivable.repay')->middleware('can:loan.record');
         Route::post('loan-receivable-repayments/{repayment}/decide', [LoanReceivableController::class, 'decideRepayment'])->name('loans-receivable.repayments.decide')->middleware('can:loan.verify');
         Route::post('loan-receivable-repayments/{repayment}/reverse', [LoanReceivableController::class, 'reverseRepayment'])->name('loans-receivable.repayments.reverse')->middleware('can:loan.verify');

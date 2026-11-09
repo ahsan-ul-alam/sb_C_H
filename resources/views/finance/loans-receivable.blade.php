@@ -63,6 +63,39 @@
                             @endif
                         @endcan
                     </td></tr>
+                @if ($r->status === 'verified')
+                    @php($rows = $allocations->get($r->id, collect()))
+                    @php($free = \App\Services\LoanRecoveryAllocationService::available($r))
+                    <tr><td colspan="6" class="muted" style="font-size:.85rem">
+                        <strong>Investor allocation (tracking only)</strong> — never a cash receipt, paid-in capital or income. Repaid {{ Money::format($r->amount) }}, free to allocate {{ Money::format($free) }}.
+                        @foreach ($rows as $a)
+                            <div>{{ $a->partner->code }} · {{ $a->partner->name }}: {{ Money::format($a->amount) }} <x-status :value="$a->status" /> — {{ $a->reason }}@if ($a->reference) ({{ $a->reference }})@endif @if ($a->document) · doc #{{ $a->document_id }}@endif @if ($a->status === 'reversed') · reversed: {{ $a->reversal_reason }}@endif
+                                @can('loan.verify')
+                                    @if ($a->status === 'pending' && $a->created_by !== auth()->id())
+                                        @foreach (['verify' => 'btn-success', 'reject' => 'btn-danger'] as $d => $cls)<form method="POST" action="{{ route('finance.loans-receivable.allocations.decide', $a) }}" style="display:inline">@csrf<input type="hidden" name="decision" value="{{ $d }}">@if ($d === 'reject')<input name="reason" placeholder="reason" required>@endif<button class="btn btn-sm {{ $cls }}">{{ ucfirst($d) }}</button></form>@endforeach
+                                    @elseif ($a->status === 'verified' && $a->created_by !== auth()->id())
+                                        <details style="display:inline"><summary class="btn btn-sm">Reverse</summary><form method="POST" action="{{ route('finance.loans-receivable.allocations.reverse', $a) }}" style="display:flex; gap:.4rem; margin-top:.4rem">@csrf<input name="reason" placeholder="Reason" required><button class="btn btn-sm btn-danger">Reverse</button></form></details>
+                                    @endif
+                                @endcan
+                            </div>
+                        @endforeach
+                        @can('loan.record')
+                            @if ($free > 0)
+                                <details><summary class="btn btn-sm">Allocate recovered amount to investor</summary>
+                                    <form method="POST" action="{{ route('finance.loans-receivable.allocations.store', $r) }}" style="display:flex; gap:.5rem; flex-wrap:wrap; align-items:end; margin-top:.4rem">@csrf
+                                        <input type="hidden" name="idempotency_key" value="{{ (string) \Illuminate\Support\Str::uuid() }}">
+                                        <div class="field"><label>Investor</label><select name="partner_id" required>@foreach ($partners as $p)<option value="{{ $p->id }}">{{ $p->code }} · {{ $p->name }}</option>@endforeach</select></div>
+                                        <div class="field"><label>Amount (max {{ Money::format($free) }})</label><input name="amount" inputmode="decimal" required style="max-width:8rem"></div>
+                                        <div class="field"><label>Reason</label><input name="reason" required></div>
+                                        <div class="field"><label>Reference</label><input name="reference" style="max-width:9rem"></div>
+                                        <div class="field"><label>Supporting document</label><select name="document_id"><option value="">None</option>@foreach ($documents as $doc)<option value="{{ $doc->id }}">#{{ $doc->id }}</option>@endforeach</select></div>
+                                        <button class="btn btn-primary">Propose allocation</button>
+                                    </form></details>
+                            @endif
+                        @endcan
+                        <div style="margin-top:.3rem">To record real new investor money, use the Investment ledger; a recovered loan cannot be converted into paid-in capital.</div>
+                    </td></tr>
+                @endif
             @empty
                 <tr><td colspan="6" class="muted">No repayments yet.</td></tr>
             @endforelse

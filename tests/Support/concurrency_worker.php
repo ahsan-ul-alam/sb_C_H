@@ -11,6 +11,7 @@ use App\Models\InventoryEngineEnrolment;
 use App\Models\InventoryHandover;
 use App\Models\LoanReceivable;
 use App\Models\LoanReceivableRepayment;
+use App\Models\Partner;
 use App\Models\Payment;
 use App\Models\Payout;
 use App\Models\Project;
@@ -30,6 +31,7 @@ use App\Services\InventoryEngine;
 use App\Services\InventoryHandoverService;
 use App\Services\InvestmentService;
 use App\Services\LoanReceivableService;
+use App\Services\LoanRecoveryAllocationService;
 use App\Services\OrderFulfilment;
 use App\Services\PaymentRecorder;
 use App\Services\PayoutService;
@@ -159,6 +161,8 @@ try {
         })(),
         // A client settlement: pays the client what is owed after fees and clears withheld money against a courier advance.
         'client_settle' => ClientSettlementService::record(Client::findOrFail($args['client']), null, $args['date'], 'race-'.$args['key'], null, $args['key'], auth()->user()) !== null,
+        // An optional investor allocation of a verified loan repayment (tracking only); the repayment row lock must let exactly the free amount through.
+        'loan_alloc' => LoanRecoveryAllocationService::propose(LoanReceivableRepayment::findOrFail($args['repayment']), Partner::findOrFail($args['partner']), $args['amount'], 'race', null, null, auth()->user(), $args['key']) !== null,
         'client_create' => Client::create(['name' => 'Race client '.$args['n'], 'mobile' => '017'])->sb_number,
         'otp_verify' => ClientInformationOtp::verify(ClientApiIntegration::findOrFail($args['integration']), $args['sb'], $args['request_id'], $args['code']) !== null,
         'payment' => (function () use ($args) {
