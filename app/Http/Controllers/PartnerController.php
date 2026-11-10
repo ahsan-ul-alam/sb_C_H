@@ -7,6 +7,7 @@ use App\Models\Partner;
 use App\Models\Payout;
 use App\Models\User;
 use App\Services\Audit;
+use App\Services\InvestorReporting;
 use App\Services\Ledger;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -29,6 +30,7 @@ class PartnerController extends Controller
             'payable' => Ledger::creditBalance('partner.payable', $partner->id),
             'entries' => CapitalEntry::where('partner_id', $partner->id)->latest('paid_on')->get(),
             'payouts' => Payout::where('partner_id', $partner->id)->latest()->get(),
+            'report' => InvestorReporting::forPartner($partner),
         ]);
     }
 

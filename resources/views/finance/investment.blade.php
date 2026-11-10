@@ -49,6 +49,22 @@
     </section>
 
     <section class="panel">
+        <div class="panel-head"><h2>Profit distribution by period</h2><span class="sub">Allocated is owed to investors, not cash paid. Only posted allocations count; the rest are shown as not yet distributed.</span></div>
+        <form method="GET" class="filters"><div class="field"><label>From month</label><input type="month" name="from_month" value="{{ request('from_month') }}"></div><div class="field"><label>To month</label><input type="month" name="to_month" value="{{ request('to_month') }}"></div><button class="btn">Filter</button></form>
+        <div class="table-wrap"><table class="table table-min-760">
+            <thead><tr><th>Period</th><th class="num">Revenue</th><th class="num">Expenses</th><th class="num">Net profit</th><th>Allocation</th><th class="num">Investors' share</th></tr></thead>
+            <tbody>
+            @forelse ($distribution['periods'] as $d)
+                <tr><td>{{ $d['month'] }}</td><td class="num">{{ Money::format($d['income']) }}</td><td class="num">{{ Money::format($d['expenses']) }}</td><td class="num">{{ Money::format($d['net_profit']) }}</td><td><x-status :value="$d['status']" /></td><td class="num">{{ Money::format($d['investor_pool']) }}</td></tr>
+            @empty
+                <tr><td colspan="6" class="muted">No allocations in this range.</td></tr>
+            @endforelse
+            </tbody>
+        </table></div>
+        <div class="panel-foot muted">Posted and allocated {{ Money::format($distribution['total']['allocated']) }} · paid {{ Money::format($distribution['total']['paid']) }} · outstanding payable {{ Money::format($distribution['total']['outstanding']) }} (neither available cash nor an expense).@if ($distribution['unapproved']) Not yet distributed: {{ implode(', ', $distribution['unapproved']) }}.@endif</div>
+    </section>
+
+    <section class="panel">
         <div class="panel-head"><h2>Emergency coverage for sourcing losses</h2></div>
         <div class="panel-body muted">Coverage is held in its own ledger account until a partner-loss allocation applies it (needs the Board resolution "{{ \App\Services\SourcingObligations::COVERAGE_RESOLUTION }}"). If the company is in profit and the coverage is not needed, release it back to the Emergency Reserve below. Applied or claimed coverage cannot be released.</div>
         <div class="table-wrap"><table class="table table-min-640">

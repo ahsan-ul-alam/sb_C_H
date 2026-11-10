@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\EmergencyFundRequest;
 use App\Models\Partner;
 use App\Services\FinancialStatements;
+use App\Services\InvestorReporting;
 use Illuminate\View\View;
 
 class FinancialStatementsController extends Controller
@@ -13,6 +14,7 @@ class FinancialStatementsController extends Controller
     {
         return view('finance.investment', FinancialStatements::capital() + [
             'utilised' => EmergencyFundRequest::with('lot')->where('status', 'utilised')->latest('id')->get(),
+            'distribution' => InvestorReporting::distribution(request()->query('from_month'), request()->query('to_month')),
         ]);
     }
 
