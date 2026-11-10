@@ -28,6 +28,7 @@ use App\Models\SupplierReturn;
 use App\Services\AccountingService;
 use App\Services\AdvanceSettlementService;
 use App\Services\ClientApiIntegrations;
+use App\Services\ClientPortalOtp;
 use App\Services\Inventory;
 use App\Services\InventoryEngine;
 use App\Services\InventoryHandoverService;
@@ -157,6 +158,63 @@ it('lets exactly one of six simultaneous correct code submissions return the cli
 
     expect(collect($results)->where('ok', true)->where('recorded', true)->count())->toBe(1)
         ->and(ClientInfoChallenge::first()->consumed_at)->not->toBeNull();
+});
+
+/** Issue a Client Portal code for a fresh verified client, bound to $binding; returns the client, the challenge nonce and the emailed code. */
+function ccPortalCode(string $binding, string $name = 'Portal Race Co'): array
+{
+    Mail::fake();
+    if (! DB::table('sb_number_sequence')->exists()) { // the per-test wipe empties the one-row counter; the migration seeds it
+        DB::table('sb_number_sequence')->insert(['id' => 1, 'last_value' => 0]);
+    }
+    $client = Client::create(['name' => $name, 'mobile' => '017', 'email' => Str::slug($name).'@example.test']);
+    $client->forceFill(['email_verified_at' => now()])->save();
+    ClientPortalOtp::request($client->sb_number, $binding, '127.0.0.1');
+    $code = Mail::sent(ClientInformationCode::class)->last()?->code;
+    expect($code)->not->toBeNull();
+
+    return ['client' => $client, 'nonce' => DB::table('client_portal_challenges')->where('client_id', $client->id)->orderByDesc('id')->value('nonce'), 'code' => $code];
+}
+
+it('lets exactly one of six simultaneous correct portal code submissions log in', function () {
+    $c = ccPortalCode('browser-1');
+    $results = ccRun('portal_verify', 6, fn () => ['nonce' => $c['nonce'], 'code' => $c['code'], 'binding' => 'browser-1']);
+
+    expect(collect($results)->where('ok', true)->where('recorded', true)->count())->toBe(1)->and(collect($results)->where('ok', true)->where('recorded', false)->count())->toBe(5)
+        ->and(DB::table('client_portal_challenges')->where('client_id', $c['client']->id)->value('consumed_at'))->not->toBeNull()
+        ->and(AuditLog::where('action', 'portal.login')->count())->toBe(1);
+});
+
+it('refuses an expired, an already used, a superseded and a wrong-browser portal code on MySQL', function () {
+    $expired = ccPortalCode('b-exp', 'Expired Co');
+    DB::table('client_portal_challenges')->where('nonce', $expired['nonce'])->update(['expires_at' => now()->subSecond()]);
+    expect(ClientPortalOtp::verify($expired['nonce'], $expired['code'], 'b-exp'))->toBeNull();
+
+    $used = ccPortalCode('b-used', 'Used Co');
+    expect(ClientPortalOtp::verify($used['nonce'], $used['code'], 'b-used'))->not->toBeNull()->and(ClientPortalOtp::verify($used['nonce'], $used['code'], 'b-used'))->toBeNull();
+
+    $bound = ccPortalCode('b-bound', 'Bound Co');
+    expect(ClientPortalOtp::verify($bound['nonce'], $bound['code'], 'another-browser'))->toBeNull()
+        ->and(ClientPortalOtp::verify($bound['nonce'], $bound['code'], 'b-bound'))->not->toBeNull();
+
+    $first = ccPortalCode('b-sup', 'Super Co');
+    DB::table('client_portal_challenges')->where('nonce', $first['nonce'])->update(['created_at' => now()->subMinutes(2)]);
+    ClientPortalOtp::request($first['client']->sb_number, 'b-sup', '127.0.0.1');
+    $second = Mail::sent(ClientInformationCode::class)->last()->code;
+    expect(ClientPortalOtp::verify($first['nonce'], $first['code'], 'b-sup'))->toBeNull()
+        ->and(DB::table('client_portal_challenges')->where('client_id', $first['client']->id)->count())->toBe(2)
+        ->and($second)->not->toBeNull();
+    $newNonce = DB::table('client_portal_challenges')->where('client_id', $first['client']->id)->orderByDesc('id')->value('nonce');
+    expect(ClientPortalOtp::verify($newNonce, $second, 'b-sup'))->not->toBeNull();
+});
+
+it('counts at most five wrong portal code attempts even when eight arrive at once, then refuses the right code', function () {
+    $c = ccPortalCode('b-limit', 'Limit Co');
+    $wrong = $c['code'] === '000000' ? '111111' : '000000';
+    $results = ccRun('portal_verify', 8, fn () => ['nonce' => $c['nonce'], 'code' => $wrong, 'binding' => 'b-limit']);
+
+    expect(collect($results)->where('recorded', true)->count())->toBe(0)->and((int) DB::table('client_portal_challenges')->where('nonce', $c['nonce'])->value('attempts'))->toBe(5)
+        ->and(ClientPortalOtp::verify($c['nonce'], $c['code'], 'b-limit'))->toBeNull();
 });
 
 it('records a transfer submitted four times at once exactly once', function () {

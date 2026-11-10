@@ -23,6 +23,7 @@ use App\Models\User;
 use App\Services\AccountingService;
 use App\Services\AdvanceSettlementService;
 use App\Services\ClientInformationOtp;
+use App\Services\ClientPortalOtp;
 use App\Services\ClientSettlementService;
 use App\Services\CostRecognitionService;
 use App\Services\DuplicateSubmission;
@@ -165,6 +166,7 @@ try {
         'loan_alloc' => LoanRecoveryAllocationService::propose(LoanReceivableRepayment::findOrFail($args['repayment']), Partner::findOrFail($args['partner']), $args['amount'], 'race', null, null, auth()->user(), $args['key']) !== null,
         'client_create' => Client::create(['name' => 'Race client '.$args['n'], 'mobile' => '017'])->sb_number,
         'otp_verify' => ClientInformationOtp::verify(ClientApiIntegration::findOrFail($args['integration']), $args['sb'], $args['request_id'], $args['code']) !== null,
+        'portal_verify' => ClientPortalOtp::verify($args['nonce'], $args['code'], $args['binding']) !== null,
         'payment' => (function () use ($args) {
             $project = Project::findOrFail($args['project']);
 

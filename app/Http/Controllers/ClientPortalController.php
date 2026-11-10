@@ -163,12 +163,12 @@ class ClientPortalController extends Controller
             : filled(config('portal.test_code_hash')) && Hash::check($data['confirmation'], (string) config('portal.test_code_hash'));
         $client = SbNumber::isValid(strtoupper($data['sb_number'])) ? Client::where('sb_number', strtoupper($data['sb_number']))->first() : null;
         if (! $confirmed || $client === null) {
-            ClientPortalAudit::record('portal.preview.refused', $client?->id, $confirmed ? 'unknown SB number' : 'confirmation failed');
+            ClientPortalAudit::record('portal.preview.refused', $client?->id, $confirmed ? 'unknown SB number' : 'confirmation failed', $user->id);
 
             return back()->withInput($request->only('sb_number', 'reason'))->with('error', 'Could not start the test session. Check the SB number and the confirmation.');
         }
         RateLimiter::clear($key);
-        ClientPortalAudit::record('portal.preview.start', $client->id, 'reason: '.$data['reason']);
+        ClientPortalAudit::record('portal.preview.start', $client->id, 'reason: '.$data['reason'], $user->id);
         session(['portal.client_id' => $client->id, 'portal.last' => now()->timestamp, 'portal.preview' => ['admin_id' => $user->id, 'expires' => now()->addMinutes((int) config('portal.preview_minutes'))->timestamp]]);
 
         return redirect()->route('portal.dashboard');

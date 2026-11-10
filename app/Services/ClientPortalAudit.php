@@ -11,6 +11,6 @@ class ClientPortalAudit
 {
     public static function record(string $action, ?int $clientId, ?string $details = null, ?int $userId = null): void
     {
-        AuditLog::create(['user_id' => $userId ?? auth()->id(), 'action' => mb_substr($action, 0, 60), 'subject' => $clientId ? 'client '.$clientId : null, 'details' => $details]);
+        AuditLog::create(['user_id' => $userId ?? (session('portal.preview') ? auth()->id() : null), 'action' => mb_substr($action, 0, 60), 'subject' => $clientId ? 'client '.$clientId : null, 'details' => $details]);
     }
 }

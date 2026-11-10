@@ -26,6 +26,7 @@ class Navigation
                 ['Projects', 'projects.index', 'clienthub', 'folder', ['projects.*', 'segments.*']],
                 ['Invoices', 'invoices.index', 'clienthub', 'invoice', ['invoices.*']],
                 ['Payments', 'payments.index', 'clienthub', 'wallet', ['payments.*']],
+                ['Client Portal Preview', 'portal.preview.form', 'portal.preview', 'check-circle', ['portal.preview.*']],
             ],
             'Suppliers & Sourcing' => [
                 ['Sourcing Overview', 'sourcing.overview', 'sourcing.view', 'dashboard', ['sourcing.overview']],

@@ -229,6 +229,54 @@ it('lets an authorised admin start, view read-only, exit and time out a test ses
     $this->withoutMiddleware(PreventRequestForgery::class)->post(route('portal.preview.start'), ['sb_number' => $s['client']->sb_number, 'reason' => 'production attempt', 'confirmation' => '11126'])->assertSessionHas('error');
 });
 
+it('offers the Client Portal Preview link only to staff who hold portal.preview', function () {
+    $co = cpBoot($this);
+    $co->as('super')->get(route('clients.index'))->assertOk()->assertSee('Client Portal Preview')->assertSee(route('portal.preview.form'), false);
+    foreach (['finance', 'clients', 'board', 'auditor'] as $who) {
+        $co->as($who)->get(route('dashboard'))->assertDontSee('Client Portal Preview');
+    }
+});
+
+it('shows an admin previewing a client the same stock and orders the client sees, whatever the staff project limits', function () {
+    $co = cpBoot($this);
+    $a = cpStock($co, 'Visible Co', 'visible@example.com');
+    $b = cpStock($co, 'Other Co', 'other@example.com');
+    cpOrder($co, $a, 'VIS-1', '2', ['charge' => '2']);
+    $invB = $co->invoice($b['project'], [['segment_id' => $co->segment($b['project'], 'Seg B', '200')->id, 'description' => 'Goods B', 'quantity' => '1', 'unit_price' => '200']], '2026-02-10', 'INV-OTHER');
+    config(['portal.test_code_hash' => Hash::make('11126')]);
+
+    // the client's own view
+    Auth::forgetGuards();
+    cpLogin($this, $a['client']);
+    $own = ClientPortalData::positions($a['client'])->map(fn ($r) => [$r['line']->id, $r['b']])->all();
+    $ownOverview = ClientPortalData::overview($a['client']);
+    expect($own)->not->toBeEmpty();
+    $this->post(route('portal.logout'));
+
+    // a project-limited staff member signed in must not shrink (or reshape) what the portal shows
+    $limited = SellbeesCompany::user('limited@audit.test', 'employee');
+    $limited->forceFill(['all_projects' => false])->save();
+    expect($limited->accessibleProjectIds())->toBe([]);
+    $this->actingAs($limited);
+    expect(ClientPortalData::positions($a['client'])->map(fn ($r) => [$r['line']->id, $r['b']])->all())->toBe($own)
+        ->and(ClientPortalData::overview($a['client'])['available_stock'])->toBe($ownOverview['available_stock']);
+    Auth::forgetGuards();
+
+    // the authorised Super Admin's preview of A: complete A data, nothing of B, read-only, permissions untouched
+    $super = $co->users['super'];
+    $permissionsBefore = $super->fresh()->roles ?? null;
+    $this->actingAs($super);
+    $this->post(route('portal.preview.start'), ['sb_number' => $a['client']->sb_number, 'reason' => 'checking client A view', 'confirmation' => '11126'])->assertRedirect(route('portal.dashboard'));
+    $this->get(route('portal.inventory'))->assertOk()->assertSee('Mug')->assertDontSee('Other Co');
+    $this->get(route('portal.orders'))->assertOk()->assertSee('VIS-1');
+    $this->get(route('portal.invoices.pdf', $invB->id))->assertNotFound();
+    $this->get(route('portal.projects', ['project' => $b['project']->id]))->assertOk()->assertDontSee('Other Co');
+    $this->post(route('portal.invoices'))->assertStatus(405);
+    expect($super->fresh()->roles ?? null)->toBe($permissionsBefore)->and($super->fresh()->can('portal.preview'))->toBeTrue();
+    $this->post(route('portal.preview.exit'));
+    $this->get(route('portal.dashboard'))->assertRedirect(route('portal.login'));
+});
+
 it('shows each client only their own projects, lots, stock, orders, invoices and documents', function () {
     $co = cpBoot($this);
     $a = cpStock($co, 'Alpha Co', 'alpha@example.com');

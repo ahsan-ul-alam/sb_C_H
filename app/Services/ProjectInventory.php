@@ -22,9 +22,11 @@ class ProjectInventory
 
     /**
      * @param  array{project?: ?int, client?: ?int, product?: ?string, supplier?: ?int, lot?: ?int, location?: ?int, ownership?: ?string, status?: ?string, from?: ?string, to?: ?string}  $f
+     * @param  bool  $ignoreStaffScope  Only the Client Portal passes true: it is not a staff view, so the signed-in staff user's project limits must neither hide the
+     *                                  client's own stock nor decide what the client sees. The portal then keeps only the one client's rows itself.
      * @return Collection<int, array<string, mixed>>
      */
-    public static function positions(array $f = []): Collection
+    public static function positions(array $f = [], bool $ignoreStaffScope = false): Collection
     {
         $lines = SourcingLotLine::query()->whereNotNull('received_quantity')->with(['lot.project.client', 'supplier', 'product'])
             ->when($f['supplier'] ?? null, fn ($q, $v) => $q->where('supplier_id', $v))
@@ -57,7 +59,7 @@ class ProjectInventory
         }
 
         // A user limited to certain projects sees only the positions of those projects (never a shared or unattributed row that could expose another project's stock).
-        $visible = auth()->user()?->accessibleProjectIds();
+        $visible = $ignoreStaffScope ? null : auth()->user()?->accessibleProjectIds();
         if ($visible !== null) {
             $rows = $rows->filter(fn ($r) => $r['project'] !== null && in_array($r['project']->id, $visible, true));
         }

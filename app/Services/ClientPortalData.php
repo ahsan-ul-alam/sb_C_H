@@ -42,7 +42,7 @@ class ClientPortalData
      */
     public static function positions(Client $client, ?int $projectId = null): Collection
     {
-        return ProjectInventory::positions()->filter(fn ($r) => $r['project'] !== null && $r['project']->client_id === $client->id && in_array($r['ownership'], ['client', 'client_custody'], true)
+        return ProjectInventory::positions([], true)->filter(fn ($r) => $r['project'] !== null && $r['project']->client_id === $client->id && in_array($r['ownership'], ['client', 'client_custody'], true)
             && ($projectId === null || $r['project']->id === $projectId))->values();
     }
 
