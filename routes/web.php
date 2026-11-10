@@ -25,6 +25,7 @@ use App\Http\Controllers\HomeController;
 use App\Http\Controllers\InventoryEnrolmentController;
 use App\Http\Controllers\InventoryHandoverController;
 use App\Http\Controllers\InventoryLossController;
+use App\Http\Controllers\InvoiceClassificationController;
 use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\LedgerReportController;
 use App\Http\Controllers\LoanController;
@@ -325,6 +326,9 @@ Route::middleware('auth')->group(function () {
     Route::prefix('finance')->name('finance.')->group(function () {
         // Own records only (partner scope is enforced by the logged-in user's partner_id).
         Route::get('me', [FinanceController::class, 'me'])->name('me')->middleware('can:own.view');
+        Route::get('invoice-classifications', [InvoiceClassificationController::class, 'index'])->name('classifications')->middleware('can:finance.view');
+        Route::post('invoice-classifications', [InvoiceClassificationController::class, 'propose'])->name('classifications.propose')->middleware('can:invoice.classify');
+        Route::post('invoice-classifications/{proposal}/decide', [InvoiceClassificationController::class, 'decide'])->name('classifications.decide')->middleware('can:invoice.classify.approve');
         Route::get('payouts', [PayoutController::class, 'index'])->name('payouts');
         Route::post('payouts', [PayoutController::class, 'store'])->name('payouts.store')->middleware('can:payout.request');
         Route::get('resolutions', [ResolutionController::class, 'index'])->name('resolutions');
@@ -500,6 +504,7 @@ Route::prefix('client-portal')->name('portal.')->group(function () {
         Route::get('invoices', [ClientPortalController::class, 'invoices'])->name('invoices');
         Route::get('invoices/{invoice}/pdf', [ClientPortalController::class, 'invoicePdf'])->name('invoices.pdf')->whereNumber('invoice');
         Route::get('sales', [ClientPortalController::class, 'sales'])->name('sales');
+        Route::get('financial-overview', [ClientPortalController::class, 'finance'])->name('finance');
         Route::post('logout', [ClientPortalController::class, 'logout'])->name('logout');
         Route::post('exit-preview', [ClientPortalController::class, 'previewExit'])->name('preview.exit');
     });

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Client;
+use App\Services\ClientFinancials;
 use App\Services\ClientPortalAudit;
 use App\Services\ClientPortalData;
 use App\Services\ClientPortalOtp;
@@ -136,11 +137,23 @@ class ClientPortalController extends Controller
         return app(InvoiceController::class)->pdf($request, $own);
     }
 
+    public function finance(Request $request): View
+    {
+        $client = $this->client($request);
+        $fin = ClientFinancials::for($client);
+        $category = (string) $request->query('category');
+        $valid = array_merge(array_keys($fin['by_category']), ['mixed']);
+        $category = in_array($category, $valid, true) ? $category : '';
+        $invoices = collect($fin['invoices'])->when($category !== '', fn ($c) => $c->filter(fn ($i) => $category === 'mixed' ? $i['category'] === null : $i['category'] === $category))->reverse()->values();
+
+        return view('portal.finance', ['fin' => $fin, 'category' => $category, 'invoices' => $invoices, 'o' => ClientPortalData::overview($client)]);
+    }
+
     public function sales(Request $request): View
     {
         $client = $this->client($request);
 
-        return view('portal.sales', ['e' => ClientPortalData::economics($client), 'monthly' => ClientPortalData::monthlySales($client), 'billing' => ClientPortalData::productBilling($client)]);
+        return view('portal.sales', ['e' => ClientPortalData::economics($client), 'monthly' => ClientPortalData::monthlySales($client), 'billing' => ClientPortalData::productBilling($client), 'fin' => ClientFinancials::for($client)]);
     }
 
     public function previewForm(): View

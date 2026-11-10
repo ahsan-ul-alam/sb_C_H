@@ -178,7 +178,7 @@ class ClientPortalData
             'orders' => $sales['counts']['total'], 'successful_orders' => $sales['successful_orders'], 'successful_sales' => $sales['totals']['sales'],
             'economics' => $e['total'], 'client_wide' => $e['client_wide'],
             'counts' => $sales['counts'], 'pending_deliveries' => $sales['counts']['confirmed'] + $sales['counts']['packed'] + $sales['counts']['dispatched'],
-            'stock' => self::stockBuckets($positions), 'stock_awaiting' => self::stockBuckets($split['awaiting']), 'billing' => self::productBilling($client), 'project_cards' => self::projectCards($client, $e), 'recent_orders' => self::recentOrders($client), 'invoices' => self::invoiceSummary($client),
+            'received_units' => (string) SourcingLotLine::whereIn('sourcing_lot_id', $lotIds)->sum('received_quantity'), 'stock' => self::stockBuckets($positions), 'stock_awaiting' => self::stockBuckets($split['awaiting']), 'billing' => self::productBilling($client), 'financials' => ClientFinancials::for($client), 'project_cards' => self::projectCards($client, $e), 'recent_orders' => self::recentOrders($client), 'invoices' => self::invoiceSummary($client),
         ];
     }
 

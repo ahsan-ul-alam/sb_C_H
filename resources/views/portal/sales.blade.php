@@ -18,7 +18,7 @@
         <x-portal.kpi tone="primary" icon="chart" label="Net product profit" :value="$pending ? 'Pending verification' : $m($t['client_profit'])" :pending="$pending" hint="After your product cost" />
     </div>
 
-    @include('portal._billing', ['billing' => $billing])
+    @include('portal._billing', ['billing' => $billing, 'fin' => $fin])
 
     <div class="pt-grid pt-g21">
         <section class="pt-card" aria-labelledby="h-wf">

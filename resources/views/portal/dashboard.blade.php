@@ -32,7 +32,7 @@
         <x-portal.kpi tone="sm" icon="truck" label="Pending deliveries" :value="$o['pending_deliveries']" hint="confirmed, packed or dispatched" />
     </div>
 
-    @include('portal._billing', ['billing' => $bill])
+    @include('portal._billing', ['billing' => $bill, 'fin' => $o['financials']])
 
     <section class="pt-card" aria-labelledby="h-proj" style="margin-bottom:1.25rem">
         <div class="pt-card-head"><h2 id="h-proj">Project performance</h2><a class="pt-link" href="{{ route('portal.projects') }}">All projects</a></div>

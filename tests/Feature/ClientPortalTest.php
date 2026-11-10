@@ -5,11 +5,13 @@ use App\Models\AuditLog;
 use App\Models\Client;
 use App\Models\ClientOrder;
 use App\Models\Invoice;
+use App\Models\InvoiceLineClassification;
 use App\Models\Payment;
 use App\Models\SourcingAllocation;
 use App\Models\SourcingLot;
 use App\Models\Supplier;
 use App\Models\SupplierProduct;
+use App\Services\ClientFinancials;
 use App\Services\ClientPortalData;
 use App\Services\ClientPortalOtp;
 use Illuminate\Foundation\Http\Middleware\PreventRequestForgery;
@@ -404,7 +406,7 @@ it('A/D/I: a client who paid for received stock with an unlinked lot sees pendin
         ->and($o['sourced_products'])->toBe(1)->and($o['successful_sales'])->toBe(0)->and($o['client_wide']['entitlement'])->toBe(0)->and($o['economics']['client_profit'])->toBe(0);
 
     cpLogin($this, $s['client']);
-    $this->get(route('portal.dashboard'))->assertOk()->assertSee('Pending verification')->assertSee('Product billing')->assertSee('Other invoices')->assertSee('INV-OLD')
+    $this->get(route('portal.dashboard'))->assertOk()->assertSee('Pending verification')->assertSee('My financial overview')->assertSee('Uncategorized / Needs classification')
         ->assertSee('awaiting ownership confirmation')->assertSee('No customer order delivered yet')->assertSee('Realised product profit');
     $this->get(route('portal.projects', ['project' => $s['project']->id]))->assertOk()->assertSee('Ownership being confirmed')->assertSee('Not yet billed against this lot');
     $this->get(route('portal.inventory'))->assertOk()->assertSee('Ownership being confirmed')->assertSee('not counted as available client stock');
@@ -420,7 +422,7 @@ it('B/G: a partly paid linked product invoice shows billed, verified paid and ou
     $b = ClientPortalData::productBilling($s['client']);
     expect($b['billed'])->toBe(5_000)->and($b['paid'])->toBe(2_000)->and($b['outstanding'])->toBe(3_000)->and($b['awaiting_count'])->toBe(0)->and($b['mixed']['count'])->toBe(0);
     cpLogin($this, $s['client']);
-    $this->get(route('portal.sales'))->assertOk()->assertSee('Product amount billed')->assertSee('BDT 50.00')->assertSee('BDT 20.00')->assertSee('BDT 30.00');
+    $this->get(route('portal.sales'))->assertOk()->assertSee('Product sourcing')->assertSee('BDT 50.00')->assertSee('BDT 20.00')->assertSee('BDT 30.00');
     $this->get(route('portal.dashboard'))->assertSee('Outstanding invoices')->assertDontSee('Pending verification');
 });
 
@@ -437,7 +439,7 @@ it('C: a mixed product and service invoice is not treated as all product and its
     $b = ClientPortalData::productBilling($s['client']);
     expect($b['billed'])->toBe(0)->and($b['mixed'])->toMatchArray(['count' => 1, 'product_billed' => 5_000, 'invoice_total' => 7_000, 'paid' => 3_000]);
     cpLogin($this, $s['client']);
-    $this->get(route('portal.sales'))->assertOk()->assertSee('mixed invoice')->assertSee('not split by item');
+    $this->get(route('portal.sales'))->assertOk()->assertSee('Invoices with several categories')->assertSee('category allocation pending');
 });
 
 it('E/F: delivered sales give the exact Mug figures with verified investment, and a return lowers sales without a false negative profit', function () {
@@ -484,4 +486,168 @@ it('J: viewing the corrected screens writes no financial, billing, payment or st
     }
     $this->get(route('portal.projects', ['project' => $s['project']->id]))->assertOk();
     expect($snap())->toBe($before);
+});
+
+/** A client with a verified email so the portal sign-in flow can be used. */
+function cpVerified(Client $client, string $tag): Client
+{
+    $client->forceFill(['email' => $tag.'.'.$client->id.'@example.com', 'email_verified_at' => now()])->save();
+
+    return $client->refresh();
+}
+
+/** Create an invoice whose lines are billed under named segments (the ERP's existing category signal), and return it. @param list<array{0: string, 1: string}> $lines [segment name, amount] */
+function cpInvoice(SellbeesCompany $co, array $s, string $number, array $lines, ?string $purpose = null): Invoice
+{
+    $items = [];
+    foreach ($lines as [$segmentName, $amount]) {
+        $seg = $segmentName === '' ? null : $co->segment($s['project'], $segmentName, $amount);
+        $items[] = ['segment_id' => $seg?->id, 'description' => ($segmentName ?: 'Unsegmented').' line', 'quantity' => '1', 'unit_price' => $amount];
+    }
+    $co->post('finance', 'projects.invoices.store', ['number' => $number, 'issued_on' => '2026-02-10', 'purpose' => $purpose, 'items' => $items], $s['project'])->assertSessionHasNoErrors();
+
+    return Invoice::where('number', $number)->firstOrFail();
+}
+
+it('categorises product, onboarding and marketing invoices by their existing segment names and reconciles to the invoice and payment totals', function () {
+    $co = cpBoot($this);
+    $s = ['project' => $co->project($co->client('Cat Co'), 'Cat Project')];
+    $s['client'] = cpVerified($s['project']->client, 'cat');
+    $prod = cpInvoice($co, $s, 'INV-P', [['Product Sourcing', '300']]);
+    $onb = cpInvoice($co, $s, 'INV-O', [['Onboarding', '100']], 'Joining');
+    $mkt = cpInvoice($co, $s, 'INV-M', [['Marketing Charges', '60']]);
+    $co->payInvoice($prod, '120', '2026-02-10')->assertSessionHasNoErrors();      // partial payment
+    $co->payInvoice($onb->refresh(), '100', '2026-02-10')->assertSessionHasNoErrors();
+    $f = ClientFinancials::for($s['client']);
+
+    expect($f['by_category']['product_sourcing'])->toMatchArray(['billed' => 30_000, 'paid' => 12_000, 'due' => 18_000, 'invoices' => 1])
+        ->and($f['by_category']['onboarding'])->toMatchArray(['billed' => 10_000, 'paid' => 10_000, 'due' => 0])
+        ->and($f['by_category']['marketing'])->toMatchArray(['billed' => 6_000, 'paid' => 0, 'due' => 6_000])
+        ->and($f['totals'])->toMatchArray(['invoiced' => 46_000, 'paid' => 22_000, 'due' => 24_000])
+        ->and($f['reconciled'])->toBeTrue()->and($f['mixed']['count'])->toBe(0)->and($f['unclassified']['lines'])->toBe(0)
+        ->and($f['product'])->toMatchArray(['billed' => 30_000, 'paid' => 12_000, 'due' => 18_000]);
+    expect(array_sum(array_column($f['by_category'], 'billed')))->toBe((int) Invoice::sum('total'))->and(array_sum(array_column($f['by_category'], 'paid')))->toBe((int) Invoice::sum('amount_paid'));
+
+    Auth::forgetGuards();
+    cpLogin($this, $s['client']);
+    $this->get(route('portal.finance'))->assertOk()->assertSee('My Financial Overview')->assertSee('Product sourcing')->assertSee('Onboarding')->assertSee('Marketing')->assertSee('BDT 460.00')->assertSee('BDT 220.00')->assertSee('BDT 240.00')->assertSee('Reconciles');
+    $this->get(route('portal.finance', ['category' => 'marketing']))->assertOk()->assertSee('INV-M')->assertDontSee('INV-P')->assertSee('From the project segment');
+});
+
+it('keeps a mixed-category invoice at invoice level for payments and a payment across two invoices is counted once', function () {
+    $co = cpBoot($this);
+    $s = ['project' => $co->project($co->client('Mix Co'), 'Mix Project')];
+    $s['client'] = cpVerified($s['project']->client, 'cat');
+    $mixed = cpInvoice($co, $s, 'INV-MIX', [['Product Sourcing', '200'], ['Marketing Charges', '50']]);
+    $co->payInvoice($mixed, '80', '2026-02-10')->assertSessionHasNoErrors();
+    // two invoices billing the same segment, one 150 payment recorded on the segment: oldest invoice first, never counted twice
+    $seg = $co->segment($s['project'], 'Branding', '200');
+    $one = $co->invoice($s['project'], [['segment_id' => $seg->id, 'description' => 'Brand kit 1', 'quantity' => '1', 'unit_price' => '100']], '2026-02-10', 'INV-B1');
+    $two = $co->invoice($s['project'], [['segment_id' => $seg->id, 'description' => 'Brand kit 2', 'quantity' => '1', 'unit_price' => '100']], '2026-02-11', 'INV-B2');
+    $co->paySegment($seg, '150', '2026-02-11')->assertSessionHasNoErrors();
+    $f = ClientFinancials::for($s['client']);
+
+    expect($f['mixed'])->toMatchArray(['count' => 1, 'billed' => 25_000, 'paid' => 8_000, 'due' => 17_000])
+        ->and($f['by_category']['branding'])->toMatchArray(['billed' => 20_000, 'paid' => 15_000, 'due' => 5_000, 'invoices' => 2])
+        ->and($f['totals'])->toMatchArray(['invoiced' => 45_000, 'paid' => 23_000, 'due' => 22_000])->and($f['reconciled'])->toBeTrue()
+        ->and(collect($f['by_line'])->firstWhere('label', 'Product sourcing')['billed'])->toBe(20_000)->and($f['product'])->toMatchArray(['billed' => 20_000, 'paid' => 0, 'in_mixed_billed' => 20_000, 'mixed_paid_pending' => 8_000]);
+    expect((int) Invoice::whereKey($one->id)->value('amount_paid'))->toBe(10_000)->and((int) Invoice::whereKey($two->id)->value('amount_paid'))->toBe(5_000);
+
+    Auth::forgetGuards();
+    cpLogin($this, $s['client']);
+    $this->get(route('portal.finance', ['category' => 'mixed']))->assertOk()->assertSee('Invoices with several categories')->assertSee('category allocation pending')->assertSee('INV-MIX')->assertDontSee('INV-B1');
+    $this->get(route('portal.finance', ['category' => 'branding']))->assertSee('Recorded against the project');
+});
+
+it('excludes a voided payment, shows an unclassified historical line as needing classification, and never mixes another client in', function () {
+    $co = cpBoot($this);
+    $a = ['project' => $co->project($co->client('Void Co'), 'Void Project')];
+    $a['client'] = cpVerified($a['project']->client, 'a');
+    $b = ['project' => $co->project($co->client('Other Co'), 'Other Project')];
+    $b['client'] = cpVerified($b['project']->client, 'b');
+    $inv = cpInvoice($co, $a, 'INV-V', [['Product Sourcing', '100']]);
+    $co->payInvoice($inv, '100', '2026-02-10')->assertSessionHasNoErrors();
+    DB::table('payments')->where('project_id', $a['project']->id)->update(['voided_at' => now()]);   // the state a void leaves behind
+    Invoice::findOrFail($inv->id)->refreshPaymentStatus();
+    cpInvoice($co, $a, 'INV-U', [['', '40']]);   // a line with no segment and no purpose: category unknown
+    cpInvoice($co, $b, 'INV-OTHER', [['Marketing Charges', '999']]);
+
+    $f = ClientFinancials::for($a['client']);
+    expect($f['totals'])->toMatchArray(['invoiced' => 14_000, 'paid' => 0, 'due' => 14_000])->and($f['by_category']['unclassified'])->toMatchArray(['billed' => 4_000, 'paid' => 0, 'due' => 4_000])
+        ->and($f['unclassified'])->toMatchArray(['billed' => 4_000, 'lines' => 1])->and($f['reconciled'])->toBeTrue()->and(array_key_exists('marketing', $f['by_category']))->toBeFalse();
+
+    Auth::forgetGuards();
+    cpLogin($this, $a['client']);
+    $this->get(route('portal.finance'))->assertOk()->assertSee('Uncategorized / Needs classification')->assertSee('no category yet')->assertDontSee('INV-OTHER')->assertDontSee('BDT 9.99')->assertDontSee('Other Co');
+});
+
+it('lets Finance propose and a different authorised user verify a classification, with history and reversal, and keeps invoices untouched', function () {
+    $co = cpBoot($this);
+    $s = ['project' => $co->project($co->client('Class Co'), 'Class Project')];
+    $s['client'] = cpVerified($s['project']->client, 'cat');
+    $inv = cpInvoice($co, $s, 'INV-C', [['', '100'], ['', '50']]);
+    $items = $inv->items()->orderBy('id')->get();
+    $invoiceBefore = DB::table('invoices')->where('id', $inv->id)->first();
+    $totalsBefore = [DB::table('journal_entries')->count(), DB::table('payments')->count(), (int) DB::table('invoice_items')->sum('amount')];
+    expect(ClientFinancials::for($s['client'])['unclassified']['lines'])->toBe(2);
+
+    // authorisation
+    $co->as('employee')->post(route('finance.classifications.propose'), ['invoice_item_id' => $items[0]->id, 'category' => 'product_sourcing', 'reason' => 'Product lines'])->assertForbidden();
+    $co->as('board')->post(route('finance.classifications.propose'), ['invoice_item_id' => $items[0]->id, 'category' => 'product_sourcing', 'reason' => 'Product lines'])->assertForbidden();
+    $co->post('finance', 'finance.classifications.propose', ['invoice_item_id' => $items[0]->id, 'category' => 'not-a-category', 'reason' => 'Product lines'])->assertSessionHas('error')->assertSessionMissing('status');
+    $co->post('finance', 'finance.classifications.propose', ['invoice_item_id' => $items[0]->id, 'category' => 'product_sourcing', 'reason' => 'Product lines per quotation'])->assertSessionHas('status');
+    $co->post('finance', 'finance.classifications.propose', ['invoice_item_id' => $items[1]->id, 'category' => 'marketing', 'reason' => 'Ads budget per quotation']);
+    $proposal = InvoiceLineClassification::where('invoice_item_id', $items[0]->id)->firstOrFail();
+    expect(ClientFinancials::for($s['client'])['unclassified']['lines'])->toBe(2);   // a proposal changes nothing until verified
+    $co->post('finance', 'finance.classifications.propose', ['invoice_item_id' => $items[0]->id, 'category' => 'branding', 'reason' => 'second proposal'])->assertSessionHas('error');   // one waiting proposal per line
+
+    // separation of duties: Finance and Super Admin cannot verify; a user who proposed cannot verify their own
+    $co->post('finance', 'finance.classifications.decide', ['decision' => 'approve'], $proposal)->assertForbidden();
+    $co->post('super', 'finance.classifications.decide', ['decision' => 'approve'], $proposal)->assertForbidden();
+    $both = SellbeesCompany::user('both@audit.test', 'finance', 'board_member');
+    $this->actingAs($both)->post(route('finance.classifications.propose'), ['invoice_item_id' => $items[1]->id, 'category' => 'marketing', 'reason' => 'own second try'])->assertSessionHas('error');
+    $own = InvoiceLineClassification::where('invoice_item_id', $items[1]->id)->firstOrFail();
+    $own->update(['proposed_by' => $both->id]);
+    $this->actingAs($both)->post(route('finance.classifications.decide', $own), ['decision' => 'approve'])->assertSessionHas('error');
+
+    $co->post('board', 'finance.classifications.decide', ['decision' => 'approve'], $proposal)->assertSessionHas('status');
+    $co->post('board2', 'finance.classifications.decide', ['decision' => 'approve'], $own->refresh())->assertSessionHas('status');
+    $co->post('board', 'finance.classifications.decide', ['decision' => 'approve'], $proposal)->assertSessionHas('error');   // already decided
+    $f = ClientFinancials::for($s['client']);
+    expect($f['mixed']['count'])->toBe(1)->and($f['unclassified']['lines'])->toBe(0)->and(collect($f['by_line'])->pluck('billed', 'label')->all())->toBe(['Product sourcing' => 10_000, 'Marketing' => 5_000])
+        ->and($f['invoices'][0]['lines'][0]['source'])->toBe('finance');
+
+    // reversal keeps history
+    $co->post('finance', 'finance.classifications.propose', ['invoice_item_id' => $items[0]->id, 'category' => 'unclassified', 'reason' => 'classified in error']);
+    $rev = InvoiceLineClassification::where('invoice_item_id', $items[0]->id)->where('status', 'proposed')->firstOrFail();
+    $co->post('board', 'finance.classifications.decide', ['decision' => 'approve'], $rev);
+    expect(ClientFinancials::for($s['client'])['unclassified']['lines'])->toBe(1)->and(InvoiceLineClassification::where('invoice_item_id', $items[0]->id)->count())->toBe(2)
+        ->and(fn () => InvoiceLineClassification::where('invoice_item_id', $items[0]->id)->first()->delete())->toThrow(LogicException::class)
+        ->and(fn () => $proposal->refresh()->update(['category' => 'other']))->toThrow(LogicException::class);
+    expect(AuditLog::where('action', 'invoice.line.classify.proposed')->count())->toBeGreaterThanOrEqual(3)->and(AuditLog::where('action', 'invoice.line.classify.approved')->count())->toBe(3);
+
+    // no financial record was touched by any of it
+    expect(DB::table('invoices')->where('id', $inv->id)->first())->toEqual($invoiceBefore)->and([DB::table('journal_entries')->count(), DB::table('payments')->count(), (int) DB::table('invoice_items')->sum('amount')])->toBe($totalsBefore);
+    $co->as('finance')->get(route('finance.classifications'))->assertOk()->assertSee('Invoice Classification');
+});
+
+it('reads the new financial screens without writing anything, and the exact Mug figures still hold with the category summary beside them', function () {
+    $co = cpBoot($this);
+    $s = cpStock($co, 'Mug Cat Co', 'mugcat@example.com', '10');
+    cpOrder($co, $s, 'MC-1', '10', ['charge' => '10']);
+    Auth::forgetGuards();
+    cpLogin($this, $s['client']);
+    $tables = ['journal_entries', 'journal_lines', 'stock_movements', 'payments', 'invoices', 'invoice_items', 'sourcing_allocations', 'client_orders', 'client_settlements', 'invoice_line_classifications'];
+    $snap = fn () => array_map(fn ($t) => [$t, DB::table($t)->count(), md5(json_encode(DB::table($t)->orderBy('id')->get()))], $tables);
+    $before = $snap();
+    foreach (['portal.finance', 'portal.dashboard', 'portal.sales', 'portal.invoices'] as $r) {
+        $this->get(route($r))->assertOk();
+    }
+    $this->get(route('portal.finance', ['category' => 'product_sourcing']))->assertOk()->assertSee('Product sourcing');
+    $this->post(route('portal.finance'))->assertStatus(405);
+    expect($snap())->toBe($before);
+    $e = ClientPortalData::economics($s['client']);
+    expect($e['total'])->toMatchArray(['investment' => 5_000, 'gross_sales' => 10_000, 'delivery_charges' => 1_000, 'commission' => 90, 'entitlement' => 8_910, 'client_profit' => 3_910]);
+    $f = ClientFinancials::for($s['client']);
+    expect($f['reconciled'])->toBeTrue()->and($f['by_category']['product_sourcing']['billed'])->toBe(5_000);   // the lot's billing allocation backs this invoice: product sourcing
 });

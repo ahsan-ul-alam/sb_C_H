@@ -27,7 +27,7 @@ class Permissions
     public const GOVERNANCE = [
         'policy.approve', 'allocation.approve', 'payout.approve', 'resolution.decide', 'period.verify',
         'exit.approve', 'capital.verify', 'expense.verify', 'opening.approve', 'sourcing.fund.approve', 'sourcing.negative_margin',
-        'transfer.void', 'client.expense.approve', 'loan.verify', 'income.verify', 'cashalloc.approve', 'sourcing.advance.approve', 'inventory.handover.approve', 'inventory.loss.approve', 'supplier.return.approve', 'revenue.event.approve', 'receipt.classification.approve', 'ownership.approve', 'payment.void.approve',
+        'transfer.void', 'invoice.classify.approve', 'client.expense.approve', 'loan.verify', 'income.verify', 'cashalloc.approve', 'sourcing.advance.approve', 'inventory.handover.approve', 'inventory.loss.approve', 'supplier.return.approve', 'revenue.event.approve', 'receipt.classification.approve', 'ownership.approve', 'payment.void.approve',
     ];
 
     /**
@@ -37,10 +37,10 @@ class Permissions
     {
         $view = ['finance.view'];
         $roles = [
-            'board_member' => [...$view, 'dashboard.business', 'client.expense.approve', 'client.profit.view', 'policy.create', 'policy.approve', 'allocation.approve', 'payout.approve',
+            'board_member' => [...$view, 'invoice.classify.approve', 'dashboard.business', 'client.expense.approve', 'client.profit.view', 'policy.create', 'policy.approve', 'allocation.approve', 'payout.approve',
                 'resolution.create', 'resolution.decide', 'period.verify', 'exit.approve', 'partner.manage', 'capital.verify', 'expense.verify', 'opening.approve', 'document.upload', 'transfer.void', 'loan.verify', 'income.verify', 'cashalloc.approve', 'reconcile.review',
                 'sourcing.view', 'sourcing.reports', 'sourcing.price.approve', 'sourcing.negative_margin', 'sourcing.fund.approve', 'sourcing.advance.approve', 'inventory.handover.approve', 'inventory.loss.approve', 'supplier.return.approve', 'revenue.event.approve', 'sourcing.supplier.secrets', 'inventory.view', 'settlement.view', 'commission.view', 'order.refund.approve', 'receipt.classification.approve', 'ownership.approve', 'payment.void.approve'],
-            'finance' => ['clienthub', ...$view, 'dashboard.business', 'client.expense.record', 'client.expense.review', 'client.profit.declare', 'client.profit.view', 'capital.record', 'expense.record', 'period.close', 'allocation.prepare',
+            'finance' => ['clienthub', 'invoice.classify', ...$view, 'dashboard.business', 'client.expense.record', 'client.expense.review', 'client.profit.declare', 'client.profit.view', 'capital.record', 'expense.record', 'period.close', 'allocation.prepare',
                 'allocation.post', 'payout.pay', 'resolution.pay', 'exit.prepare', 'exit.pay', 'policy.create', 'revenue.record', 'opening.prepare', 'document.upload',
                 'account.manage', 'transfer.record', 'expense.pay', 'loan.record', 'income.record', 'reconcile.review',
                 'sourcing.view', 'sourcing.reports', 'sourcing.manage', 'sourcing.override', 'sourcing.price.approve', 'sourcing.payment.record',

@@ -6,7 +6,7 @@
     $initials = collect(preg_split('/\s+/', $name, -1, PREG_SPLIT_NO_EMPTY))->take(2)->map(fn ($w) => mb_strtoupper(mb_substr($w, 0, 1)))->implode('') ?: 'C';
     $groups = [
         'Business' => [['portal.dashboard', 'Overview', 'dashboard'], ['portal.projects', 'My Projects', 'folder'], ['portal.inventory', 'Products & Stock', 'package'], ['portal.orders', 'Orders & Delivery', 'truck']],
-        'Finance' => [['portal.invoices', 'Invoices & Payments', 'invoice'], ['portal.sales', 'Sales & Profit', 'trending-up']],
+        'Finance' => [['portal.finance', 'Financial Overview', 'wallet'], ['portal.invoices', 'Invoices & Payments', 'invoice'], ['portal.sales', 'Sales & Profit', 'trending-up']],
         'Account' => [['portal.profile', 'My Profile', 'user']],
     ];
 @endphp
