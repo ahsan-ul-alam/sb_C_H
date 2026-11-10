@@ -47,6 +47,42 @@
         @endif
     </section>
     @endcan
+    @php($cnt = $summary['counts'])
+    @php($tot = $summary['totals'])
+    <section class="panel">
+        <div class="panel-head"><h2>Order summary</h2><span class="sub">for the filters below; delivered values are what was delivered and not returned</span></div>
+        <div class="panel-body"><div class="stat-grid">
+            @foreach ([['pending', 'Draft', $cnt['draft']], ['confirmed', 'Confirmed', $cnt['confirmed']], ['packed', 'Packed', $cnt['packed']], ['dispatched', 'Dispatched (pending delivery)', $cnt['dispatched']], ['delivered', 'Delivered', $cnt['delivered']], ['failed', 'Failed delivery', $cnt['failed']], ['cancelled', 'Cancelled', $cnt['cancelled']]] as [$key, $label, $n])
+                <a class="stat" href="{{ route('product.orders', array_merge(request()->except('page'), ['status' => $key])) }}" style="text-decoration:none;color:inherit"><span class="stat-label">{{ $label }}</span><span class="stat-value">{{ $n }}</span></a>
+            @endforeach
+        </div>
+        <div class="stat-grid" style="margin-top:.6rem">
+            <div class="stat"><span class="stat-label">Successful sales value</span><span class="stat-value">{{ Money::format($tot['sales']) }}</span></div>
+            <div class="stat"><span class="stat-label">Delivery charges (client-borne, once)</span><span class="stat-value">{{ Money::format($tot['delivery']) }}</span></div>
+            <div class="stat"><span class="stat-label">Net successful sales</span><span class="stat-value">{{ Money::format($tot['net']) }}</span></div>
+            <div class="stat"><span class="stat-label">Sellbees commission</span><span class="stat-value">{{ Money::format($tot['commission']) }}</span></div>
+            <div class="stat"><span class="stat-label">Client entitlement</span><span class="stat-value">{{ Money::format($tot['entitlement']) }}</span></div>
+            <div class="stat"><span class="stat-label">Success rate (delivered / delivered + failed)</span><span class="stat-value">{{ $summary['success_rate_bps'] === null ? '—' : number_format($summary['success_rate_bps'] / 100, 1).'%' }}</span></div>
+        </div></div>
+    </section>
+
+    <section class="panel">
+        <form method="GET" class="filters" role="search">
+            @if ($project)<input type="hidden" name="project" value="{{ $project->id }}">@endif
+            <div class="field grow"><label>Search: order, customer, phone, tracking or project</label><input type="search" name="q" value="{{ request('q') }}"></div>
+            <div class="field"><label>Product</label><input type="search" name="product" value="{{ request('product') }}"></div>
+            <div class="field"><label>Client</label><select name="client"><option value="">All</option>@foreach ($clients as $c)<option value="{{ $c->id }}" @selected(request('client') == $c->id)>{{ $c->name }}</option>@endforeach</select></div>
+            <div class="field"><label>Project</label><select name="fproject"><option value="">All</option>@foreach ($projects as $p)<option value="{{ $p->id }}" @selected(request('fproject') == $p->id)>{{ $p->name }}</option>@endforeach</select></div>
+            <div class="field"><label>Status</label><select name="status"><option value="">All</option>@foreach ($statuses as $k => $v)<option value="{{ $k }}" @selected(request('status') === $k)>{{ $v }}</option>@endforeach</select></div>
+            <div class="field"><label>Courier</label><select name="courier"><option value="">All</option>@foreach ($couriers as $cr)<option value="{{ $cr }}" @selected(request('courier') === $cr)>{{ $cr }}</option>@endforeach</select></div>
+            <div class="field"><label>Ordered from</label><input type="date" name="from" value="{{ request('from') }}"></div>
+            <div class="field"><label>to</label><input type="date" name="to" value="{{ request('to') }}"></div>
+            <div class="field"><label>Sort by</label><select name="sort">@foreach ($sorts as $k => $v)<option value="{{ $k }}" @selected(request('sort', 'ordered_on') === $k)>{{ $v }}</option>@endforeach</select></div>
+            <div class="field"><label>Order</label><select name="dir"><option value="desc" @selected(request('dir', 'desc') === 'desc')>Newest / highest first</option><option value="asc" @selected(request('dir') === 'asc')>Oldest / lowest first</option></select></div>
+            <div class="field"><label>Per page</label><select name="per_page">@foreach ([25, 50, 100] as $n)<option value="{{ $n }}" @selected((int) request('per_page', 25) === $n)>{{ $n }}</option>@endforeach</select></div>
+            <button class="btn">Filter</button> <a class="btn" href="{{ route('product.orders', $project ? ['project' => $project->id] : []) }}">Clear</a>
+        </form>
+    </section>
     <section class="panel">
         @include('product._orders-table', ['orders' => $orders, 'accounts' => $accounts])
     </section>

@@ -255,6 +255,7 @@ Route::middleware('auth')->group(function () {
 
         Route::get('projects/{project}', [ProductOperationsController::class, 'projectShow'])->name('projects.show')->whereNumber('project');
         Route::get('orders', [ProductOperationsController::class, 'orders'])->name('orders');
+        Route::get('analytics', [ProductOperationsController::class, 'analytics'])->name('analytics');
         Route::middleware('can:orders.manage')->group(function () {
             Route::post('orders', [ProductOperationsController::class, 'orderStore'])->name('orders.store');
             Route::post('orders/{order}/confirm', [ProductOperationsController::class, 'orderConfirm'])->name('orders.confirm');

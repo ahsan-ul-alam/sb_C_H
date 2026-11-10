@@ -37,6 +37,21 @@
         </div></div>
     </section>
 
+    @include('product._sales-figures', ['a' => $dash])
+    <section class="panel">
+        <div class="panel-head"><h2>Low-stock warnings</h2><span class="sub">available stock under the minimum Finance set for the product</span></div>
+        <div class="table-wrap"><table class="table table-min-640">
+            <thead><tr><th>Product</th><th class="num">Available</th><th class="num">Minimum</th><th>State</th></tr></thead>
+            <tbody>
+            @forelse ($lowStock as $r)
+                <tr><td>{{ $r['product'] }}</td><td class="num">{{ $r['available'] }}</td><td class="num">{{ $r['minimum'] }}</td><td><span class="badge badge-{{ $r['state'] === 'out' ? 'unpaid' : 'partial' }}">{{ $r['state'] === 'out' ? 'Out of stock' : 'Low' }}</span></td></tr>
+            @empty
+                <tr><td colspan="4" class="muted">No low-stock warnings (or no minimum has been set for this project's products).</td></tr>
+            @endforelse
+            </tbody>
+        </table></div>
+    </section>
+    @include('product._sales-exceptions', ['exceptions' => $exceptions])
     <section class="panel">
         <div class="panel-head"><h2>Inventory</h2></div>
         <div class="panel-body">

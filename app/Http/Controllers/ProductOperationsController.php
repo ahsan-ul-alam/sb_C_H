@@ -28,9 +28,11 @@ use App\Services\OrderRefunds;
 use App\Services\ProjectEconomics;
 use App\Services\ProjectInventory;
 use App\Services\ProjectStockAllocation;
+use App\Services\SalesAnalytics;
 use App\Services\StorageBilling;
 use App\Support\BusinessDate;
 use App\Support\Money;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
@@ -170,20 +172,93 @@ class ProductOperationsController extends Controller
 
     // ───────────── orders & delivery ─────────────
 
+    /** Orders sort keys the screen offers (never taken from the request as raw SQL). */
+    private const ORDER_SORTS = ['ordered_on', 'reference', 'delivery_status', 'delivered_at', 'value'];
+
+    /**
+     * The orders a user may see, narrowed by the screen's filters. Search matches order number, customer name or phone, tracking number and project name; the product filter
+     * matches any line. The status filter is optional so the status summary can count the same scope without it.
+     *
+     * @param  list<int>|null  $visible  the projects the user may see (null: all)
+     * @return Builder<ClientOrder>
+     */
+    private function orderScope(Request $request, ?array $visible, bool $withStatus = true): Builder
+    {
+        $like = fn (string $v) => '%'.addcslashes(trim($v), '%_\\').'%';
+        $search = trim((string) $request->query('q'));
+        $product = trim((string) $request->query('product'));
+        $courier = trim((string) $request->query('courier'));
+
+        return ClientOrder::query()->where('fulfilment', 'stock')
+            ->when($visible !== null, fn ($b) => $b->whereIn('project_id', $visible))
+            ->when($request->integer('client'), fn ($b, $id) => $b->whereHas('project', fn ($p) => $p->where('client_id', $id)))
+            ->when($request->integer('fproject'), fn ($b, $id) => $b->where('project_id', $id))
+            ->when($withStatus && $request->filled('status'), fn ($b) => $b->where('delivery_status', (string) $request->query('status')))
+            ->when($courier !== '', fn ($b) => $b->where('courier', 'like', $like($courier)))
+            ->when($request->filled('from'), fn ($b) => $b->whereDate('ordered_on', '>=', (string) $request->query('from')))
+            ->when($request->filled('to'), fn ($b) => $b->whereDate('ordered_on', '<=', (string) $request->query('to')))
+            ->when($product !== '', fn ($b) => $b->whereHas('items', fn ($i) => $i->where('description', 'like', $like($product))))
+            ->when($search !== '', fn ($b) => $b->where(fn ($w) => $w->where('reference', 'like', $like($search))->orWhere('customer_name', 'like', $like($search))
+                ->orWhere('customer_phone', 'like', $like($search))->orWhere('tracking_reference', 'like', $like($search))
+                ->orWhereHas('project', fn ($p) => $p->where('name', 'like', $like($search)))));
+    }
+
     public function orders(Request $request): View
     {
+        $request->validate(['from' => ['nullable', 'date'], 'to' => ['nullable', 'date'], 'sort' => ['nullable', Rule::in(self::ORDER_SORTS)], 'dir' => ['nullable', Rule::in(['asc', 'desc'])],
+            'per_page' => ['nullable', Rule::in(['25', '50', '100'])], 'fproject' => ['nullable', 'integer'], 'client' => ['nullable', 'integer']]);
         $project = $request->integer('project') ? Project::with('client')->find($request->integer('project')) : null;
         if ($project) {
             $this->authorizeProject($request, $project);
         }
         $visible = $request->user()->accessibleProjectIds();
+        if ($request->integer('fproject')) {
+            $this->authorizeProject($request, $request->integer('fproject'));
+        }
         $stock = $project ? Inventory::stockFor($project->client_id, null, $project->id)->groupBy(fn ($r) => $r['line']->supplier_product_id)
             ->map(fn ($g) => ['name' => $g->first()['line']->description, 'available' => $g->reduce(fn ($c, $r) => bcadd($c, $r['available'], 2), '0')]) : collect();
-        $orders = ClientOrder::where('fulfilment', 'stock')->when($visible !== null, fn ($q) => $q->whereIn('project_id', $visible))->with(['project.client', 'items.line', 'collections', 'invoice'])->latest('id')->paginate(25)->withQueryString();
+
+        $sort = in_array($request->query('sort'), self::ORDER_SORTS, true) ? (string) $request->query('sort') : 'ordered_on';
+        $dir = $request->query('dir') === 'asc' ? 'asc' : 'desc';
+        $query = $this->orderScope($request, $visible)->with(['project.client', 'items.line', 'collections', 'invoice']);
+        if ($sort === 'value') {
+            $query->select('client_orders.*')->selectSub(ClientOrderItem::query()->selectRaw('COALESCE(SUM(quantity * (unit_price - unit_discount)), 0)')->whereColumn('client_order_id', 'client_orders.id'), 'order_value')->orderBy('order_value', $dir);
+        } else {
+            $query->orderBy($sort, $dir);
+        }
+        $orders = $query->orderByDesc('id')->paginate((int) ($request->query('per_page') ?: 25))->withQueryString();
+
+        // The summary counts the same scope without the status filter, so each status card shows what that filter would return.
+        $scope = $this->orderScope($request, $visible, withStatus: false);
+        $summary = SalesAnalytics::figures((clone $scope)->with(['items', 'project'])->get());
 
         return view('product.orders', [
             'orders' => $orders, 'projects' => Project::with('client:id,name')->whereNull('archived_at')->when($visible !== null, fn ($q) => $q->whereIn('id', $visible))->orderBy('name')->get(), 'project' => $project, 'stock' => $stock,
-            'accounts' => FinancialAccount::where('is_active', true)->orderBy('name')->get(),
+            'accounts' => FinancialAccount::where('is_active', true)->orderBy('name')->get(), 'summary' => $summary,
+            'clients' => Client::when($visible !== null, fn ($q) => $q->whereHas('projects', fn ($p) => $p->whereIn('id', $visible)))->orderBy('name')->get(['id', 'name']),
+            'couriers' => ClientOrder::where('fulfilment', 'stock')->when($visible !== null, fn ($q) => $q->whereIn('project_id', $visible))->whereNotNull('courier')->distinct()->orderBy('courier')->pluck('courier'),
+            'statuses' => ['pending' => 'Draft', 'confirmed' => 'Confirmed', 'packed' => 'Packed', 'dispatched' => 'Dispatched', 'delivered' => 'Delivered', 'failed' => 'Failed delivery', 'cancelled' => 'Cancelled'],
+            'sorts' => ['ordered_on' => 'Order date', 'delivered_at' => 'Delivery date', 'reference' => 'Order number', 'delivery_status' => 'Status', 'value' => 'Order value'],
+        ]);
+    }
+
+    /**
+     * Sales analytics from the order records: successful sales by day, week and month, success, failure and return rates, average order value, top products and project-wise
+     * performance. Only the projects the user may see are included, and nothing here writes.
+     */
+    public function analytics(Request $request): View
+    {
+        $request->validate(['from' => ['nullable', 'date'], 'to' => ['nullable', 'date'], 'fproject' => ['nullable', 'integer'], 'client' => ['nullable', 'integer']]);
+        $visible = $request->user()->accessibleProjectIds();
+        if ($request->integer('fproject')) {
+            $this->authorizeProject($request, $request->integer('fproject'));
+        }
+        $orders = $this->orderScope($request, $visible)->with(['items', 'project.client'])->get();
+
+        return view('product.analytics', [
+            'a' => SalesAnalytics::figures($orders), 'exceptions' => SalesAnalytics::exceptions($orders),
+            'projects' => Project::with('client:id,name')->whereNull('archived_at')->when($visible !== null, fn ($q) => $q->whereIn('id', $visible))->orderBy('name')->get(),
+            'clients' => Client::when($visible !== null, fn ($q) => $q->whereHas('projects', fn ($p) => $p->whereIn('id', $visible)))->orderBy('name')->get(['id', 'name']),
         ]);
     }
 
@@ -214,8 +289,11 @@ class ProductOperationsController extends Controller
         $homeLineIds = SourcingLotLine::whereHas('lot', fn ($l) => $l->where('project_id', $project->id)->where('ownership', 'client'))->whereNotNull('received_quantity')->pluck('id');
         $visible = $request->user()->accessibleProjectIds();
 
+        $projectOrders = ClientOrder::where('project_id', $project->id)->where('fulfilment', 'stock')->with(['items', 'project'])->get();
+
         return view('product.project', [
-            'economics' => ProjectEconomics::for($project),
+            'economics' => ProjectEconomics::for($project), 'dash' => SalesAnalytics::figures($projectOrders), 'exceptions' => SalesAnalytics::exceptions($projectOrders),
+            'lowStock' => SalesAnalytics::lowStock($project, ProjectInventory::positions(['project' => $project->id])),
             'allocations' => StockAllocation::with(['line.lot.project', 'project', 'creator'])->whereNull('cancelled_at')
                 ->where(fn ($q) => $q->where('project_id', $project->id)->orWhereIn('sourcing_lot_line_id', $homeLineIds))->latest('id')->get(),
             'homeLines' => SourcingLotLine::with('lot')->whereIn('id', $homeLineIds)->get()->map(fn ($l) => ['line' => $l, 'free' => bcadd(ProjectStockAllocation::remaining($l, $project->id), '0', 2)])->filter(fn ($r) => bccomp($r['free'], '0', 2) > 0)->values(),
