@@ -6,8 +6,10 @@ use App\Models\Client;
 use App\Models\ClientOrder;
 use App\Models\Invoice;
 use App\Models\Project;
+use App\Models\SourcingAllocation;
 use App\Models\SourcingLot;
 use App\Models\SourcingLotLine;
+use App\Support\Money;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
@@ -36,14 +38,93 @@ class ClientPortalData
     }
 
     /**
-     * Stock positions of the client's own and custody stock only (never Sellbees-owned stock or another client's).
+     * Stock positions of the lots attached to the client's projects: the client's own and custody stock, plus received stock whose ownership has not been stated yet
+     * (older lots; ownership 'unstated', never counted as verified client stock). Never Sellbees-owned stock or another client's.
      *
      * @return Collection<int, array<string, mixed>>
      */
     public static function positions(Client $client, ?int $projectId = null): Collection
     {
-        return ProjectInventory::positions([], true)->filter(fn ($r) => $r['project'] !== null && $r['project']->client_id === $client->id && in_array($r['ownership'], ['client', 'client_custody'], true)
+        return ProjectInventory::positions([], true)->filter(fn ($r) => $r['project'] !== null && $r['project']->client_id === $client->id && in_array($r['ownership'], ['client', 'client_custody', 'unstated'], true)
             && ($projectId === null || $r['project']->id === $projectId))->values();
+    }
+
+    /**
+     * Splits positions into verified client stock and stock whose ownership is still to be confirmed.
+     *
+     * @param  Collection<int, array<string, mixed>>  $positions
+     * @return array{confirmed: Collection<int, array<string, mixed>>, awaiting: Collection<int, array<string, mixed>>}
+     */
+    public static function splitByOwnership(Collection $positions): array
+    {
+        return ['confirmed' => $positions->reject(fn ($r) => $r['ownership'] === 'unstated')->values(), 'awaiting' => $positions->filter(fn ($r) => $r['ownership'] === 'unstated')->values()];
+    }
+
+    /** Lots that belong on the client's projects: client-owned, or with ownership not yet stated. Company-owned lots are never the client's. */
+    private static function clientLotQuery(Client $client, ?int $projectId = null)
+    {
+        return SourcingLot::whereIn('project_id', $client->projects()->select('id'))->when($projectId, fn ($q) => $q->where('project_id', $projectId))
+            ->where(fn ($q) => $q->where('ownership', 'client')->orWhereNull('ownership'))->where('status', '!=', 'cancelled');
+    }
+
+    /**
+     * What the client has been billed for products and what has been paid, kept apart from the approved investment:
+     *   linked     invoices that sourcing billing allocations point at (the authoritative product billing). Fully product invoices give billed / paid / outstanding;
+     *              a mixed invoice (product plus other items) is shown separately because a payment applies to the whole invoice, never to one item.
+     *   other      invoices with no allocation behind them (joining fees, services, or product invoices raised before billing was linked to a lot). Never labelled product.
+     *   awaiting   lots on the client's projects that cannot yet count as verified investment, each with the reason (ownership not stated, client price not approved, not billed).
+     * Paid is the invoice's verified paid amount (voided payments excluded). Nothing here posts or rewrites anything.
+     *
+     * @return array<string, mixed>
+     */
+    public static function productBilling(Client $client): array
+    {
+        $projectIds = $client->projects()->pluck('id');
+        $allocations = SourcingAllocation::whereIn('project_id', $projectIds)->where('kind', 'sale')->whereNotNull('billed_invoice_id')->get();
+        $linked = $allocations->groupBy('billed_invoice_id')->map(fn ($g) => (int) $g->sum(fn ($a) => $a->amount()));
+        $out = ['billed' => 0, 'paid' => 0, 'outstanding' => 0, 'invoices' => 0, 'mixed' => ['count' => 0, 'product_billed' => 0, 'invoice_total' => 0, 'paid' => 0],
+            'other' => ['count' => 0, 'billed' => 0, 'paid' => 0, 'outstanding' => 0, 'list' => []]];
+        foreach (self::invoiceQuery($client)->with('payments')->orderBy('issued_on')->orderBy('id')->get() as $i) {
+            $l = (int) ($linked[$i->id] ?? 0);
+            if ($l > 0 && $l >= (int) $i->total) {
+                $out['billed'] += (int) $i->total;
+                $out['paid'] += (int) $i->amount_paid;
+                $out['outstanding'] += $i->balance();
+                $out['invoices']++;
+            } elseif ($l > 0) {
+                $out['mixed']['count']++;
+                $out['mixed']['product_billed'] += $l;
+                $out['mixed']['invoice_total'] += (int) $i->total;
+                $out['mixed']['paid'] += (int) $i->amount_paid;
+            } else {
+                $out['other']['count']++;
+                $out['other']['billed'] += (int) $i->total;
+                $out['other']['paid'] += (int) $i->amount_paid;
+                $out['other']['outstanding'] += $i->balance();
+                $out['other']['list'][] = ['number' => $i->number, 'total' => (int) $i->total, 'paid' => (int) $i->amount_paid];
+            }
+        }
+
+        $billedLots = $allocations->pluck('sourcing_lot_id')->unique();
+        $awaiting = [];
+        foreach (self::clientLotQuery($client)->with('lines')->get() as $lot) {
+            $reasons = [];
+            if ($lot->ownership !== 'client') {
+                $reasons[] = 'Ownership of this stock is still being confirmed';
+            }
+            if ($lot->lines->isEmpty() || $lot->lines->contains(fn ($l) => $l->approved_price === null)) {
+                $reasons[] = 'Your price is not approved yet';
+            }
+            if (! $billedLots->contains($lot->id)) {
+                $reasons[] = 'Not yet billed to you against this lot';
+            }
+            if ($reasons !== []) {
+                $awaiting[] = ['number' => $lot->number, 'reasons' => $reasons, 'units' => (string) $lot->lines->reduce(fn ($c, $l) => bcadd($c, (string) ($l->received_quantity ?? '0'), 2), '0'),
+                    'approved_value' => (int) $lot->lines->sum(fn ($l) => $l->approved_price === null ? 0 : Money::multiply((string) $l->quantity, (int) $l->approved_price))];
+            }
+        }
+
+        return $out + ['awaiting' => $awaiting, 'awaiting_count' => count($awaiting), 'awaiting_value' => (int) collect($awaiting)->sum('approved_value')];
     }
 
     /** @return Collection<int, ClientOrder> */
@@ -84,8 +165,9 @@ class ClientPortalData
     public static function overview(Client $client): array
     {
         $projects = self::projects($client);
-        $lotIds = SourcingLot::whereIn('project_id', $projects->pluck('id'))->where('ownership', 'client')->where('status', '!=', 'cancelled')->pluck('id');
-        $positions = self::positions($client);
+        $lotIds = self::clientLotQuery($client)->pluck('id');
+        $split = self::splitByOwnership(self::positions($client));
+        $positions = $split['confirmed'];
         $sales = SalesAnalytics::figures(self::allOrders($client));
         $e = self::economics($client);
 
@@ -96,7 +178,7 @@ class ClientPortalData
             'orders' => $sales['counts']['total'], 'successful_orders' => $sales['successful_orders'], 'successful_sales' => $sales['totals']['sales'],
             'economics' => $e['total'], 'client_wide' => $e['client_wide'],
             'counts' => $sales['counts'], 'pending_deliveries' => $sales['counts']['confirmed'] + $sales['counts']['packed'] + $sales['counts']['dispatched'],
-            'stock' => self::stockBuckets($positions), 'project_cards' => self::projectCards($client, $e), 'recent_orders' => self::recentOrders($client), 'invoices' => self::invoiceSummary($client),
+            'stock' => self::stockBuckets($positions), 'stock_awaiting' => self::stockBuckets($split['awaiting']), 'billing' => self::productBilling($client), 'project_cards' => self::projectCards($client, $e), 'recent_orders' => self::recentOrders($client), 'invoices' => self::invoiceSummary($client),
         ];
     }
 
@@ -110,7 +192,8 @@ class ClientPortalData
         $projects = self::projects($client)->pluck('id');
         $positions = self::positions($client, $projectId)->groupBy(fn ($r) => $r['line']->id);
         $out = [];
-        foreach (SourcingLot::whereIn('project_id', $projects)->when($projectId, fn ($q) => $q->where('project_id', $projectId))->where('ownership', 'client')->where('status', '!=', 'cancelled')->with(['project', 'lines.product'])->orderByDesc('id')->get() as $lot) {
+        $billed = SourcingAllocation::whereIn('project_id', $projects)->where('kind', 'sale')->whereNotNull('billed_invoice_id')->pluck('sourcing_lot_id')->unique();
+        foreach (self::clientLotQuery($client, $projectId)->with(['project', 'lines.product'])->orderByDesc('id')->get() as $lot) {
             $lines = $lot->lines->map(function (SourcingLotLine $l) use ($positions, $lot) {
                 $b = array_fill_keys(['available', 'reserved', 'dispatched', 'delivered', 'returned', 'damaged'], '0');
                 foreach ($positions->get($l->id, collect()) as $r) {
@@ -122,7 +205,8 @@ class ClientPortalData
                 return ['stage' => self::lineStage($l->received_quantity === null ? null : (string) $l->received_quantity, $b, $lot->status), 'product' => $l->description, 'sku' => $l->product?->sku, 'unit' => $l->unit ?? 'pcs', 'client_price' => $l->approved_price === null ? null : (int) $l->approved_price, 'ordered' => (string) $l->quantity,
                     'received' => $l->received_quantity === null ? null : (string) $l->received_quantity, 'accepted' => $l->received_quantity === null ? null : (string) $l->usable_quantity, 'buckets' => $b];
             })->all();
-            $out[] = ['lot' => $lot, 'number' => $lot->number, 'status' => $lot->status, 'status_label' => self::lotStatusLabel($lot->status), 'project' => $lot->project, 'lines' => $lines];
+            $out[] = ['lot' => $lot, 'number' => $lot->number, 'status' => $lot->status, 'status_label' => self::lotStatusLabel($lot->status), 'project' => $lot->project, 'lines' => $lines,
+                'ownership_confirmed' => $lot->ownership === 'client', 'billed' => $billed->contains($lot->id)];
         }
 
         return $out;
@@ -255,8 +339,16 @@ class ClientPortalData
         $positions = self::positions($client)->groupBy(fn ($r) => $r['project']->id);
         $counts = self::allOrders($client)->groupBy('project_id');
 
-        return collect(($economics ?? self::economics($client))['projects'])->map(fn ($row) => $row + ['stock' => self::stockBuckets($positions->get($row['project']->id, collect())),
-            'orders' => $counts->get($row['project']->id, collect())->count()])->all();
+        $billing = self::productBilling($client);
+        $awaitingLots = collect($billing['awaiting']);
+
+        return collect(($economics ?? self::economics($client))['projects'])->map(function ($row) use ($positions, $counts, $client, $awaitingLots) {
+            $split = self::splitByOwnership($positions->get($row['project']->id, collect()));
+            $projectLots = self::clientLotQuery($client, $row['project']->id)->pluck('number');
+
+            return $row + ['stock' => self::stockBuckets($split['confirmed']), 'stock_awaiting' => self::stockBuckets($split['awaiting']), 'orders' => $counts->get($row['project']->id, collect())->count(),
+                'awaiting_lots' => $awaitingLots->whereIn('number', $projectLots->all())->count()];
+        })->all();
     }
 
     /**

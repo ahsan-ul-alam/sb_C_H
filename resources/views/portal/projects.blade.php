@@ -14,23 +14,25 @@
     $stockTotal = array_sum(array_map('floatval', $b));
     $stockLabels = ['available' => 'Available', 'reserved' => 'Reserved', 'dispatched' => 'Dispatched', 'delivered' => 'Delivered', 'returned' => 'Returned', 'damaged' => 'Damaged'];
     $c = $detail['counts'];
+    $invPending = $detail['investment'] === 0 && $detail['awaiting_lots'] > 0;
+    $awaitUnits = $detail['stock_awaiting']['available'];
 @endphp
 <x-portal-layout :title="$p->name" :subtitle="'Started '.($p->started_on?->format('j M Y') ?? '—').' · '.$p->status->label().($p->isArchived() ? ' (archived)' : '')" :crumbs="[['My Projects', route('portal.projects')], [$p->name, null]]">
     <nav class="pt-tabs" aria-label="Project sections"><a href="#overview">Overview</a><a href="#lots">Sourcing lots</a><a href="#stock">Products &amp; stock</a><a href="#orders">Orders</a><a href="#finance">Financial summary</a></nav>
 
     <section id="overview" aria-label="Project overview">
         <div class="pt-grid pt-g4">
-            <x-portal.kpi tone="primary" icon="wallet" label="Product investment" :value="$m($detail['investment'])" hint="Approved client prices only" />
+            <x-portal.kpi tone="primary" :pending="$invPending" icon="wallet" label="Approved product investment" :value="$invPending ? 'Pending verification' : $m($detail['investment'])" :hint="$invPending ? 'Sourced lot not yet verified: see its status below' : 'Approved client prices, billed lots only'" />
             <x-portal.kpi tone="primary" icon="trending-up" label="Successful sales" :value="$m($detail['gross_sales'])" :hint="$qty($detail['units_sold']).' units delivered, not returned'" />
             <x-portal.kpi tone="primary" :pending="$pending" icon="chart" label="Your net profit" :value="$pending ? 'Pending verification' : $m($detail['client_profit'])" :hint="$pending ? 'Product cost not yet verified' : 'After your product cost, once'" />
-            <x-portal.kpi tone="primary" icon="package" label="Stock available" :value="$qty($b['available'])" hint="units ready to order" />
+            <x-portal.kpi tone="primary" icon="package" label="Stock available" :value="$qty($b['available'])" :hint="bccomp((string) $awaitUnits, '0', 2) > 0 ? 'units, plus '.$qty($awaitUnits).' awaiting ownership confirmation' : 'units ready to order'" />
         </div>
     </section>
 
     <section class="pt-card" id="lots" aria-labelledby="h-lots">
         <div class="pt-card-head"><h2 id="h-lots">Sourcing lots</h2><span class="sub">{{ count($detail['lots']) }} {{ \Illuminate\Support\Str::plural('lot', count($detail['lots'])) }}</span></div>
         @forelse ($detail['lots'] as $l)
-            <div style="padding:1rem 1.25rem .25rem;display:flex;gap:.75rem;align-items:center;flex-wrap:wrap"><strong>Lot {{ $l['number'] }}</strong><x-portal.status kind="lot" :value="$l['status_label']" /></div>
+            <div style="padding:1rem 1.25rem .25rem;display:flex;gap:.75rem;align-items:center;flex-wrap:wrap"><strong>Lot {{ $l['number'] }}</strong><x-portal.status kind="lot" :value="$l['status_label']" />@unless ($l['ownership_confirmed'])<span class="pt-chip warn">Ownership being confirmed</span>@endunless @unless ($l['billed'])<span class="pt-chip warn">Not yet billed against this lot</span>@endunless</div>
             <div class="pt-table-wrap"><table class="pt-table stack">
                 <thead><tr><th>Product</th><th class="r">Your price / unit</th><th class="r">Sourced</th><th class="r">Received</th><th class="r">Accepted</th><th>Status</th></tr></thead>
                 <tbody>@foreach ($l['lines'] as $x)
@@ -95,7 +97,7 @@
         <a class="pt-card pt-proj" href="{{ route('portal.projects', ['project' => $p['project']->id]) }}">
             <div style="display:flex;justify-content:space-between;gap:.75rem;align-items:flex-start"><h3>{{ $p['project']->name }}</h3><x-portal.status kind="project" :value="$p['project']->status->label()" /></div>
             <div class="pt-mini">
-                <div><span>Investment</span><b>{{ $m($p['investment']) }}</b></div>
+                <div><span>Investment</span><b>{{ $p['investment'] === 0 && $p['awaiting_lots'] > 0 ? 'Pending' : $m($p['investment']) }}</b></div>
                 <div><span>Successful sales</span><b>{{ $m($p['gross_sales']) }}</b></div>
                 <div><span>Net profit</span><b>{{ $p['cost_pending'] ? 'Pending' : $m($p['client_profit']) }}</b></div>
                 <div><span>Stock available</span><b>{{ $qty($p['stock']['available']) }}</b></div>

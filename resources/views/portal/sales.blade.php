@@ -6,16 +6,19 @@
     $t = $e['total'];
     $w = $e['client_wide'];
     $pending = (bool) $t['pending'];
+    $invPending = $t['investment'] === 0 && $billing['awaiting_count'] > 0;
     $months = array_slice(array_reverse($monthly, true), -12, null, true);
     $maxSales = max(1, ...array_values(array_map(fn ($m) => $m['sales'], $months ?: [['sales' => 1]])));
 @endphp
 <x-portal-layout title="Sales & Profit" subtitle="Your investment, what has sold and what you earned. Your product cost is deducted once, in the profit, and never again from what is paid to you.">
     <div class="pt-grid pt-g4">
-        <x-portal.kpi tone="primary" icon="wallet" label="Product investment" :value="$m($t['investment'])" hint="What you paid for your products" />
+        <x-portal.kpi tone="primary" :pending="$invPending" icon="wallet" label="Approved product investment" :value="$invPending ? 'Pending verification' : $m($t['investment'])" :hint="$invPending ? 'Sourced lots not yet verified' : 'Your approved cost of the products sourced'" />
         <x-portal.kpi tone="primary" icon="trending-up" label="Investment recovered" :value="$pending ? 'Pending verification' : $m($t['investment_recovered'])" :pending="$pending" hint="Recovered through sales" />
         <x-portal.kpi tone="primary" icon="cash" label="Settlement entitlement" :value="$m($t['entitlement'])" hint="Owed to you from sales" />
         <x-portal.kpi tone="primary" icon="chart" label="Net product profit" :value="$pending ? 'Pending verification' : $m($t['client_profit'])" :pending="$pending" hint="After your product cost" />
     </div>
+
+    @include('portal._billing', ['billing' => $billing])
 
     <div class="pt-grid pt-g21">
         <section class="pt-card" aria-labelledby="h-wf">

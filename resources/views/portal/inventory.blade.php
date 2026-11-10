@@ -1,11 +1,14 @@
 @use('App\Services\ClientPortalData')
 @php
     $qty = fn ($v) => rtrim(rtrim((string) $v, '0'), '.') ?: '0';
-    $sum = ClientPortalData::stockBuckets($rows);
+    $split = ClientPortalData::splitByOwnership($rows);
+    $sum = ClientPortalData::stockBuckets($split['confirmed']);
+    $awaitUnits = ClientPortalData::stockBuckets($split['awaiting'])['available'];
     $total = array_sum(array_map('floatval', $sum));
     $labels = ['available' => 'Available', 'reserved' => 'Reserved', 'dispatched' => 'Dispatched', 'delivered' => 'Delivered', 'returned' => 'Returned', 'damaged' => 'Damaged'];
 @endphp
 <x-portal-layout title="Products & Stock" subtitle="Where each of your products is right now: available, reserved, on its way, delivered, returned or damaged.">
+    @if (bccomp((string) $awaitUnits, '0', 2) > 0)<div class="pt-note" style="margin-bottom:1.25rem">{{ $qty($awaitUnits) }} received units are listed below but are not counted as available client stock until Sellbees confirms their ownership.</div>@endif
     @if ($total > 0)
     <section class="pt-card" aria-label="Stock summary" style="margin-bottom:1.25rem"><div class="pt-card-body">
         <div class="pt-stack" role="img" aria-label="Stock by status">@foreach ($labels as $k => $label)@if ((float) $sum[$k] > 0)<i class="s-{{ $k }}" style="width: {{ round((float) $sum[$k] / $total * 100, 2) }}%" title="{{ $label }}"></i>@endif @endforeach</div>
@@ -22,7 +25,7 @@
         <div class="pt-table-wrap"><table class="pt-table stack">
             <thead><tr><th>Product</th><th>Lot</th><th class="r">Sourced</th><th class="r">Received</th><th>Status</th></tr></thead>
             <tbody>@foreach ($rows as $r)@php($line = $r['line'])
-                <tr><td class="lead"><strong>{{ $line->description }}</strong>@if ($r['ownership'] === 'client_custody') <small>Held for you</small>@endif @if ($line->product?->sku)<small class="pt-sku">SKU {{ $line->product->sku }}</small>@endif<small>{{ $r['project']->name }}</small>@include('portal._pills', ['b' => $r['b']])</td>
+                <tr><td class="lead"><strong>{{ $line->description }}</strong>@if ($r['ownership'] === 'client_custody') <small>Held for you</small>@endif @if ($r['ownership'] === 'unstated') <small><span class="pt-chip warn">Ownership being confirmed</span></small>@endif @if ($line->product?->sku)<small class="pt-sku">SKU {{ $line->product->sku }}</small>@endif<small>{{ $r['project']->name }}</small>@include('portal._pills', ['b' => $r['b']])</td>
                     <td data-label="Lot">{{ $line->lot->number }}</td><td class="r num" data-label="Sourced">{{ $qty($line->quantity) }}</td><td class="r num" data-label="Received">{{ $qty($r['b']['received']) }}</td>
                     <td data-label="Status"><x-portal.status kind="stage" :value="ClientPortalData::lineStage((string) $r['b']['received'], $r['b'], $line->lot->status)" /></td></tr>
             @endforeach</tbody>

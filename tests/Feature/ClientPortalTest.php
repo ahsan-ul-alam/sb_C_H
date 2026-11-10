@@ -4,7 +4,9 @@ use App\Mail\ClientInformationCode;
 use App\Models\AuditLog;
 use App\Models\Client;
 use App\Models\ClientOrder;
+use App\Models\Invoice;
 use App\Models\Payment;
+use App\Models\SourcingAllocation;
 use App\Models\SourcingLot;
 use App\Models\Supplier;
 use App\Models\SupplierProduct;
@@ -371,4 +373,115 @@ it('renders the redesigned screens with their real sections, currency and status
     foreach (array_merge(glob(public_path('css/portal.css')), glob(public_path('js/portal.js')), glob(resource_path('views/portal/*.php')), glob(resource_path('views/components/portal-*.php')), glob(resource_path('views/components/portal/*.php'))) as $file) {
         expect(file_get_contents($file))->not->toContain('11126');
     }
+});
+
+/** An older-style lot: ownership never stated and the billing allocation not linked to its invoice (the records of a client who paid before billing was linked to lots). */
+function cpMakeLegacy(array $s): void
+{
+    DB::table('sourcing_lots')->where('project_id', $s['project']->id)->update(['ownership' => null]);
+    DB::table('sourcing_allocations')->where('project_id', $s['project']->id)->update(['billed_invoice_id' => null]);
+}
+
+it('A/D/I: a client who paid for received stock with an unlinked lot sees pending verification, real billing and paid amounts, and stock awaiting confirmation, never a false zero', function () {
+    $co = cpBoot($this);
+    $s = cpStock($co, 'Legacy Co', 'legacy@example.com', '10');
+    $invoice = Invoice::where('project_id', $s['project']->id)->firstOrFail();
+    $co->payInvoice($invoice, '50', '2026-02-10')->assertSessionHasNoErrors();
+    // a historical payment recorded against a segment (no invoice_id on the payment) must still count
+    $seg = $co->segment($s['project'], 'Old work', '100');
+    $old = $co->invoice($s['project'], [['segment_id' => $seg->id, 'description' => 'Old work', 'quantity' => '1', 'unit_price' => '100']], '2026-02-10', 'INV-OLD');
+    $co->paySegment($seg, '100', '2026-02-10')->assertSessionHasNoErrors();
+    cpMakeLegacy($s);
+    Auth::forgetGuards();
+
+    $b = ClientPortalData::productBilling($s['client']);
+    $paidOnInvoices = (int) Invoice::where('project_id', $s['project']->id)->sum('amount_paid');
+    expect($b['billed'])->toBe(0)->and($b['other']['paid'])->toBe($paidOnInvoices)->and($paidOnInvoices)->toBeGreaterThanOrEqual(15_000)
+        ->and($b['awaiting_count'])->toBe(1)->and($b['awaiting_value'])->toBe(5_000)
+        ->and($b['awaiting'][0]['reasons'])->toContain('Ownership of this stock is still being confirmed')->toContain('Not yet billed to you against this lot');
+    $o = ClientPortalData::overview($s['client']);
+    expect($o['economics']['investment'])->toBe(0)->and($o['stock']['available'])->toBe('0')->and($o['stock_awaiting']['available'])->toBe('10.00')
+        ->and($o['sourced_products'])->toBe(1)->and($o['successful_sales'])->toBe(0)->and($o['client_wide']['entitlement'])->toBe(0)->and($o['economics']['client_profit'])->toBe(0);
+
+    cpLogin($this, $s['client']);
+    $this->get(route('portal.dashboard'))->assertOk()->assertSee('Pending verification')->assertSee('Product billing')->assertSee('Other invoices')->assertSee('INV-OLD')
+        ->assertSee('awaiting ownership confirmation')->assertSee('No customer order delivered yet')->assertSee('Realised product profit');
+    $this->get(route('portal.projects', ['project' => $s['project']->id]))->assertOk()->assertSee('Ownership being confirmed')->assertSee('Not yet billed against this lot');
+    $this->get(route('portal.inventory'))->assertOk()->assertSee('Ownership being confirmed')->assertSee('not counted as available client stock');
+});
+
+it('B/G: a partly paid linked product invoice shows billed, verified paid and outstanding separately', function () {
+    $co = cpBoot($this);
+    $s = cpStock($co, 'Partial Co', 'partial@example.com', '10');
+    $invoiceId = (int) SourcingAllocation::where('project_id', $s['project']->id)->whereNotNull('billed_invoice_id')->value('billed_invoice_id');
+    $co->payInvoice(Invoice::findOrFail($invoiceId), '20', '2026-02-10')->assertSessionHasNoErrors();
+    Auth::forgetGuards();
+
+    $b = ClientPortalData::productBilling($s['client']);
+    expect($b['billed'])->toBe(5_000)->and($b['paid'])->toBe(2_000)->and($b['outstanding'])->toBe(3_000)->and($b['awaiting_count'])->toBe(0)->and($b['mixed']['count'])->toBe(0);
+    cpLogin($this, $s['client']);
+    $this->get(route('portal.sales'))->assertOk()->assertSee('Product amount billed')->assertSee('BDT 50.00')->assertSee('BDT 20.00')->assertSee('BDT 30.00');
+    $this->get(route('portal.dashboard'))->assertSee('Outstanding invoices')->assertDontSee('Pending verification');
+});
+
+it('C: a mixed product and service invoice is not treated as all product and its payment is not split', function () {
+    $co = cpBoot($this);
+    $s = cpStock($co, 'Mixed Co', 'mixed@example.com', '10');
+    $segA = $co->segment($s['project'], 'Product part', '50');
+    $segB = $co->segment($s['project'], 'Ads', '20');
+    $mixed = $co->invoice($s['project'], [['segment_id' => $segA->id, 'description' => 'Goods', 'quantity' => '1', 'unit_price' => '50'], ['segment_id' => $segB->id, 'description' => 'Ads budget', 'quantity' => '1', 'unit_price' => '20']], '2026-02-10', 'INV-MIX');
+    DB::table('sourcing_allocations')->where('project_id', $s['project']->id)->update(['billed_invoice_id' => $mixed->id]);
+    $co->payInvoice($mixed->refresh(), '30', '2026-02-10')->assertSessionHasNoErrors();
+    Auth::forgetGuards();
+
+    $b = ClientPortalData::productBilling($s['client']);
+    expect($b['billed'])->toBe(0)->and($b['mixed'])->toMatchArray(['count' => 1, 'product_billed' => 5_000, 'invoice_total' => 7_000, 'paid' => 3_000]);
+    cpLogin($this, $s['client']);
+    $this->get(route('portal.sales'))->assertOk()->assertSee('mixed invoice')->assertSee('not split by item');
+});
+
+it('E/F: delivered sales give the exact Mug figures with verified investment, and a return lowers sales without a false negative profit', function () {
+    $co = cpBoot($this);
+    $s = cpStock($co, 'Sold Co', 'sold@example.com', '10');
+    $o = cpOrder($co, $s, 'SOLD-1', '10', ['charge' => '10']);
+    Auth::forgetGuards();
+    $e = ClientPortalData::economics($s['client']);
+    expect($e['total'])->toMatchArray(['investment' => 5_000, 'gross_sales' => 10_000, 'delivery_charges' => 1_000, 'commission' => 90, 'entitlement' => 8_910, 'client_profit' => 3_910])
+        ->and(ClientPortalData::productBilling($s['client'])['awaiting_count'])->toBe(0);
+    cpLogin($this, $s['client']);
+    $this->get(route('portal.dashboard'))->assertOk()->assertDontSee('Pending verification')->assertSee('BDT 39.10')->assertSee('BDT 89.10');
+
+    $co->post('clients', 'product.orders.return', ['returned' => [$o->items()->firstOrFail()->id => '2']], $o)->assertSessionMissing('error');
+    Auth::forgetGuards();
+    $after = ClientPortalData::overview($s['client']);
+    expect($after['successful_sales'])->toBeLessThan(10_000)->and($after['economics']['client_profit'])->toBeGreaterThan(0)->and($after['economics']['investment'])->toBe(5_000);
+});
+
+it('H: another client\'s invoices, payments and lots never enter this client\'s billing', function () {
+    $co = cpBoot($this);
+    $a = cpStock($co, 'Iso A', 'isoa@example.com', '10');
+    $b = cpStock($co, 'Iso B', 'isob@example.com', '20');
+    cpMakeLegacy($b);
+    Auth::forgetGuards();
+    $ba = ClientPortalData::productBilling($a['client']);
+    $bb = ClientPortalData::productBilling($b['client']);
+    expect($ba['awaiting_count'])->toBe(0)->and($ba['billed'])->toBe(5_000)->and($bb['awaiting_count'])->toBe(1)->and($bb['awaiting_value'])->toBe(10_000)->and($bb['billed'])->toBe(0);
+    cpLogin($this, $a['client']);
+    $this->get(route('portal.dashboard'))->assertDontSee('Iso B')->assertDontSee('Ownership of this stock is still being confirmed');
+});
+
+it('J: viewing the corrected screens writes no financial, billing, payment or stock record', function () {
+    $co = cpBoot($this);
+    $s = cpStock($co, 'NoWrite Co', 'nowrite@example.com', '10');
+    cpMakeLegacy($s);
+    Auth::forgetGuards();
+    cpLogin($this, $s['client']);
+    $tables = ['journal_entries', 'journal_lines', 'stock_movements', 'payments', 'invoices', 'invoice_items', 'sourcing_allocations', 'sourcing_lots', 'sourcing_lot_lines', 'client_orders', 'client_settlements', 'audit_logs'];
+    $snap = fn () => array_map(fn ($t) => [$t, DB::table($t)->count(), md5(json_encode(DB::table($t)->orderBy('id')->get()))], array_filter($tables, fn ($t) => $t !== 'audit_logs'));
+    $before = $snap();
+    foreach (['portal.dashboard', 'portal.projects', 'portal.inventory', 'portal.sales', 'portal.invoices', 'portal.orders'] as $r) {
+        $this->get(route($r))->assertOk();
+    }
+    $this->get(route('portal.projects', ['project' => $s['project']->id]))->assertOk();
+    expect($snap())->toBe($before);
 });

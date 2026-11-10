@@ -6,6 +6,9 @@
     $e = $o['economics'];
     $w = $o['client_wide'];
     $pending = (bool) $e['pending'];
+    $bill = $o['billing'];
+    $invPending = $e['investment'] === 0 && $bill['awaiting_count'] > 0;
+    $awaitingUnits = $o['stock_awaiting']['available'];
     $c = $o['counts'];
     $stockTotal = array_sum(array_map('floatval', $o['stock']));
     $stockLabels = ['available' => 'Available', 'reserved' => 'Reserved', 'dispatched' => 'Dispatched', 'delivered' => 'Delivered', 'returned' => 'Returned', 'damaged' => 'Damaged'];
@@ -15,19 +18,21 @@
 @endphp
 <x-portal-layout title="Overview" :subtitle="'Welcome back, '.$o['client']['name'].'. Figures come from Sellbees\' verified records; anything not yet verified is marked Pending.'">
     <div class="pt-grid pt-g4">
-        <x-portal.kpi tone="primary" icon="wallet" label="Product investment" :value="$m($e['investment'])" hint="What you paid for your products, all projects" />
-        <x-portal.kpi tone="primary" icon="trending-up" label="Successful sales" :value="$m($o['successful_sales'])" hint="Delivered and not returned" />
-        <x-portal.kpi tone="primary" :pending="$pending" icon="chart" label="Your net profit" :value="$pending ? 'Pending verification' : $m($e['client_profit'])" :hint="$pending ? 'Shown once product costs are verified' : 'After your product cost, deducted once'" />
-        <x-portal.kpi tone="primary" icon="cash" label="Settlement entitlement" :value="$m($w['entitlement'])" hint="Owed to you from sales, all projects" />
+        <x-portal.kpi tone="primary" :pending="$invPending" icon="wallet" label="Approved product investment" :value="$invPending ? 'Pending verification' : $m($e['investment'])" :hint="$invPending ? $bill['awaiting_count'].' sourced lot(s) not yet verified, see product billing below' : ($bill['awaiting_count'] > 0 ? 'Verified lots only; '.$bill['awaiting_count'].' more pending verification' : 'Your approved cost of the products sourced')" />
+        <x-portal.kpi tone="primary" icon="trending-up" label="Successful sales" :value="$m($o['successful_sales'])" :hint="$o['successful_orders'] > 0 ? 'Delivered and not returned' : 'No customer order delivered yet'" />
+        <x-portal.kpi tone="primary" :pending="$pending" icon="chart" label="Realised product profit" :value="$pending ? 'Pending verification' : $m($e['client_profit'])" :hint="$pending ? 'Shown once product costs are verified' : ($o['successful_orders'] > 0 ? 'After your product cost, deducted once' : 'Appears after your first delivered sale; stock you paid for is not a loss')" />
+        <x-portal.kpi tone="primary" icon="cash" label="Settlement entitlement" :value="$m($w['entitlement'])" hint="Earned from delivered sales, all projects" />
     </div>
 
     <div class="pt-grid pt-g5 keep2">
         <x-portal.kpi tone="sm" icon="folder" label="Active projects" :value="$o['active_projects']" />
-        <x-portal.kpi tone="sm" icon="package" label="Available stock" :value="$qty($o['stock']['available'])" hint="units" />
+        <x-portal.kpi tone="sm" icon="package" label="Available stock" :value="$qty($o['stock']['available'])" :hint="bccomp((string) $awaitingUnits, '0', 2) > 0 ? 'units, plus '.$qty($awaitingUnits).' awaiting ownership confirmation' : 'units'" />
         <x-portal.kpi tone="sm" icon="layers" label="Total orders" :value="$o['orders']" />
         <x-portal.kpi tone="sm" icon="check-circle" label="Successful orders" :value="$o['successful_orders']" />
         <x-portal.kpi tone="sm" icon="truck" label="Pending deliveries" :value="$o['pending_deliveries']" hint="confirmed, packed or dispatched" />
     </div>
+
+    @include('portal._billing', ['billing' => $bill])
 
     <section class="pt-card" aria-labelledby="h-proj" style="margin-bottom:1.25rem">
         <div class="pt-card-head"><h2 id="h-proj">Project performance</h2><a class="pt-link" href="{{ route('portal.projects') }}">All projects</a></div>

@@ -140,7 +140,7 @@ class ClientPortalController extends Controller
     {
         $client = $this->client($request);
 
-        return view('portal.sales', ['e' => ClientPortalData::economics($client), 'monthly' => ClientPortalData::monthlySales($client)]);
+        return view('portal.sales', ['e' => ClientPortalData::economics($client), 'monthly' => ClientPortalData::monthlySales($client), 'billing' => ClientPortalData::productBilling($client)]);
     }
 
     public function previewForm(): View
