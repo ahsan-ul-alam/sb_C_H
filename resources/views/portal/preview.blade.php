@@ -1,17 +1,15 @@
-<x-portal-layout title="Admin test access" :bare="true">
-    <div class="cp-card">
-        <h1>Admin Test Client Portal</h1>
-        @if (! $enabled)
-            <p class="cp-note">Admin preview is not enabled in production.</p>
-        @else
-        <p class="muted">Staff only. Opens a read-only, short-lived view of one client. Every start and exit is audited.</p>
-        <form method="POST" action="{{ route('portal.preview.start') }}">@csrf
-            <div class="field"><label>Client SB ID</label><input name="sb_number" value="{{ old('sb_number') }}" required></div>
-            <div class="field"><label>Reason (min. 10 characters)</label><input name="reason" value="{{ old('reason') }}" required></div>
-            <div class="field"><label>{{ $staticCode ? 'Test confirmation code' : 'Your account password' }}</label><input name="confirmation" type="password" autocomplete="off" required></div>
-            <button class="btn btn-primary" style="width:100%;margin-top:12px">Start test session</button>
-        </form>
-        @endif
-        <p style="margin-top:14px"><a href="{{ route('dashboard') }}">Back to the ERP</a></p>
-    </div>
-</x-portal-layout>
+<x-portal-auth title="Admin test access">
+    <h1>Client Portal preview</h1>
+    <p>Staff only. Opens a read-only, short-lived view of one client. Every start and exit is audited.</p>
+    @if (! $enabled)
+        <div class="pt-flash info"><x-icon name="alert" /> Admin preview is not enabled in production.</div>
+    @else
+    <form method="POST" action="{{ route('portal.preview.start') }}" data-loading novalidate>@csrf
+        <div class="pt-field" style="margin-bottom:.9rem"><label for="pv-sb">Client SB ID</label><input id="pv-sb" name="sb_number" value="{{ old('sb_number') }}" required class="pt-input pt-sb-input" autocomplete="off"></div>
+        <div class="pt-field" style="margin-bottom:.9rem"><label for="pv-reason">Reason (at least 10 characters)</label><input id="pv-reason" name="reason" value="{{ old('reason') }}" required class="pt-input"></div>
+        <div class="pt-field"><label for="pv-conf">{{ $staticCode ? 'Test confirmation code' : 'Your account password' }}</label><input id="pv-conf" name="confirmation" type="password" autocomplete="off" required class="pt-input"></div>
+        <button type="submit" class="pt-btn pt-btn-primary pt-btn-block" style="margin-top:1.1rem">Start test session</button>
+    </form>
+    @endif
+    <p style="margin-top:1.25rem"><a class="pt-link" href="{{ route('dashboard') }}">Back to the ERP</a></p>
+</x-portal-auth>

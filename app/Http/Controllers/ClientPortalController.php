@@ -100,7 +100,7 @@ class ClientPortalController extends Controller
         $projects = ClientPortalData::projects($client);
         $selected = $projects->firstWhere('id', (int) $request->query('project'));
 
-        return view('portal.projects', ['projects' => $projects, 'selected' => $selected, 'lots' => ClientPortalData::lots($client, $selected?->id)]);
+        return view('portal.projects', ['projects' => $projects, 'selected' => $selected, 'cards' => $selected ? [] : ClientPortalData::projectCards($client), 'detail' => ClientPortalData::projectDetail($client, $selected?->id)]);
     }
 
     public function inventory(Request $request): View
@@ -118,12 +118,14 @@ class ClientPortalController extends Controller
     {
         $client = $this->client($request);
 
-        return view('portal.orders', ['orders' => ClientPortalData::orders($client, $request), 'projects' => ClientPortalData::projects($client), 'statuses' => ClientPortalData::orderStatuses()]);
+        return view('portal.orders', ['orders' => ClientPortalData::orders($client, $request), 'projects' => ClientPortalData::projects($client), 'statuses' => ClientPortalData::orderStatuses(), 'counts' => ClientPortalData::orderCounts($client)]);
     }
 
     public function invoices(Request $request): View
     {
-        return view('portal.invoices', ['invoices' => ClientPortalData::invoices($this->client($request))]);
+        $client = $this->client($request);
+
+        return view('portal.invoices', ['invoices' => ClientPortalData::invoices($client), 'summary' => ClientPortalData::invoiceSummary($client)]);
     }
 
     public function invoicePdf(Request $request, int $invoice): Response
@@ -136,7 +138,9 @@ class ClientPortalController extends Controller
 
     public function sales(Request $request): View
     {
-        return view('portal.sales', ['e' => ClientPortalData::economics($this->client($request))]);
+        $client = $this->client($request);
+
+        return view('portal.sales', ['e' => ClientPortalData::economics($client), 'monthly' => ClientPortalData::monthlySales($client)]);
     }
 
     public function previewForm(): View

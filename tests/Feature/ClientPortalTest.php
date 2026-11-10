@@ -211,7 +211,7 @@ it('lets an authorised admin start, view read-only, exit and time out a test ses
     $this->post(route('portal.preview.start'), ['sb_number' => $s['client']->sb_number, 'reason' => 'owner acceptance test', 'confirmation' => 'wrong'])->assertSessionHas('error');
     expect(session('portal.client_id'))->toBeNull();
     $this->post(route('portal.preview.start'), ['sb_number' => $s['client']->sb_number, 'reason' => 'owner acceptance test', 'confirmation' => '11126'])->assertRedirect(route('portal.dashboard'));
-    $this->get(route('portal.dashboard'))->assertOk()->assertSee('ADMIN TEST SESSION')->assertSee('Exit Test Session')->assertSee('Test Target Co');
+    $this->get(route('portal.dashboard'))->assertOk()->assertSee('Admin Test Session')->assertSee('Exit Test Session')->assertSee('Test Target Co');
     $this->post(route('portal.orders'))->assertStatus(405);
 
     $this->post(route('portal.preview.exit'))->assertRedirect(route('portal.preview.form'));
@@ -311,7 +311,7 @@ it('hides internal supplier cost, supplier identity and sourcing margin, and sho
     foreach (['portal.projects', 'portal.inventory', 'portal.sales', 'portal.dashboard', 'portal.orders'] as $route) {
         $this->get(route($route))->assertOk()->assertDontSee($s['supplier']->name)->assertDontSee('Sourcing margin', false)->assertDontSee('Supplier price', false)->assertDontSee('Private Customer')->assertDontSee('01711111111');
     }
-    $this->get(route('portal.projects'))->assertSee('5.00');
+    $this->get(route('portal.projects', ['project' => $s['project']->id]))->assertOk()->assertSee('5.00')->assertSee('Lot ')->assertSee('Available', false);
     $economics = ClientPortalData::economics($s['client']);
     expect(json_encode(array_keys($economics['projects'][0])))->not->toContain('sourcing_margin')->not->toContain('courier_cost')
         ->and(array_key_exists('sourcing_margin', $economics['total']))->toBeFalse();
@@ -328,7 +328,7 @@ it('shows the exact Mug figures and labels settlement as client-wide', function 
     expect($e['total'])->toMatchArray(['gross_sales' => 10_000, 'delivery_charges' => 1_000, 'commission' => 90, 'entitlement' => 8_910, 'investment' => 5_000, 'cost_of_sold' => 5_000, 'client_profit' => 3_910]);
     $this->get(route('portal.sales'))->assertOk()->assertSee('100.00')->assertSee('10.00')->assertSee('0.90')->assertSee('89.10')->assertSee('50.00')->assertSee('39.10')
         ->assertSee('Settlement — all your projects together', false)->assertSee('not split by project');
-    $this->get(route('portal.dashboard'))->assertSee('Settlement balance')->assertSee('not split by project');
+    $this->get(route('portal.dashboard'))->assertSee('Settlement')->assertSee('not split by project');
 });
 
 it('never writes a financial or stock record when pages are viewed', function () {
@@ -346,4 +346,29 @@ it('never writes a financial or stock record when pages are viewed', function ()
     }
     $this->get(route('portal.profile'))->assertDontSee('id_number')->assertDontSee('KYC');
     expect($count())->toBe($before);
+});
+
+it('renders the redesigned screens with their real sections, currency and status chips, and ships no test code in any asset', function () {
+    $co = cpBoot($this);
+    $s = cpStock($co, 'Design Co', 'design@example.com', '20');
+    cpOrder($co, $s, 'DES-1', '10', ['charge' => '10']);
+    $co->invoice($s['project'], [['segment_id' => $co->segment($s['project'], 'Seg', '300')->id, 'description' => 'Goods', 'quantity' => '1', 'unit_price' => '300']], '2026-02-10', 'INV-DES');
+    Auth::forgetGuards();
+    $this->get(route('portal.login'))->assertOk()->assertSee('Access Your Business Portal')->assertSee('css/portal.css', false);
+    cpLogin($this, $s['client']);
+
+    $this->get(route('portal.dashboard'))->assertOk()->assertSee('Project performance')->assertSee('Inventory status')->assertSee('Order fulfilment')->assertSee('Outstanding invoices')->assertSee('Recent orders')
+        ->assertSee('BDT 100.00')->assertSee('BDT 39.10')->assertSee('BDT 89.10')->assertSee('Pending deliveries')->assertSee('INV-DES')->assertSee('aria-current="page"', false);
+    $this->get(route('portal.projects'))->assertOk()->assertSee('View project')->assertSee('Design Co Project');
+    $this->get(route('portal.projects', ['project' => $s['project']->id]))->assertOk()->assertSee('Sourcing lots')->assertSee('Order performance')->assertSee('Project financial summary')->assertSee('BDT 5.00')->assertSee('Available');
+    $this->get(route('portal.inventory'))->assertOk()->assertSee('Available')->assertSee('Delivered')->assertSee('pt-pill', false);
+    $this->get(route('portal.orders'))->assertOk()->assertSee('DES-1')->assertSee('Delivered')->assertSee('BDT 89.10');
+    $this->get(route('portal.orders', ['status' => 'failed']))->assertOk()->assertSee('No orders match');
+    $this->get(route('portal.invoices'))->assertOk()->assertSee('BDT 300.00')->assertSee('Unpaid');
+    $this->get(route('portal.profile'))->assertOk()->assertSee('design@example.com');
+    $this->get(route('portal.sales'))->assertOk()->assertSee('How your result is made up')->assertSee('not split by project');
+
+    foreach (array_merge(glob(public_path('css/portal.css')), glob(public_path('js/portal.js')), glob(resource_path('views/portal/*.php')), glob(resource_path('views/components/portal-*.php')), glob(resource_path('views/components/portal/*.php'))) as $file) {
+        expect(file_get_contents($file))->not->toContain('11126');
+    }
 });

@@ -1,19 +1,70 @@
 @use('App\Support\Money')
-@php($t = $e['total'])
-@php($w = $e['client_wide'])
-<x-portal-layout title="Sales & Profit">
-    <section class="panel"><div class="panel-head"><h2>Sales &amp; profit by project</h2><span class="sub">Your product cost is deducted once, in the profit; it is never deducted again from what is paid to you.</span></div>
-        <div class="table-wrap"><table class="table table-min-760"><thead><tr><th>Project</th><th class="num">Units sold</th><th class="num">Sales</th><th class="num">Delivery charges</th><th class="num">Commission</th><th class="num">Your entitlement</th><th class="num">Your product investment</th><th class="num">Your product cost sold</th><th class="num">Your net product profit</th></tr></thead><tbody>
-        @forelse ($e['projects'] as $r)<tr><td>{{ $r['project']->name }}</td><td class="num">{{ $r['units_sold'] }}</td><td class="num">{{ Money::format($r['gross_sales']) }}</td><td class="num">{{ Money::format($r['delivery_charges']) }}</td><td class="num">{{ Money::format($r['commission']) }}</td><td class="num">{{ Money::format($r['entitlement']) }}</td><td class="num">{{ Money::format($r['investment']) }}</td>
-            <td class="num">{{ $r['cost_pending'] ? 'Pending verification' : Money::format($r['cost_of_sold']) }}</td><td class="num strong">{{ $r['cost_pending'] ? 'Pending verification' : Money::format($r['client_profit']) }}</td></tr>
-        @empty<tr><td colspan="9" class="muted">No sales yet.</td></tr>@endforelse</tbody>
-        @if (count($e['projects']) > 1)<tfoot><tr><th>All projects</th><th></th><th class="num">{{ Money::format($t['gross_sales']) }}</th><th class="num">{{ Money::format($t['delivery_charges']) }}</th><th class="num">{{ Money::format($t['commission']) }}</th><th class="num">{{ Money::format($t['entitlement']) }}</th><th class="num">{{ Money::format($t['investment']) }}</th><th class="num">{{ $t['pending'] ? 'Pending' : Money::format($t['cost_of_sold']) }}</th><th class="num">{{ $t['pending'] ? 'Pending' : Money::format($t['client_profit']) }}</th></tr></tfoot>@endif
-        </table></div></section>
-    <section class="panel"><div class="panel-head"><h2>Settlement — all your projects together</h2><span class="sub">Settlements are not tied to a single project, so these figures are not split by project.</span></div><div class="panel-body"><div class="stat-grid">
-        <div class="stat"><span class="stat-label">Entitlement earned (all projects)</span><span class="stat-value">{{ Money::format($w['entitlement']) }}</span></div>
-        <div class="stat"><span class="stat-label">Settled to you</span><span class="stat-value">{{ Money::format($w['settled']) }}</span></div>
-        <div class="stat"><span class="stat-label">Still owed to you</span><span class="stat-value">{{ Money::format($w['outstanding']) }}</span></div>
-        <div class="stat"><span class="stat-label">Cash collected and held for you</span><span class="stat-value">{{ Money::format($w['cash_available']) }}</span></div>
-    </div></div></section>
-    @foreach ($e['projects'] as $r)@foreach ($r['notes'] as $n)<p class="muted">{{ $r['project']->name }}: {{ $n }}</p>@endforeach @endforeach
+@php
+    $m = fn (int $v) => Money::format($v, config('finance.currency'));
+@endphp
+@php
+    $t = $e['total'];
+    $w = $e['client_wide'];
+    $pending = (bool) $t['pending'];
+    $months = array_slice(array_reverse($monthly, true), -12, null, true);
+    $maxSales = max(1, ...array_values(array_map(fn ($m) => $m['sales'], $months ?: [['sales' => 1]])));
+@endphp
+<x-portal-layout title="Sales & Profit" subtitle="Your investment, what has sold and what you earned. Your product cost is deducted once, in the profit, and never again from what is paid to you.">
+    <div class="pt-grid pt-g4">
+        <x-portal.kpi tone="primary" icon="wallet" label="Product investment" :value="$m($t['investment'])" hint="What you paid for your products" />
+        <x-portal.kpi tone="primary" icon="trending-up" label="Investment recovered" :value="$pending ? 'Pending verification' : $m($t['investment_recovered'])" :pending="$pending" hint="Recovered through sales" />
+        <x-portal.kpi tone="primary" icon="cash" label="Settlement entitlement" :value="$m($t['entitlement'])" hint="Owed to you from sales" />
+        <x-portal.kpi tone="primary" icon="chart" label="Net product profit" :value="$pending ? 'Pending verification' : $m($t['client_profit'])" :pending="$pending" hint="After your product cost" />
+    </div>
+
+    <div class="pt-grid pt-g21">
+        <section class="pt-card" aria-labelledby="h-wf">
+            <div class="pt-card-head"><h2 id="h-wf">How your result is made up</h2><span class="sub">All projects together</span></div>
+            <div class="pt-card-body"><dl class="pt-dl" style="grid-template-columns: 1fr auto; gap:.7rem 1rem">
+                <dt>Successful sales</dt><dd class="num" style="text-align:right">{{ $m($t['gross_sales']) }}</dd>
+                <dt>Delivery charges (paid by you, once)</dt><dd class="num" style="text-align:right">{{ $m($t['delivery_charges']) }}</dd>
+                <dt>Sellbees commission</dt><dd class="num" style="text-align:right">{{ $m($t['commission']) }}</dd>
+                <dt><strong>Your settlement entitlement</strong></dt><dd class="num" style="text-align:right"><strong>{{ $m($t['entitlement']) }}</strong></dd>
+                <dt>Your product cost of units sold</dt><dd class="num" style="text-align:right">{{ $pending ? 'Pending verification' : $m($t['cost_of_sold']) }}</dd>
+                <dt><strong>Your net product profit</strong></dt><dd class="num" style="text-align:right"><strong>{{ $pending ? 'Pending verification' : $m($t['client_profit']) }}</strong></dd>
+            </dl></div>
+        </section>
+        <section class="pt-card" aria-labelledby="h-set">
+            <div class="pt-card-head"><h2 id="h-set">Settlement — all your projects together</h2></div>
+            <div class="pt-card-body"><dl class="pt-dl" style="grid-template-columns: 1fr auto; gap:.7rem 1rem">
+                <dt>Entitlement earned</dt><dd class="num" style="text-align:right">{{ $m($w['entitlement']) }}</dd>
+                <dt>Settled to you</dt><dd class="num" style="text-align:right">{{ $m($w['settled']) }}</dd>
+                <dt>Still owed to you</dt><dd class="num" style="text-align:right">{{ $m($w['outstanding']) }}</dd>
+                <dt>Cash collected and held for you</dt><dd class="num" style="text-align:right">{{ $m($w['cash_available']) }}</dd>
+            </dl></div>
+            <div class="pt-card-foot">Settlements are not tied to a single project, so these figures are not split by project.</div>
+        </section>
+    </div>
+
+    @if (count($months) >= 2)
+    <section class="pt-card" aria-labelledby="h-trend" style="margin-bottom:1.25rem">
+        <div class="pt-card-head"><h2 id="h-trend">Successful sales by month</h2><span class="sub">By delivery date</span></div>
+        <div class="pt-card-body"><div class="pt-bars" role="img" aria-label="Successful sales by month">
+            @foreach ($months as $m => $row)<div><b>{{ $m($row['sales']) }}</b><i style="height: {{ max(3, round($row['sales'] / $maxSales * 100)) }}%"></i><span>{{ \Illuminate\Support\Carbon::createFromFormat('Y-m', $m)->format('M y') }}</span></div>@endforeach
+        </div></div>
+    </section>
+    @endif
+
+    <section class="pt-card" aria-labelledby="h-by">
+        <div class="pt-card-head"><h2 id="h-by">By project</h2></div>
+        @if (count($e['projects']))
+        <div class="pt-table-wrap"><table class="pt-table stack">
+            <thead><tr><th>Project</th><th class="r">Sales</th><th class="r">Delivery charges</th><th class="r">Commission</th><th class="r">Your entitlement</th><th class="r">Product investment</th><th class="r">Net profit</th></tr></thead>
+            <tbody>@foreach ($e['projects'] as $r)
+                <tr><td class="lead"><a class="pt-link" href="{{ route('portal.projects', ['project' => $r['project']->id]) }}">{{ $r['project']->name }}</a></td>
+                    <td class="r num" data-label="Sales">{{ $m($r['gross_sales']) }}</td><td class="r num" data-label="Delivery charges">{{ $m($r['delivery_charges']) }}</td>
+                    <td class="r num" data-label="Commission">{{ $m($r['commission']) }}</td><td class="r num" data-label="Your entitlement">{{ $m($r['entitlement']) }}</td><td class="r num" data-label="Product investment">{{ $m($r['investment']) }}</td><td class="r num" data-label="Net profit"><strong>{{ $r['cost_pending'] ? 'Pending verification' : $m($r['client_profit']) }}</strong></td></tr>
+            @endforeach</tbody>
+            @if (count($e['projects']) > 1)<tfoot><tr><td>All projects</td><td class="r num">{{ $m($t['gross_sales']) }}</td><td class="r num">{{ $m($t['delivery_charges']) }}</td><td class="r num">{{ $m($t['commission']) }}</td><td class="r num">{{ $m($t['entitlement']) }}</td><td class="r num">{{ $m($t['investment']) }}</td><td class="r num">{{ $pending ? 'Pending' : $m($t['client_profit']) }}</td></tr></tfoot>@endif
+        </table></div>
+        @else
+            <x-portal.empty icon="trending-up" title="No sales yet">Your sales and profit appear here as soon as your first orders are delivered.</x-portal.empty>
+        @endif
+    </section>
+    @foreach ($e['projects'] as $r)@foreach ($r['notes'] as $n)<p class="pt-note" style="margin-top:.75rem">{{ $r['project']->name }}: {{ $n }}</p>@endforeach @endforeach
 </x-portal-layout>

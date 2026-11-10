@@ -95,6 +95,8 @@ class ClientPortalData
             'available_stock' => $positions->reduce(fn ($c, $r) => bcadd($c, $r['b']['available'], 2), '0'),
             'orders' => $sales['counts']['total'], 'successful_orders' => $sales['successful_orders'], 'successful_sales' => $sales['totals']['sales'],
             'economics' => $e['total'], 'client_wide' => $e['client_wide'],
+            'counts' => $sales['counts'], 'pending_deliveries' => $sales['counts']['confirmed'] + $sales['counts']['packed'] + $sales['counts']['dispatched'],
+            'stock' => self::stockBuckets($positions), 'project_cards' => self::projectCards($client, $e), 'recent_orders' => self::recentOrders($client), 'invoices' => self::invoiceSummary($client),
         ];
     }
 
@@ -108,8 +110,8 @@ class ClientPortalData
         $projects = self::projects($client)->pluck('id');
         $positions = self::positions($client, $projectId)->groupBy(fn ($r) => $r['line']->id);
         $out = [];
-        foreach (SourcingLot::whereIn('project_id', $projects)->when($projectId, fn ($q) => $q->where('project_id', $projectId))->where('ownership', 'client')->where('status', '!=', 'cancelled')->with(['project', 'lines'])->orderByDesc('id')->get() as $lot) {
-            $lines = $lot->lines->map(function (SourcingLotLine $l) use ($positions) {
+        foreach (SourcingLot::whereIn('project_id', $projects)->when($projectId, fn ($q) => $q->where('project_id', $projectId))->where('ownership', 'client')->where('status', '!=', 'cancelled')->with(['project', 'lines.product'])->orderByDesc('id')->get() as $lot) {
+            $lines = $lot->lines->map(function (SourcingLotLine $l) use ($positions, $lot) {
                 $b = array_fill_keys(['available', 'reserved', 'dispatched', 'delivered', 'returned', 'damaged'], '0');
                 foreach ($positions->get($l->id, collect()) as $r) {
                     foreach ($b as $k => $v) {
@@ -117,13 +119,44 @@ class ClientPortalData
                     }
                 }
 
-                return ['product' => $l->description, 'unit' => $l->unit ?? 'pcs', 'client_price' => $l->approved_price === null ? null : (int) $l->approved_price, 'ordered' => (string) $l->quantity,
+                return ['stage' => self::lineStage($l->received_quantity === null ? null : (string) $l->received_quantity, $b, $lot->status), 'product' => $l->description, 'sku' => $l->product?->sku, 'unit' => $l->unit ?? 'pcs', 'client_price' => $l->approved_price === null ? null : (int) $l->approved_price, 'ordered' => (string) $l->quantity,
                     'received' => $l->received_quantity === null ? null : (string) $l->received_quantity, 'accepted' => $l->received_quantity === null ? null : (string) $l->usable_quantity, 'buckets' => $b];
             })->all();
-            $out[] = ['lot' => $lot, 'number' => $lot->number, 'status' => $lot->status, 'project' => $lot->project, 'lines' => $lines];
+            $out[] = ['lot' => $lot, 'number' => $lot->number, 'status' => $lot->status, 'status_label' => self::lotStatusLabel($lot->status), 'project' => $lot->project, 'lines' => $lines];
         }
 
         return $out;
+    }
+
+    /** The lot's own workflow state in plain words (only states that exist on the lot record). */
+    public static function lotStatusLabel(string $status): string
+    {
+        return match ($status) {
+            'draft', 'costing', 'priced' => 'Being prepared',
+            'approved' => 'Approved',
+            'in_progress' => 'Sourcing in progress',
+            'completed', 'settled' => 'Completed',
+            default => ucfirst(str_replace('_', ' ', $status)),
+        };
+    }
+
+    /**
+     * Where a product is, read only from the lot's state, whether it has been received and its stock buckets. Never an invented stage.
+     *
+     * @param  array<string, string>  $b
+     */
+    public static function lineStage(?string $received, array $b, string $lotStatus): string
+    {
+        if ($received === null) {
+            return in_array($lotStatus, ['draft', 'costing', 'priced', 'approved'], true) ? 'Awaiting sourcing' : ($lotStatus === 'in_progress' ? 'Sourcing in progress' : 'Awaiting arrival');
+        }
+        foreach (['available' => 'Available', 'reserved' => 'Reserved', 'dispatched' => 'Dispatched', 'delivered' => 'Delivered', 'returned' => 'Returned', 'damaged' => 'Damaged'] as $k => $label) {
+            if (bccomp($b[$k] ?? '0', '0', 2) > 0) {
+                return $label;
+            }
+        }
+
+        return 'Received';
     }
 
     /** @return LengthAwarePaginator<int, array<string, mixed>> */
@@ -139,18 +172,117 @@ class ClientPortalData
             ->when($q !== '', fn ($b) => $b->where(fn ($w) => $w->where('reference', 'like', $like)->orWhere('tracking_reference', 'like', $like)->orWhereHas('items', fn ($i) => $i->where('description', 'like', $like))))
             ->orderByDesc('ordered_on')->orderByDesc('id')->paginate(15)->withQueryString();
 
-        return $page->through(function (ClientOrder $o) {
-            $f = ProjectEconomics::orderFigures($o);
-            $delivered = $o->items->reduce(fn ($c, $i) => bcadd($c, bcsub((string) $i->delivered_quantity, (string) $i->returned_quantity, 2), 2), '0');
-            $returned = $o->items->reduce(fn ($c, $i) => bcadd($c, (string) $i->returned_quantity, 2), '0');
-            $collected = (int) $o->collections->sum('amount');
-            $collectible = $o->collectibleValue();
+        return $page->through(fn (ClientOrder $o) => self::orderRow($o));
+    }
 
-            return ['order' => $o, 'products' => $o->items->map(fn ($i) => $i->description.' × '.rtrim(rtrim((string) $i->quantity, '0'), '.'))->implode(', '), 'delivered_units' => $delivered, 'returned_units' => $returned,
-                'delivery_charge' => $f['eligible'], 'commission' => $f['commission'], 'entitlement' => $f['entitlement'], 'refunds' => $f['refunds'], 'sales' => $f['sales'],
-                'collection' => $o->delivery_status !== 'delivered' ? 'Not due yet' : ($collectible <= 0 ? 'Nothing to collect' : ($collected >= $collectible ? 'Collected' : ($collected > 0 ? 'Partly collected' : 'Awaiting collection'))),
-                'return_status' => bccomp($returned, '0', 2) > 0 ? ($f['refunds'] > 0 ? 'Returned, refund recorded' : 'Returned') : '—'];
-        });
+    /**
+     * One order as the portal shows it. The figures come from ProjectEconomics::orderFigures, the one place an order's sales, delivery charge, commission and entitlement are worked out.
+     *
+     * @return array<string, mixed>
+     */
+    private static function orderRow(ClientOrder $o): array
+    {
+        $f = ProjectEconomics::orderFigures($o);
+        $delivered = $o->items->reduce(fn ($c, $i) => bcadd($c, bcsub((string) $i->delivered_quantity, (string) $i->returned_quantity, 2), 2), '0');
+        $returned = $o->items->reduce(fn ($c, $i) => bcadd($c, (string) $i->returned_quantity, 2), '0');
+        $collected = (int) $o->collections->sum('amount');
+        $collectible = $o->collectibleValue();
+
+        return ['order' => $o, 'products' => $o->items->map(fn ($i) => $i->description.' × '.rtrim(rtrim((string) $i->quantity, '0'), '.'))->implode(', '), 'delivered_units' => $delivered, 'returned_units' => $returned,
+            'delivery_charge' => $f['eligible'], 'commission' => $f['commission'], 'entitlement' => $f['entitlement'], 'refunds' => $f['refunds'], 'sales' => $f['sales'],
+            'collection' => $o->delivery_status !== 'delivered' ? 'Not due yet' : ($collectible <= 0 ? 'Nothing to collect' : ($collected >= $collectible ? 'Collected' : ($collected > 0 ? 'Partly collected' : 'Awaiting collection'))),
+            'return_status' => bccomp($returned, '0', 2) > 0 ? ($f['refunds'] > 0 ? 'Returned, refund recorded' : 'Returned') : '—'];
+    }
+
+    /** @return Collection<int, array<string, mixed>> */
+    public static function recentOrders(Client $client, ?int $projectId = null, int $limit = 5): Collection
+    {
+        return ClientOrder::where('fulfilment', 'stock')->whereIn('project_id', $client->projects()->select('id'))->when($projectId, fn ($q) => $q->where('project_id', $projectId))
+            ->with(['items', 'project', 'collections'])->orderByDesc('ordered_on')->orderByDesc('id')->limit($limit)->get()->map(fn (ClientOrder $o) => self::orderRow($o));
+    }
+
+    /**
+     * Order counts by stage for the whole client or one project: the same counting SalesAnalytics uses.
+     *
+     * @return array<string, int>
+     */
+    public static function orderCounts(Client $client, ?int $projectId = null): array
+    {
+        $orders = self::allOrders($client)->when($projectId, fn ($c) => $c->where('project_id', $projectId));
+        $c = SalesAnalytics::figures($orders)['counts'];
+
+        return $c + ['pending_deliveries' => $c['confirmed'] + $c['packed'] + $c['dispatched']];
+    }
+
+    /**
+     * Invoice totals and the open ones, read from the invoices themselves (their stored totals and the verified payments).
+     *
+     * @return array{total: int, paid: int, outstanding: int, open: int, open_list: Collection<int, Invoice>}
+     */
+    public static function invoiceSummary(Client $client): array
+    {
+        $all = self::invoiceQuery($client)->with(['project', 'payments'])->get();
+        $open = $all->filter(fn (Invoice $i) => $i->balance() > 0)->sortBy('due_on')->values();
+
+        return ['total' => (int) $all->sum('total'), 'paid' => (int) $all->sum('amount_paid'), 'outstanding' => (int) $open->sum(fn (Invoice $i) => $i->balance()), 'open' => $open->count(), 'open_list' => $open->take(5)];
+    }
+
+    /**
+     * Sum of the stock buckets of a set of positions.
+     *
+     * @param  Collection<int, array<string, mixed>>  $positions
+     * @return array<string, string>
+     */
+    public static function stockBuckets(Collection $positions): array
+    {
+        $b = array_fill_keys(['available', 'reserved', 'dispatched', 'delivered', 'returned', 'damaged'], '0');
+        foreach ($positions as $r) {
+            foreach ($b as $k => $v) {
+                $b[$k] = bcadd($v, $r['b'][$k], 2);
+            }
+        }
+
+        return $b;
+    }
+
+    /**
+     * A card per project: its economics row (client price and sales figures only) and its stock.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public static function projectCards(Client $client, ?array $economics = null): array
+    {
+        $positions = self::positions($client)->groupBy(fn ($r) => $r['project']->id);
+        $counts = self::allOrders($client)->groupBy('project_id');
+
+        return collect(($economics ?? self::economics($client))['projects'])->map(fn ($row) => $row + ['stock' => self::stockBuckets($positions->get($row['project']->id, collect())),
+            'orders' => $counts->get($row['project']->id, collect())->count()])->all();
+    }
+
+    /**
+     * One of the client's projects in detail. Null when the project is not the client's.
+     *
+     * @return array<string, mixed>|null
+     */
+    public static function projectDetail(Client $client, ?int $projectId): ?array
+    {
+        $card = collect(self::projectCards($client))->first(fn ($c) => $c['project']->id === $projectId);
+        if ($card === null) {
+            return null;
+        }
+
+        return $card + ['lots' => self::lots($client, $projectId), 'recent_orders' => self::recentOrders($client, $projectId), 'counts' => self::orderCounts($client, $projectId),
+            'positions' => self::positions($client, $projectId)];
+    }
+
+    /**
+     * Successful sales by month (delivered orders, by the day they were delivered), newest first.
+     *
+     * @return array<string, array{orders: int, sales: int}>
+     */
+    public static function monthlySales(Client $client): array
+    {
+        return SalesAnalytics::figures(self::allOrders($client))['monthly'];
     }
 
     /** @return Collection<int, string> */

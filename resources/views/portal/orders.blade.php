@@ -1,12 +1,38 @@
 @use('App\Support\Money')
-<x-portal-layout title="Orders & Delivery">
-    <section class="panel"><div class="panel-head"><h2>Orders &amp; delivery</h2><span class="sub">Read-only. Commission and your entitlement are worked out only on what was really delivered.</span></div>
-        <form method="GET" class="filters"><div class="field grow"><label>Search order, tracking or product</label><input type="search" name="q" value="{{ request('q') }}"></div>
-            <div class="field"><label>Status</label><select name="status"><option value="">All</option>@foreach ($statuses as $k => $v)<option value="{{ $k }}" @selected(request('status') === $k)>{{ $v }}</option>@endforeach</select></div>
-            <div class="field"><label>Project</label><select name="project"><option value="">All</option>@foreach ($projects as $p)<option value="{{ $p->id }}" @selected(request('project') == $p->id)>{{ $p->name }}</option>@endforeach</select></div><button class="btn">Filter</button> <a class="btn" href="{{ route('portal.orders') }}">Clear</a></form>
-        <div class="table-wrap"><table class="table table-min-760"><thead><tr><th>Order</th><th>Project</th><th>Products</th><th>Date</th><th>Status</th><th class="num">Delivered units</th><th>Courier / tracking</th><th class="num">Delivery charge</th><th class="num">Commission</th><th class="num">Your entitlement</th><th>Collection</th><th>Return</th></tr></thead><tbody>
-        @forelse ($orders as $r)@php($o = $r['order'])<tr><td>{{ $o->reference }}</td><td>{{ $o->project->name }}</td><td>{{ $r['products'] }}</td><td>{{ $o->ordered_on->format('j M Y') }}</td><td>{{ $o->fulfilmentLabel() }}</td><td class="num">{{ $r['delivered_units'] }}</td>
-            <td>{{ $o->courier ?: '—' }}@if ($o->tracking_reference)<br><span class="muted">{{ $o->tracking_reference }}</span>@endif</td><td class="num">{{ Money::format($r['delivery_charge']) }}</td><td class="num">{{ Money::format($r['commission']) }}</td><td class="num">{{ Money::format($r['entitlement']) }}</td><td>{{ $r['collection'] }}</td><td>{{ $r['return_status'] }}</td></tr>
-        @empty<tr><td colspan="12" class="muted">No orders match. Orders appear here once Sellbees records them for your projects.</td></tr>@endforelse</tbody></table></div>
-        <div class="panel-foot">{{ $orders->links() }}</div></section>
+@php
+    $m = fn (int $v) => Money::format($v, config('finance.currency'));
+@endphp
+@php
+    $qty = fn ($v) => rtrim(rtrim((string) $v, '0'), '.') ?: '0';
+    $keep = fn (array $extra) => array_filter(array_merge(request()->only('q', 'project'), $extra), fn ($v) => $v !== null && $v !== '');
+    $chips = ['' => ['All', $counts['total']], 'confirmed' => ['Confirmed', $counts['confirmed']], 'packed' => ['Packed', $counts['packed']], 'dispatched' => ['Dispatched', $counts['dispatched']], 'delivered' => ['Delivered', $counts['delivered']], 'failed' => ['Failed', $counts['failed']], 'cancelled' => ['Cancelled', $counts['cancelled']]];
+@endphp
+<x-portal-layout title="Orders & Delivery" subtitle="Track every order from confirmation to delivery. Commission and your entitlement are worked out only on what was really delivered.">
+    <section class="pt-card">
+        <div class="pt-seg" aria-label="Filter by status">@foreach ($chips as $key => [$label, $n])<a href="{{ route('portal.orders', $keep(['status' => $key])) }}" @if ((string) request('status') === (string) $key) aria-current="true" @endif>{{ $label }}<b>{{ $n }}</b></a>@endforeach</div>
+        <form method="GET" class="pt-filters" role="search">
+            @if (request('status'))<input type="hidden" name="status" value="{{ request('status') }}">@endif
+            <div class="pt-field grow"><label for="q">Search order, tracking or product</label><input id="q" class="pt-input" type="search" name="q" value="{{ request('q') }}" placeholder="e.g. ORD-1042"></div>
+            <div class="pt-field"><label for="pj">Project</label><select id="pj" class="pt-input" name="project"><option value="">All projects</option>@foreach ($projects as $p)<option value="{{ $p->id }}" @selected(request('project') == $p->id)>{{ $p->name }}</option>@endforeach</select></div>
+            <button class="pt-btn pt-btn-primary">Search</button> <a class="pt-btn" href="{{ route('portal.orders') }}">Clear</a>
+        </form>
+        @if ($orders->count())
+        <div class="pt-table-wrap"><table class="pt-table stack">
+            <thead><tr><th>Order</th><th>Products</th><th>Status</th><th>Courier / tracking</th><th class="r">Delivered units</th><th class="r">Selling amount</th><th class="r">Delivery charge</th><th class="r">Commission</th><th class="r">Your entitlement</th><th>Collection</th></tr></thead>
+            <tbody>@foreach ($orders as $r)@php($o = $r['order'])
+                <tr><td class="lead"><strong>{{ $o->reference }}</strong><small>{{ $o->ordered_on->format('j M Y') }} · {{ $o->project->name }}</small></td>
+                    <td data-label="Products">{{ $r['products'] }}</td>
+                    <td data-label="Status"><div><x-portal.status kind="order" :value="$o->fulfilmentLabel()" />@if ($r['return_status'] !== '—')<small>{{ $r['return_status'] }}</small>@endif</div></td>
+                    <td data-label="Courier / tracking"><div>{{ $o->courier ?: '—' }}@if ($o->tracking_reference)<small>{{ $o->tracking_reference }}</small>@endif</div></td>
+                    <td class="r num" data-label="Delivered units">{{ $qty($r['delivered_units']) }}</td>
+                    <td class="r num" data-label="Selling amount"><div>{{ $m($o->delivery_status === 'delivered' ? $r['sales'] : $o->orderedValue()) }}@if ($o->delivery_status !== 'delivered')<small>ordered</small>@endif</div></td>
+                    <td class="r num" data-label="Delivery charge">{{ $m($r['delivery_charge']) }}</td><td class="r num" data-label="Commission">{{ $m($r['commission']) }}</td><td class="r num" data-label="Your entitlement"><strong>{{ $m($r['entitlement']) }}</strong></td>
+                    <td data-label="Collection"><x-portal.status kind="collection" :value="$r['collection']" /></td></tr>
+            @endforeach</tbody>
+        </table></div>
+        @include('portal._pager', ['paginator' => $orders])
+        @else
+            <x-portal.empty icon="truck" title="No orders match">Orders appear here once Sellbees records them for your projects. If you were searching, try clearing the filters.</x-portal.empty>
+        @endif
+    </section>
 </x-portal-layout>
