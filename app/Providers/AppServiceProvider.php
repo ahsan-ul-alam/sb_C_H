@@ -29,7 +29,7 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
-        View::composer('components.layout', function ($view): void {
+        View::composer(['components.layout', 'components.portal-layout'], function ($view): void {
             $view->with('brand', BusinessSetting::current());
         });
 

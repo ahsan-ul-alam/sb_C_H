@@ -57,9 +57,10 @@ it('serves evidence and product images only to signed-in users with the permissi
 
 it('exposes no application route without authentication except sign-in and the brand favicon', function () {
     $open = collect(Route::getRoutes()->getRoutes())->filter(fn ($r) => ! str_starts_with($r->uri(), '_') && ! str_starts_with($r->uri(), 'storage/') && $r->uri() !== 'up')
-        ->filter(fn ($r) => ! collect($r->gatherMiddleware())->contains(fn ($m) => is_string($m) && (str_starts_with($m, 'auth') || str_contains($m, 'Authenticate'))))
+        ->filter(fn ($r) => ! collect($r->gatherMiddleware())->contains(fn ($m) => is_string($m) && (str_starts_with($m, 'auth') || str_contains($m, 'Authenticate') || $m === 'client.portal')))
         ->map(fn ($r) => implode('|', $r->methods()).' '.$r->uri())->values()->all();
 
     sort($open);
-    expect($open)->toBe(['GET|HEAD brand/favicon', 'GET|HEAD login', 'POST login']);
+    // Besides the staff login, only the Client Portal's own sign-in steps are public; its private pages sit behind the client.portal session middleware.
+    expect($open)->toBe(['GET|HEAD brand/favicon', 'GET|HEAD client-portal', 'GET|HEAD client-portal/verify', 'GET|HEAD login', 'POST client-portal/code', 'POST client-portal/resend', 'POST client-portal/verify', 'POST login']);
 });

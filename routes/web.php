@@ -6,6 +6,7 @@ use App\Http\Controllers\AutomationController;
 use App\Http\Controllers\CapitalController;
 use App\Http\Controllers\CashAllocationController;
 use App\Http\Controllers\ClientController;
+use App\Http\Controllers\ClientPortalController;
 use App\Http\Controllers\ClientProfitController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DocumentController;
@@ -476,5 +477,30 @@ Route::middleware('auth')->group(function () {
         Route::post('partners', [PartnerController::class, 'store'])->name('partners.store')->middleware('can:partner.manage');
         Route::put('partners/{partner}', [PartnerController::class, 'update'])->name('partners.update')->middleware('can:partner.manage');
         Route::get('partners/{partner}/edit', [PartnerController::class, 'edit'])->name('partners.edit')->middleware('can:partner.manage');
+    });
+});
+
+// Client Self-Service Portal: public SB number + emailed code login, then read-only pages scoped to the one client in the portal session.
+Route::prefix('client-portal')->name('portal.')->group(function () {
+    Route::get('/', [ClientPortalController::class, 'login'])->name('login');
+    Route::post('code', [ClientPortalController::class, 'requestCode'])->name('code')->middleware('throttle:10,1');
+    Route::get('verify', [ClientPortalController::class, 'verifyForm'])->name('verify');
+    Route::post('verify', [ClientPortalController::class, 'verify'])->name('verify.submit')->middleware('throttle:15,1');
+    Route::post('resend', [ClientPortalController::class, 'resend'])->name('resend')->middleware('throttle:5,1');
+    Route::middleware(['auth', 'can:portal.preview'])->group(function () {
+        Route::get('admin-preview', [ClientPortalController::class, 'previewForm'])->name('preview.form');
+        Route::post('admin-preview', [ClientPortalController::class, 'previewStart'])->name('preview.start');
+    });
+    Route::middleware('client.portal')->group(function () {
+        Route::get('dashboard', [ClientPortalController::class, 'dashboard'])->name('dashboard');
+        Route::get('profile', [ClientPortalController::class, 'profile'])->name('profile');
+        Route::get('projects', [ClientPortalController::class, 'projects'])->name('projects');
+        Route::get('inventory', [ClientPortalController::class, 'inventory'])->name('inventory');
+        Route::get('orders', [ClientPortalController::class, 'orders'])->name('orders');
+        Route::get('invoices', [ClientPortalController::class, 'invoices'])->name('invoices');
+        Route::get('invoices/{invoice}/pdf', [ClientPortalController::class, 'invoicePdf'])->name('invoices.pdf')->whereNumber('invoice');
+        Route::get('sales', [ClientPortalController::class, 'sales'])->name('sales');
+        Route::post('logout', [ClientPortalController::class, 'logout'])->name('logout');
+        Route::post('exit-preview', [ClientPortalController::class, 'previewExit'])->name('preview.exit');
     });
 });

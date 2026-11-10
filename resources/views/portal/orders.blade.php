@@ -1,0 +1,12 @@
+@use('App\Support\Money')
+<x-portal-layout title="Orders & Delivery">
+    <section class="panel"><div class="panel-head"><h2>Orders &amp; delivery</h2><span class="sub">Read-only. Commission and your entitlement are worked out only on what was really delivered.</span></div>
+        <form method="GET" class="filters"><div class="field grow"><label>Search order, tracking or product</label><input type="search" name="q" value="{{ request('q') }}"></div>
+            <div class="field"><label>Status</label><select name="status"><option value="">All</option>@foreach ($statuses as $k => $v)<option value="{{ $k }}" @selected(request('status') === $k)>{{ $v }}</option>@endforeach</select></div>
+            <div class="field"><label>Project</label><select name="project"><option value="">All</option>@foreach ($projects as $p)<option value="{{ $p->id }}" @selected(request('project') == $p->id)>{{ $p->name }}</option>@endforeach</select></div><button class="btn">Filter</button> <a class="btn" href="{{ route('portal.orders') }}">Clear</a></form>
+        <div class="table-wrap"><table class="table table-min-760"><thead><tr><th>Order</th><th>Project</th><th>Products</th><th>Date</th><th>Status</th><th class="num">Delivered units</th><th>Courier / tracking</th><th class="num">Delivery charge</th><th class="num">Commission</th><th class="num">Your entitlement</th><th>Collection</th><th>Return</th></tr></thead><tbody>
+        @forelse ($orders as $r)@php($o = $r['order'])<tr><td>{{ $o->reference }}</td><td>{{ $o->project->name }}</td><td>{{ $r['products'] }}</td><td>{{ $o->ordered_on->format('j M Y') }}</td><td>{{ $o->fulfilmentLabel() }}</td><td class="num">{{ $r['delivered_units'] }}</td>
+            <td>{{ $o->courier ?: '—' }}@if ($o->tracking_reference)<br><span class="muted">{{ $o->tracking_reference }}</span>@endif</td><td class="num">{{ Money::format($r['delivery_charge']) }}</td><td class="num">{{ Money::format($r['commission']) }}</td><td class="num">{{ Money::format($r['entitlement']) }}</td><td>{{ $r['collection'] }}</td><td>{{ $r['return_status'] }}</td></tr>
+        @empty<tr><td colspan="12" class="muted">No orders match. Orders appear here once Sellbees records them for your projects.</td></tr>@endforelse</tbody></table></div>
+        <div class="panel-foot">{{ $orders->links() }}</div></section>
+</x-portal-layout>

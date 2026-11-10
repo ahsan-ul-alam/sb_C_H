@@ -53,7 +53,7 @@ class Permissions
             'auditor' => [...$view, 'dashboard.business', 'client.profit.view', 'sourcing.view', 'sourcing.reports', 'commission.view', 'inventory.view', 'settlement.view'],
         ];
 
-        $everything = array_values(array_unique([...array_merge(...array_values($roles)), 'clienthub', 'users.manage', ...$view]));
+        $everything = array_values(array_unique([...array_merge(...array_values($roles)), 'clienthub', 'users.manage', 'portal.preview', ...$view]));
         $roles['super_admin'] = array_values(array_diff($everything, self::GOVERNANCE));
 
         return $roles;
