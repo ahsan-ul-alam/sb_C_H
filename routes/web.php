@@ -174,6 +174,8 @@ Route::middleware('auth')->group(function () {
             Route::post('lots/{lot}/order', [ClientLotController::class, 'order'])->name('lots.order');
             Route::post('lots/{lot}/complete', [ClientLotController::class, 'complete'])->name('lots.complete');
         });
+        // A super administrator's correction of a client lot at any stage (ClientLotCorrection checks the role and the reason).
+        Route::post('lots/{lot}/correct', [ClientLotController::class, 'correct'])->name('lots.correct');
 
         Route::middleware('can:sourcing.manage')->group(function () {
             Route::post('lots/{lot}/lines', [SourcingLotController::class, 'addLine'])->name('lots.lines.store');

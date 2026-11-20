@@ -23,7 +23,7 @@
     @endif
     @if ($billing['awaiting_count'] > 0)
     <div class="pt-table-wrap" style="border-top:1px solid var(--border)"><table class="pt-table stack">
-        <thead><tr><th>Sourced lot awaiting verification</th><th class="r">Units received</th><th class="r">Approved price value</th><th>What is still needed</th></tr></thead>
+        <thead><tr><th>Sourced lot awaiting verification</th><th class="r">Units received</th><th class="r">Approved / agreed price</th><th>What is still needed</th></tr></thead>
         <tbody>@foreach ($billing['awaiting'] as $l)
             <tr><td class="lead"><strong>Lot {{ $l['number'] }}</strong></td><td class="r num" data-label="Units received">{{ $qtyFmt($l['units']) }}</td><td class="r num" data-label="Approved price value">{{ $m($l['approved_value']) }}</td><td data-label="Still needed"><div>@foreach ($l['reasons'] as $why){{ $why }}@if (! $loop->last)<br>@endif @endforeach</div></td></tr>
         @endforeach</tbody>

@@ -112,15 +112,16 @@ class ClientPortalData
             if ($lot->ownership !== 'client') {
                 $reasons[] = 'Ownership of this stock is still being confirmed';
             }
-            if ($lot->lines->isEmpty() || $lot->lines->contains(fn ($l) => $l->approved_price === null)) {
+            // A client lot's price is the budget agreed for the whole lot (approved on entry), and it is never billed from the lot itself.
+            if (! $lot->hasClientBudget() && ($lot->lines->isEmpty() || $lot->lines->contains(fn ($l) => $l->approved_price === null))) {
                 $reasons[] = 'Your price is not approved yet';
             }
-            if (! $billedLots->contains($lot->id)) {
+            if (! $lot->hasClientBudget() && ! $billedLots->contains($lot->id)) {
                 $reasons[] = 'Not yet billed to you against this lot';
             }
             if ($reasons !== []) {
                 $awaiting[] = ['number' => $lot->number, 'reasons' => $reasons, 'units' => (string) $lot->lines->reduce(fn ($c, $l) => bcadd($c, (string) ($l->received_quantity ?? '0'), 2), '0'),
-                    'approved_value' => (int) $lot->lines->sum(fn ($l) => $l->approved_price === null ? 0 : Money::multiply((string) $l->quantity, (int) $l->approved_price))];
+                    'approved_value' => self::lotPrice($lot) ?? (int) $lot->lines->sum(fn ($l) => $l->approved_price === null ? 0 : Money::multiply((string) $l->quantity, (int) $l->approved_price))];
             }
         }
 
@@ -202,14 +203,53 @@ class ClientPortalData
                     }
                 }
 
-                return ['stage' => self::lineStage($l->received_quantity === null ? null : (string) $l->received_quantity, $b, $lot->status), 'product' => $l->description, 'sku' => $l->product?->sku, 'unit' => $l->unit ?? 'pcs', 'client_price' => $l->approved_price === null ? null : (int) $l->approved_price, 'ordered' => (string) $l->quantity,
-                    'received' => $l->received_quantity === null ? null : (string) $l->received_quantity, 'accepted' => $l->received_quantity === null ? null : (string) $l->usable_quantity, 'buckets' => $b];
+                $received = $l->received_quantity === null ? null : (string) $l->received_quantity;
+
+                return ['stage' => $lot->hasClientBudget() ? self::clientLotLineStage($received, $b, $lot) : self::lineStage($received, $b, $lot->status), 'product' => $l->description, 'sku' => $l->product?->sku, 'unit' => $l->unit ?? 'pcs',
+                    // A client lot is priced for the whole lot; its per-unit figure is only indicative (rounded), so the lot price is shown instead.
+                    'client_price' => $lot->hasClientBudget() || $l->approved_price === null ? null : (int) $l->approved_price, 'ordered' => (string) $l->quantity,
+                    'received' => $received, 'accepted' => $received === null ? null : (string) $l->usable_quantity, 'buckets' => $b];
             })->all();
-            $out[] = ['lot' => $lot, 'number' => $lot->number, 'status' => $lot->status, 'status_label' => self::lotStatusLabel($lot->status), 'project' => $lot->project, 'lines' => $lines,
-                'ownership_confirmed' => $lot->ownership === 'client', 'billed' => $billed->contains($lot->id)];
+            $out[] = ['lot' => $lot, 'number' => $lot->number, 'status' => $lot->status, 'status_label' => self::lotLabel($lot), 'project' => $lot->project, 'lines' => $lines,
+                'ownership_confirmed' => $lot->ownership === 'client', 'billed' => $billed->contains($lot->id),
+                'client_lot' => $lot->hasClientBudget(), 'lot_price' => self::lotPrice($lot), 'ordered_at' => $lot->ordered_at, 'completed_at' => $lot->completed_at];
         }
 
         return $out;
+    }
+
+    /**
+     * The client's agreed price for the whole lot: a client lot's budget, entered by the admin as the price agreed with the client. Null for an older lot,
+     * which is priced per product. Never the supplier cost, the delivery cost or Sellbees' margin.
+     */
+    public static function lotPrice(SourcingLot $lot): ?int
+    {
+        return $lot->hasClientBudget() ? (int) $lot->client_budget : null;
+    }
+
+    /** A client lot shows its three stages (Processing, In order, Completed); an older lot keeps its own workflow wording, which its records support. */
+    public static function lotLabel(SourcingLot $lot): string
+    {
+        return $lot->hasClientBudget() ? $lot->stageLabel() : self::lotStatusLabel($lot->status);
+    }
+
+    /**
+     * Where a client-lot product is: before arrival, the lot's stage; once received, the same stock buckets as every other lot.
+     *
+     * @param  array<string, string>  $b
+     */
+    public static function clientLotLineStage(?string $received, array $b, SourcingLot $lot): string
+    {
+        if ($received !== null) {
+            return self::lineStage($received, $b, $lot->status);
+        }
+
+        return match ($lot->stage()) {
+            'processing' => 'Processing',
+            'in_order' => 'In order',
+            'cancelled' => 'Cancelled',
+            default => 'Awaiting arrival',
+        };
     }
 
     /** The lot's own workflow state in plain words (only states that exist on the lot record). */

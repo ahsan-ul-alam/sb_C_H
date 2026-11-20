@@ -14,6 +14,7 @@ use App\Models\SupplierProduct;
 use App\Services\ClientFinancials;
 use App\Services\ClientPortalData;
 use App\Services\ClientPortalOtp;
+use App\Support\Money;
 use Illuminate\Foundation\Http\Middleware\PreventRequestForgery;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
@@ -82,6 +83,46 @@ function cpLogin($test, Client $client): string
 
     return $code;
 }
+
+it('shows a new client lot through Processing, In order and Completed with its agreed lot price, never the supplier or cost', function () {
+    Carbon::setTestNow('2026-11-10 10:00:00');
+    config(['finance.realtime_from' => '2026-11-01', 'finance.completeness_from' => null, 'finance.sourcing_basis' => 'cash', 'finance.sourcing_recognition_trigger' => null]);
+    $co = SellbeesCompany::boot($this);
+    $co->invest('A', '100000', '2026-11-02');
+    $supplier = Supplier::create(['name' => 'Secret Supplier Ltd']);
+    $product = SupplierProduct::create(['supplier_id' => $supplier->id, 'name' => 'Coffee Mug', 'unit' => 'pcs', 'reference_price' => 15_000]);
+    $client = $co->client('Budget Co');
+    $client->forceFill(['email' => 'budget@example.com', 'email_verified_at' => now()])->save();
+    $project = $co->project($client, 'Gifts');
+    // 100 mugs at a BDT 150 supplier cost; the client agreed BDT 20,000 for the whole lot (BDT 200.00 a unit, but the lot price is what counts).
+    $co->post('finance', 'sourcing.client-lots.store', ['supplier_id' => $supplier->id, 'supplier_product_id' => $product->id, 'project_id' => $project->id,
+        'quantity' => '100', 'unit_cost' => '150', 'client_budget' => '20000', 'submission_key' => (string) Str::uuid()])->assertSessionHasNoErrors()->assertSessionMissing('error');
+    $lot = SourcingLot::latest('id')->firstOrFail();
+    Auth::forgetGuards();
+    cpLogin($this, $client);
+
+    $see = function (string $stage) use ($client, $project, $lot) {
+        $l = collect(ClientPortalData::lots($client, $project->id))->firstWhere('number', $lot->number);
+        expect($l['status_label'])->toBe($stage)->and($l['client_lot'])->toBeTrue()->and($l['lot_price'])->toBe(2_000_000)->and($l['lines'][0]['client_price'])->toBeNull();
+        $this->get(route('portal.projects', ['project' => $project->id]))->assertOk()->assertSee($stage)->assertSee('Agreed lot price '.Money::format(2_000_000, config('finance.currency')))->assertSee('In the lot price')
+            ->assertDontSee('Not yet billed against this lot')->assertDontSee('Secret Supplier Ltd')->assertDontSee(Money::format(1_500_000))->assertDontSee(Money::format(15_000));
+
+        return $l;
+    };
+
+    expect($see('Processing')['lines'][0]['stage'])->toBe('Processing');
+    $billing = ClientPortalData::productBilling($client);
+    expect($billing['awaiting'][0]['approved_value'])->toBe(2_000_000)->and($billing['awaiting'][0]['reasons'])->toBe(['Ownership of this stock is still being confirmed']);
+
+    $co->post('finance', 'sourcing.lots.order', ['delivery_charge' => '800'], $lot)->assertSessionHasNoErrors()->assertSessionMissing('error');
+    expect($see('In order')['lines'][0]['stage'])->toBe('In order');
+    $this->get(route('portal.projects', ['project' => $project->id]))->assertSee('Ordered 10 Nov 2026')->assertDontSee(Money::format(80_000));
+
+    $co->post('finance', 'sourcing.lots.complete', ['arrived_on' => '2026-11-10', 'reference' => 'GRN-7', 'supplier_paid' => '1', 'delivery_paid' => '1'], $lot)->assertSessionHasNoErrors()->assertSessionMissing('error');
+    $done = $see('Completed');
+    expect($done['lines'][0]['stage'])->toBe('Available')->and($done['lines'][0]['received'])->toBe('100.00');
+    expect(ClientPortalData::overview($client)['stock_awaiting']['available'])->toBe('100.00');
+});
 
 it('refuses unknown, malformed, inactive and email-less clients identically and sends nothing', function () {
     $co = cpBoot($this);

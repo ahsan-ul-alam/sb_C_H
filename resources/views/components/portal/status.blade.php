@@ -13,8 +13,8 @@
         'invoice' => match ($v) { 'Paid' => 'ok', 'Partially paid', 'Partial' => 'warn', 'Overdue', 'Unpaid' => 'bad', default => 'plain' },
         'collection' => match ($v) { 'Collected' => 'ok', 'Partly collected' => 'warn', 'Awaiting collection' => 'gold', default => 'plain' },
         'project' => match ($v) { 'Active' => 'ok', 'Completed' => 'info', 'Cancelled' => 'bad', default => 'plain' },
-        'stage' => match ($v) { 'Available', 'Delivered' => 'ok', 'Reserved' => 'gold', 'Dispatched', 'Sourcing in progress' => 'info', 'Returned' => 'warn', 'Damaged' => 'bad', default => 'plain' },
-        'lot' =>match ($v) { 'Completed' => 'ok', 'Sourcing in progress' => 'info', 'Approved' => 'gold', default => 'plain' },
+        'stage' => match ($v) { 'Available', 'Delivered' => 'ok', 'Reserved', 'Processing' => 'gold', 'Dispatched', 'Sourcing in progress', 'In order' => 'info', 'Returned' => 'warn', 'Damaged', 'Cancelled' => 'bad', default => 'plain' },
+        'lot' => match ($v) { 'Completed' => 'ok', 'Sourcing in progress', 'In order' => 'info', 'Approved', 'Processing' => 'gold', 'Cancelled' => 'bad', default => 'plain' },
         default => 'plain',
     };
 @endphp

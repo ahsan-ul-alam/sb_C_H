@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\SourcingLot;
 use App\Services\ClientLot;
+use App\Services\ClientLotCorrection;
 use App\Support\Money;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -86,5 +87,31 @@ class ClientLotController extends Controller
         $response = back()->with('status', $message);
 
         return $result['notes'] ? $response->with('warning', implode(' ', $result['notes'])) : $response;
+    }
+
+    /** A super administrator corrects the lot at any stage; every figure, posted payment and stock count follows (ClientLotCorrection). */
+    public function correct(Request $request, SourcingLot $lot): RedirectResponse
+    {
+        abort_unless($request->user()->hasRole('super_admin'), 403);
+        $data = $request->validate([
+            'client_budget' => ['required', 'regex:'.Money::AMOUNT_REGEX],
+            'quantity' => ['required', 'regex:/^[1-9]\d{0,9}$/'],
+            'unit_cost' => ['required', 'regex:'.Money::AMOUNT_REGEX],
+            'delivery_charge' => ['required', 'regex:'.Money::AMOUNT_REGEX],
+            'stage' => ['required', 'in:'.implode(',', array_keys(ClientLotCorrection::STAGE_STATUS))],
+            'project_id' => ['required', 'integer', 'exists:projects,id'],
+            'reason' => ['required', 'string', 'min:5', 'max:500'],
+        ], ['quantity.regex' => 'Quantity must be a whole number greater than zero.']);
+
+        try {
+            $changes = ClientLotCorrection::apply($lot, [
+                'client_budget' => Money::toMinor($data['client_budget']), 'quantity' => $data['quantity'], 'unit_cost' => Money::toMinor($data['unit_cost']),
+                'delivery_charge' => Money::toMinor($data['delivery_charge']), 'stage' => $data['stage'], 'project_id' => (int) $data['project_id'], 'reason' => $data['reason'],
+            ], $request->user());
+        } catch (RuntimeException $e) {
+            return back()->with('error', $e->getMessage())->withInput();
+        }
+
+        return back()->with('status', 'Lot corrected: '.implode('; ', $changes).'. Every report, the project figures and the client portal now use the new numbers.');
     }
 }

@@ -73,6 +73,9 @@
             @default
                 <p class="muted">This lot is managed from the detailed view.</p>
         @endswitch
+        @if (auth()->user()?->hasRole('super_admin'))
+            <button type="button" class="btn" data-open-dialog="correct-dialog"><x-icon name="edit" /> Correct this lot</button>
+        @endif
     </div>
 </section>
 
@@ -252,6 +255,42 @@
 </dialog>
 @endif
 
+{{-- Super administrator correction at any stage: every figure, posted payment and stock count follows the new numbers. --}}
+@if (auth()->user()?->hasRole('super_admin'))
+<dialog class="confirm lot-dialog" id="correct-dialog" aria-labelledby="correct-title">
+    <form method="POST" action="{{ route('sourcing.lots.correct', $lot) }}">@csrf
+        <div class="dlg-body">
+            <h2 id="correct-title">Correct lot {{ $lot->number }}</h2>
+            <p class="muted">Change anything, at any stage. Profit, the project figures, reports and the client portal update at once. Supplier and delivery
+                payments already posted are rewritten to the new amounts (a lot paid in full stays paid in full), and received stock follows the new quantity.</p>
+            <div class="form-grid">
+                <div class="field"><label for="c_budget">Client budget (BDT)</label><input id="c_budget" name="client_budget" inputmode="decimal" required value="{{ old('client_budget', Money::toDecimal((int) $lot->client_budget)) }}">@error('client_budget')<span class="error text-danger">{{ $message }}</span>@enderror</div>
+                <div class="field"><label for="c_quantity">Quantity</label><input id="c_quantity" name="quantity" inputmode="numeric" required value="{{ old('quantity', $qty) }}">@error('quantity')<span class="error text-danger">{{ $message }}</span>@enderror</div>
+                <div class="field"><label for="c_unit">Unit base cost (BDT)</label><input id="c_unit" name="unit_cost" inputmode="decimal" required value="{{ old('unit_cost', Money::toDecimal((int) $line?->unit_price)) }}">@error('unit_cost')<span class="error text-danger">{{ $message }}</span>@enderror</div>
+                <div class="field"><label for="c_delivery">Delivery charge (BDT)</label><input id="c_delivery" name="delivery_charge" inputmode="decimal" required value="{{ old('delivery_charge', Money::toDecimal($delivery)) }}">@error('delivery_charge')<span class="error text-danger">{{ $message }}</span>@enderror</div>
+                <div class="field"><label for="c_stage">Stage</label>
+                    <select id="c_stage" name="stage">
+                        @foreach (['processing' => 'Processing', 'in_order' => 'In order', 'completed' => 'Completed', 'settled' => 'Completed — books closed', 'cancelled' => 'Cancelled'] as $value => $label)
+                            <option value="{{ $value }}" @selected(old('stage', $lot->status === 'settled' ? 'settled' : $stage) === $value)>{{ $label }}</option>
+                        @endforeach
+                    </select></div>
+                <div class="field"><label for="c_project">Project</label>
+                    <select id="c_project" name="project_id">
+                        @foreach (\App\Models\Project::with('client:id,name')->whereNull('archived_at')->orWhere('id', $lot->project_id)->orderBy('name')->get() as $p)
+                            <option value="{{ $p->id }}" @selected((int) old('project_id', $lot->project_id) === $p->id)>{{ $p->name }}{{ $p->client ? ' · '.$p->client->name : '' }}</option>
+                        @endforeach
+                    </select></div>
+                <div class="field full"><label for="c_reason">Reason for the correction</label><input id="c_reason" name="reason" required minlength="5" maxlength="500" value="{{ old('reason') }}" placeholder="e.g. supplier gave a discount after delivery">@error('reason')<span class="error text-danger">{{ $message }}</span>@enderror</div>
+            </div>
+        </div>
+        <div class="dlg-actions">
+            <button type="button" class="btn" data-close-dialog>Cancel</button>
+            <button class="btn btn-primary">Save correction</button>
+        </div>
+    </form>
+</dialog>
+@endif
+
 @push('scripts')
 @include('sourcing.lots.partials.money-js')
 <script>
@@ -279,6 +318,8 @@
     }
     var complete = document.getElementById('complete-dialog');
     @if ($errors->hasAny(['arrived_on', 'reference', 'location_id', 'paid_on', 'payment_reference'])) if (complete) { complete.showModal(); } @endif
+    var correct = document.getElementById('correct-dialog');
+    @if ($errors->hasAny(['client_budget', 'quantity', 'unit_cost', 'stage', 'project_id', 'reason']) || ($errors->has('delivery_charge') && old('reason') !== null)) if (correct) { correct.showModal(); } @endif
 })();
 </script>
 @endpush

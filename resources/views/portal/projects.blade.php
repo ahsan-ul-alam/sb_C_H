@@ -32,12 +32,15 @@
     <section class="pt-card" id="lots" aria-labelledby="h-lots">
         <div class="pt-card-head"><h2 id="h-lots">Sourcing lots</h2><span class="sub">{{ count($detail['lots']) }} {{ \Illuminate\Support\Str::plural('lot', count($detail['lots'])) }}</span></div>
         @forelse ($detail['lots'] as $l)
-            <div style="padding:1rem 1.25rem .25rem;display:flex;gap:.75rem;align-items:center;flex-wrap:wrap"><strong>Lot {{ $l['number'] }}</strong><x-portal.status kind="lot" :value="$l['status_label']" />@unless ($l['ownership_confirmed'])<span class="pt-chip warn">Ownership being confirmed</span>@endunless @unless ($l['billed'])<span class="pt-chip warn">Not yet billed against this lot</span>@endunless</div>
+            <div style="padding:1rem 1.25rem .25rem;display:flex;gap:.75rem;align-items:center;flex-wrap:wrap"><strong>Lot {{ $l['number'] }}</strong><x-portal.status kind="lot" :value="$l['status_label']" />@unless ($l['ownership_confirmed'])<span class="pt-chip warn">Ownership being confirmed</span>@endunless @unless ($l['billed'] || $l['client_lot'])<span class="pt-chip warn">Not yet billed against this lot</span>@endunless
+                @if ($l['lot_price'] !== null)<span class="pt-chip plain">Agreed lot price {{ $m($l['lot_price']) }}</span>@endif
+                @if ($l['client_lot'] && $l['ordered_at'])<small class="muted">Ordered {{ $l['ordered_at']->format('j M Y') }}</small>@endif
+                @if ($l['client_lot'] && $l['completed_at'])<small class="muted">Received {{ $l['completed_at']->format('j M Y') }}</small>@endif</div>
             <div class="pt-table-wrap"><table class="pt-table stack">
                 <thead><tr><th>Product</th><th class="r">Your price / unit</th><th class="r">Sourced</th><th class="r">Received</th><th class="r">Accepted</th><th>Status</th></tr></thead>
                 <tbody>@foreach ($l['lines'] as $x)
                     <tr><td class="lead"><strong>{{ $x['product'] }}</strong>@if ($x['sku'])<small class="pt-sku">SKU {{ $x['sku'] }}</small>@endif @include('portal._pills', ['b' => $x['buckets']])</td>
-                        <td class="r num" data-label="Your price / unit">{{ $x['client_price'] === null ? 'Pending approval' : $m($x['client_price']) }}</td>
+                        <td class="r num" data-label="Your price / unit">{{ $l['client_lot'] ? 'In the lot price' : ($x['client_price'] === null ? 'Pending approval' : $m($x['client_price'])) }}</td>
                         <td class="r num" data-label="Sourced">{{ $qty($x['ordered']) }}</td><td class="r num" data-label="Received">{{ $x['received'] === null ? '—' : $qty($x['received']) }}</td><td class="r num" data-label="Accepted">{{ $x['accepted'] === null ? '—' : $qty($x['accepted']) }}</td>
                         <td data-label="Status"><x-portal.status kind="stage" :value="$x['stage']" /></td></tr>
                 @endforeach</tbody>
