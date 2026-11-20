@@ -40,7 +40,8 @@
             @if ($tab && $lot->status === 'completed')
                 @can('sourcing.settle')<form method="POST" action="{{ route('sourcing.lots.settle', $lot) }}" style="display:inline">@csrf<button class="btn btn-primary">Settle financially</button></form>@endcan
             @endif
-            @if ($lot->status === 'settled')
+            {{-- A client lot is changed with "Edit lot" on its page; reopening is for the detailed (older) lots. --}}
+            @if ($lot->status === 'settled' && ($tab || ! $lot->hasClientBudget()))
                 @can('sourcing.settle')
                     <form method="POST" action="{{ route('sourcing.lots.reopen', $lot) }}" class="inline-form">@csrf<input name="reason" placeholder="Reason for audited adjustment" required><button class="btn">Reopen</button></form>
                 @endcan

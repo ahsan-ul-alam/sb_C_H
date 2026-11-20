@@ -104,10 +104,20 @@ it('creates a Processing lot with the base cost and estimated profit, and record
         ->and($f['billed'])->toBe(0)->and($f['received'])->toBe(0);
 });
 
-it('shows the simple six-field form, with the multi-product form kept under Advanced', function () {
+it('shows only the simple six-field form, with no advanced lot forms', function () {
     $this->co->as('finance')->get(route('sourcing.lots.create'))->assertOk()
-        ->assertSeeInOrder(['Supplier', 'Product', 'Project', 'Quantity', 'Unit base cost (BDT)', 'Client lot budget (BDT)', 'Create lot', 'Advanced: several products'])
+        ->assertSeeInOrder(['Supplier', 'Product', 'Project', 'Quantity', 'Unit base cost (BDT)', 'Client lot budget (BDT)', 'Create lot'])
+        ->assertDontSee('Advanced')->assertDontSee('empty lot')
         ->assertSee('Corporate Gifts — Acme Retail')->assertSee('Dhaka Ceramics');
+});
+
+it('shows a client lot page with only the three steps, its numbers and its money: no advanced sections or reopen form', function () {
+    $lot = clComplete(clOrder(clCreate()), ['supplier_paid' => '1', 'delivery_paid' => '1']) ? SourcingLot::latest('id')->first() : null;
+
+    $this->co->as('finance')->get(route('sourcing.lots.show', $lot))->assertOk()
+        ->assertSee('Processing')->assertSee('In order')->assertSee('Completed')->assertSee('Financial summary')->assertSee('Money')
+        ->assertDontSee('Advanced')->assertDontSee('Emergency Fund')->assertDontSee('Reason for audited adjustment')->assertDontSee('Edit lot');
+    $this->co->as('super')->get(route('sourcing.lots.show', $lot))->assertOk()->assertSee('Edit lot');
 });
 
 it('does not create a second lot when the same form is submitted twice', function () {

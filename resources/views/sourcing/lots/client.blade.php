@@ -62,7 +62,7 @@
             @case('completed')
                 @if ($paidUp && ! $settleBlockers)
                     <p><strong>Completed.</strong> <span class="muted">Goods received and everything is paid.</span></p>
-                    @can('sourcing.settle')<form method="POST" action="{{ route('sourcing.lots.settle', $lot) }}">@csrf<button class="btn btn-primary">Close the books</button></form>@endcan
+                    @can('sourcing.settle')<form method="POST" action="{{ route('sourcing.lots.settle', $lot) }}">@csrf<button class="btn btn-primary">Close lot</button></form>@endcan
                 @else
                     <p><strong>Completed.</strong> <span class="muted">Goods received. @if (! $paidUp) Still to pay: {{ Money::format($f['supplier_outstanding'] + $f['costs_unpaid']) }} (record it under Money below). @endif {{ implode(' ', $settleBlockers) }}</span></p>
                 @endif
@@ -74,7 +74,7 @@
                 <p class="muted">This lot is managed from the detailed view.</p>
         @endswitch
         @if (auth()->user()?->hasRole('super_admin'))
-            <button type="button" class="btn" data-open-dialog="correct-dialog"><x-icon name="edit" /> Correct this lot</button>
+            <button type="button" class="btn" data-open-dialog="correct-dialog"><x-icon name="edit" /> Edit lot</button>
         @endif
     </div>
 </section>
@@ -167,13 +167,6 @@
     @endif
 </section>
 
-<details class="panel"><summary class="panel-head" style="cursor:pointer"><h2>Advanced</h2><span class="sub">Detailed costs, receiving &amp; returns, billing, audit history</span></summary>
-    <div class="panel-body" style="display:flex; gap:.5rem; flex-wrap:wrap">
-        @foreach (['lines' => 'Lines & costs', 'receiving' => 'Receiving & documents', 'billing' => 'Client billing', 'payments' => 'Payments & settlement', 'emergency' => 'Emergency Fund', 'activity' => 'Audit history'] as $key => $label)
-            <a class="btn btn-sm" href="{{ route('sourcing.lots.show', [$lot, 'tab' => $key]) }}">{{ $label }}</a>
-        @endforeach
-    </div>
-</details>
 
 {{-- Mark In order: the delivery charge is required (0 = free delivery); the totals update as it is typed. --}}
 @if (in_array($lot->status, ['priced', 'approved'], true))
@@ -260,7 +253,7 @@
 <dialog class="confirm lot-dialog" id="correct-dialog" aria-labelledby="correct-title">
     <form method="POST" action="{{ route('sourcing.lots.correct', $lot) }}">@csrf
         <div class="dlg-body">
-            <h2 id="correct-title">Correct lot {{ $lot->number }}</h2>
+            <h2 id="correct-title">Edit lot {{ $lot->number }}</h2>
             <p class="muted">Change anything, at any stage. Profit, the project figures, reports and the client portal update at once. Supplier and delivery
                 payments already posted are rewritten to the new amounts (a lot paid in full stays paid in full), and received stock follows the new quantity.</p>
             <div class="form-grid">
