@@ -33,7 +33,7 @@ class Navigation
                 ['Sourcing Overview', 'sourcing.overview', 'sourcing.view', 'dashboard', ['sourcing.overview']],
                 ['Suppliers', 'sourcing.suppliers.index', 'sourcing.view', 'users', ['sourcing.suppliers.*']],
                 ['Supplier Products', 'sourcing.products.index', 'sourcing.view', 'layers', ['sourcing.products.*']],
-                ['Sourcing Lots', 'sourcing.lots.index', 'sourcing.view', 'folder', ['sourcing.lots.*']],
+                ['Client Lots', 'sourcing.lots.index', 'sourcing.view', 'folder', ['sourcing.lots.*']],
                 ['Supplier Payments', 'sourcing.payments.index', 'sourcing.view', 'wallet', ['sourcing.payments.*']],
                 ['Sourcing Reports', 'sourcing.reports', 'sourcing.reports', 'chart', ['sourcing.reports']],
                 ['Supplier Advances', 'sourcing.advances', 'sourcing.reports', 'wallet', ['sourcing.advances*', 'sourcing.cost-recognitions*']],

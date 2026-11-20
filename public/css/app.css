@@ -790,3 +790,49 @@ dialog.cmdk::backdrop { background: rgba(15, 14, 12, .45); }
 .bo-detail .body { padding: .2rem 1.1rem 1rem; overflow-x: auto; }
 .bo-acct { width: 100%; border-collapse: collapse; font-size: .8rem; min-width: 640px; } .bo-acct th, .bo-acct td { padding: .38rem .45rem; text-align: right; border-bottom: 1px solid var(--border); } .bo-acct th:first-child, .bo-acct td:first-child { text-align: left; } .bo-acct th { color: var(--muted); font-weight: 600; }
 @media (prefers-reduced-motion: reduce) { .bo-detail > summary::after { transition: none; } }
+
+/* ---------- Client lot workflow (Processing → In order → Completed) ---------- */
+.badge-stage-processing { background: var(--info-bg); color: var(--info); }
+.badge-stage-in_order { background: var(--warning-bg); color: var(--warning); }
+.badge-stage-completed { background: var(--success-bg); color: var(--success); }
+.badge-stage-cancelled { background: var(--neutral-bg); color: var(--muted); }
+.lot-stepper { display: flex; gap: .6rem; list-style: none; margin: 0 0 1.25rem; padding: 0; }
+.lot-stepper li { flex: 1; display: flex; align-items: center; gap: .6rem; padding: .7rem .9rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--muted); font-size: .88rem; min-width: 0; }
+.lot-stepper .dot { flex: none; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: .8rem; background: var(--neutral-bg); color: var(--muted); }
+.lot-stepper li.is-done .dot { background: var(--success-bg); color: var(--success); }
+.lot-stepper li.is-current { border-color: var(--gold-line); color: var(--text); box-shadow: var(--shadow); }
+.lot-stepper li.is-current .dot { background: var(--gold); color: #23211d; }
+.lot-stepper strong { display: block; font-weight: 650; }
+.lot-stepper small { display: block; font-size: .76rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1.25rem; }
+.lot-figures { width: 100%; border-collapse: collapse; font-size: .9rem; }
+.lot-figures td { padding: .45rem 0; border-bottom: 1px solid var(--border); vertical-align: top; }
+.lot-figures td:last-child { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; padding-left: 1rem; }
+.lot-figures tr.total td { font-weight: 650; border-bottom: none; padding-top: .6rem; }
+.lot-figures .is-loss { color: var(--danger); }
+.lot-figures .is-profit { color: var(--success); }
+.lot-next { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.lot-next p { margin: 0; }
+dialog.confirm.lot-dialog { max-width: min(94vw, 540px); }
+dialog.confirm.lot-dialog .field { margin-top: .8rem; }
+dialog.confirm.lot-dialog .check { display: flex; gap: .5rem; align-items: flex-start; margin-top: .9rem; font-size: .88rem; }
+.lot-preview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; margin-top: 1rem; }
+.lot-preview > div { border: 1px solid var(--border); border-radius: var(--radius); padding: .7rem .9rem; background: var(--surface-2); min-width: 0; }
+.lot-preview .label { font-size: .76rem; color: var(--muted); }
+.lot-preview .value { font-size: 1.15rem; font-weight: 650; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; }
+.lot-preview .value.is-loss { color: var(--danger); }
+@media (max-width: 640px) {
+    .lot-stepper { flex-direction: column; }
+    .lot-preview { grid-template-columns: 1fr; }
+    .lot-grid { grid-template-columns: minmax(0, 1fr); }
+    /* The lot list becomes one card per lot: label on the left, value on the right, the action full width. */
+    .lot-table { min-width: 0; }
+    .lot-table thead { display: none; }
+    .lot-table, .lot-table tbody, .lot-table tr, .lot-table td { display: block; width: 100%; }
+    .lot-table tr { border-bottom: 1px solid var(--border); padding: .55rem 0; }
+    .lot-table td { display: flex; justify-content: flex-end; align-items: baseline; flex-wrap: wrap; gap: .1rem .4rem; border: 0; padding: .22rem 1rem; text-align: right; }
+    .lot-table td[data-label]::before { content: attr(data-label); color: var(--muted); font-size: .78rem; text-align: left; flex: none; margin-right: auto; }
+    .lot-table td.primary-cell { font-size: 1rem; justify-content: flex-start; }
+    .lot-table td .secondary { display: inline; }
+    .lot-table td.lot-action .btn { width: 100%; justify-content: center; margin-top: .3rem; }
+}

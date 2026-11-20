@@ -21,12 +21,66 @@ class SourcingLot extends Model
     /** Where the goods are (operational). Kept apart from the financial position, which is derived from the books. */
     public const PROCUREMENT = ['ordered' => 'Purchase order placed', 'preparing' => 'Supplier preparing', 'dispatched' => 'Dispatched', 'in_transit' => 'In transit', 'arrived' => 'Arrived at our room'];
 
+    /**
+     * The three operational stages shown to users, derived from the lifecycle status (never stored twice). Every status maps to exactly one
+     * stage: before the order is placed (draft … approved) the lot is being processed; in_progress is the order placed and awaiting the goods;
+     * completed and settled both mean the goods were received (settled additionally closes the books).
+     */
+    public const STAGES = ['processing' => 'Processing', 'in_order' => 'In order', 'completed' => 'Completed', 'cancelled' => 'Cancelled'];
+
+    /** @var array<string, list<string>> */
+    public const STAGE_STATUSES = [
+        'processing' => ['draft', 'costing', 'priced', 'approved'],
+        'in_order' => ['in_progress'],
+        'completed' => ['completed', 'settled'],
+        'cancelled' => ['cancelled'],
+    ];
+
     protected function casts(): array
     {
         return [
-            'pricing_value' => 'integer', 'approved_cost' => 'integer', 'approved_revenue' => 'integer',
+            'pricing_value' => 'integer', 'approved_cost' => 'integer', 'approved_revenue' => 'integer', 'client_budget' => 'integer',
             'approved_at' => 'datetime', 'settled_at' => 'datetime', 'cancelled_at' => 'datetime', 'storage_measured_on' => 'date',
+            'ordered_at' => 'datetime', 'completed_at' => 'datetime',
         ];
+    }
+
+    public function stage(): string
+    {
+        foreach (self::STAGE_STATUSES as $stage => $statuses) {
+            if (in_array($this->status, $statuses, true)) {
+                return $stage;
+            }
+        }
+
+        return 'processing';
+    }
+
+    public function stageLabel(): string
+    {
+        return self::STAGES[$this->stage()];
+    }
+
+    /** Made on the simple client-lot form: one product, priced by a budget agreed for the whole lot. Older lots are priced per line. */
+    public function hasClientBudget(): bool
+    {
+        return $this->client_budget !== null;
+    }
+
+    /**
+     * @return BelongsTo<User, $this>
+     */
+    public function orderedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'ordered_by');
+    }
+
+    /**
+     * @return BelongsTo<User, $this>
+     */
+    public function completedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'completed_by');
     }
 
     /**

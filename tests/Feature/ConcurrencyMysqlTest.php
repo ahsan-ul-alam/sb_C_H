@@ -15,15 +15,18 @@ use App\Models\Expense;
 use App\Models\ExpensePayment;
 use App\Models\FinancialAccount;
 use App\Models\InventoryEngineEnrolment;
+use App\Models\Invoice;
 use App\Models\JournalEntry;
 use App\Models\LoanReceivable;
 use App\Models\LoanReceivableRepayment;
 use App\Models\LoanRecoveryAllocation;
 use App\Models\Payment;
 use App\Models\Payout;
+use App\Models\SourcingArrivalEvent;
 use App\Models\StockAllocation;
 use App\Models\Supplier;
 use App\Models\SupplierPayment;
+use App\Models\SupplierProduct;
 use App\Models\SupplierReturn;
 use App\Services\AccountingService;
 use App\Services\AdvanceSettlementService;
@@ -678,4 +681,27 @@ it('lets exactly the free repayment amount through when two investor allocations
     expect(collect($results)->where('ok', true))->toHaveCount(1)                                                      // 8,000 + 8,000 > 8,000: exactly one fits
         ->and(LoanRecoveryAllocation::count())->toBe(1)->and((int) LoanRecoveryAllocation::sum('amount'))->toBe(800_000)
         ->and(JournalEntry::count())->toBe($journals)->and(Ledger::debitBalance('cash'))->toBe($cash);                 // an allocation is never a posting
+});
+
+it('receives and completes a client lot once when four people mark it completed at the same moment', function () {
+    config(['finance.sourcing_basis' => 'accrual', 'finance.sourcing_accrual_from' => '2026-11-01', 'finance.sourcing_recognition_trigger' => 'lot_completed']);
+    $finance = $this->co->users['finance'];
+    $this->co->standingPolicy('quick_lot', '1000000');
+    $supplier = Supplier::create(['name' => 'Race Supplier']);
+    $product = SupplierProduct::create(['supplier_id' => $supplier->id, 'name' => 'Mug', 'unit' => 'pcs', 'reference_price' => 15_000]);
+    $project = $this->co->project($this->co->client('Race Client'));
+    $lot = ClientLot::create(['supplier_id' => $supplier->id, 'supplier_product_id' => $product->id, 'project_id' => $project->id, 'quantity' => '100', 'unit_cost' => 15_000, 'client_budget' => 2_000_000], $finance);
+    ClientLot::markInOrder($lot, 80_000, $finance);
+    SourcingPayments::recordSupplierPayment($lot, ['supplier_id' => $supplier->id, 'amount' => 1_500_000, 'paid_on' => '2026-11-06', 'purchase_order' => 'PO', 'reference' => 'R', 'evidence_reference' => 'E'], $finance);
+    $journals = JournalEntry::count();
+
+    $results = ccRun('client_lot_complete', 4, fn (int $i) => ['lot' => $lot->id, 'date' => '2026-11-08', 'n' => $i]);
+
+    expect(collect($results)->where('ok', true))->toHaveCount(1)
+        ->and(collect($results)->where('ok', false)->every(fn ($r) => str_contains($r['error'], 'already completed')))->toBeTrue()
+        ->and($lot->refresh()->status)->toBe('completed')
+        ->and(SourcingArrivalEvent::count())->toBe(1)
+        ->and(Inventory::onHand($lot->lines()->first()))->toBe('100.00')
+        ->and(Invoice::count())->toBe(0)                                                                               // client lots are never invoiced
+        ->and(JournalEntry::count())->toBe($journals);                                                                // completing posts no journal of its own
 });

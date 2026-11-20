@@ -13,6 +13,7 @@ use App\Models\SourcingAllocation;
 use App\Models\SourcingLot;
 use App\Models\SourcingLotCost;
 use App\Models\SourcingLotLine;
+use App\Models\StockLocation;
 use App\Models\Supplier;
 use App\Models\SupplierPayment;
 use App\Models\SupplierProduct;
@@ -44,8 +45,9 @@ class SourcingLotController extends Controller
     {
         $q = trim((string) $request->query('q'));
 
-        $lots = SourcingLot::query()
+        $lots = SourcingLot::query()->with(['lines.supplier', 'project.client'])
             ->when($q !== '', fn ($query) => $query->where(fn ($w) => $w->where('number', 'like', "%{$q}%")->orWhere('title', 'like', "%{$q}%")))
+            ->when(isset(SourcingLot::STAGE_STATUSES[(string) $request->query('stage')]), fn ($query) => $query->whereIn('status', SourcingLot::STAGE_STATUSES[$request->query('stage')]))
             ->when(isset(SourcingLot::STATUSES[(string) $request->query('status')]), fn ($query) => $query->where('status', $request->query('status')))
             ->when($request->integer('supplier'), fn ($query, $id) => $query->whereHas('lines', fn ($l) => $l->where('supplier_id', $id)))
             ->latest('id')->paginate(25)->withQueryString();
@@ -240,6 +242,7 @@ class SourcingLotController extends Controller
             'balance' => EmergencyFund::balance(),
             'documents' => Document::where('subject_type', 'sourcing_lot')->where('subject_id', $lot->id)->latest('id')->get(),
             'accounts' => FinancialAccount::where('is_active', true)->orderBy('name')->get(),
+            'locations' => StockLocation::where('is_active', true)->where('code', '!=', 'QUAR')->orderBy('name')->get(),
         ]);
     }
 

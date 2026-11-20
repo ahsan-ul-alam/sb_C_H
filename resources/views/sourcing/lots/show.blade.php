@@ -5,15 +5,23 @@
     $isLoss = $f['profit'] < 0;
 @endphp
 <x-layout :title="$lot->number">
-    <x-page-header :title="$lot->number.' — '.$lot->title" :crumbs="[['Sourcing Lots', route('sourcing.lots.index')], [$lot->number, null]]">
+    <x-page-header :title="$lot->number.' — '.$lot->title" :crumbs="[['Client Lots', route('sourcing.lots.index')], [$lot->number, null]]">
         <x-slot:badges>
-            <x-status :value="$lot->status" />
+            <x-lot-stage :lot="$lot" />
+            @if ($tab)<x-status :value="$lot->status" />@endif
+            @foreach (\App\Services\ClientLot::reviewFlags($lot) as $flag)<span class="badge badge-unpaid" title="{{ $flag }}">Needs review</span>@endforeach
             @if ($isLoss)<span class="badge badge-unpaid">Loss {{ Money::format(-$f['profit']) }}</span>@endif
             @if ($f['fund_pending'] > 0)<span class="badge badge-partial">Fund request pending</span>@endif
         </x-slot:badges>
         <x-slot:meta>@if ($tab) Advanced view — lifecycle: Draft → Costing → Priced → Approved → In progress → Completed → Financially settled. @endif
-            @if ($lot->purchase_order) PO {{ $lot->purchase_order }} · @endif Goods: {{ \App\Models\SourcingLot::PROCUREMENT[$lot->procurement_status] ?? $lot->procurement_status }}
-            @if ($lot->project_id) · <a href="{{ route('sourcing.projects.show', $lot->project_id) }}">Project financial overview</a> @endif</x-slot:meta>
+            @php
+                $metaParts = array_filter([
+                    $lot->purchase_order ? e('PO '.$lot->purchase_order) : null,
+                    $tab || ! $lot->hasClientBudget() ? e('Goods: '.(\App\Models\SourcingLot::PROCUREMENT[$lot->procurement_status] ?? $lot->procurement_status)) : null,
+                    $lot->project_id && auth()->user()->can('sourcing.reports') ? '<a href="'.e(route('sourcing.projects.show', $lot->project_id)).'">Project financial overview</a>' : null,
+                ]);
+            @endphp
+            {!! implode(' · ', $metaParts) !!}</x-slot:meta>
         <x-slot:actions>
             @if ($tab)<a href="{{ route('sourcing.lots.show', $lot) }}" class="btn">← Summary</a>@endif
             @if ($tab) @can('sourcing.manage')
@@ -41,7 +49,7 @@
     </x-page-header>
 
     @unless ($tab)
-        @include('sourcing.lots.summary')
+        @include($lot->hasClientBudget() ? 'sourcing.lots.client' : 'sourcing.lots.summary')
     @else
     <nav class="tabs" aria-label="Lot sections">
         @foreach ($tabs as $key => $label)

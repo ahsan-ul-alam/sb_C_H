@@ -23,6 +23,7 @@ use App\Models\User;
 use App\Services\AccountingService;
 use App\Services\AdvanceSettlementService;
 use App\Services\ClientInformationOtp;
+use App\Services\ClientLot;
 use App\Services\ClientPortalOtp;
 use App\Services\ClientSettlementService;
 use App\Services\CostRecognitionService;
@@ -164,6 +165,8 @@ try {
         'client_settle' => ClientSettlementService::record(Client::findOrFail($args['client']), null, $args['date'], 'race-'.$args['key'], null, $args['key'], auth()->user()) !== null,
         // An optional investor allocation of a verified loan repayment (tracking only); the repayment row lock must let exactly the free amount through.
         'loan_alloc' => LoanRecoveryAllocationService::propose(LoanReceivableRepayment::findOrFail($args['repayment']), Partner::findOrFail($args['partner']), $args['amount'], 'race', null, null, auth()->user(), $args['key']) !== null,
+        // Mark a client lot completed (goods received); every racing request uses its own delivery reference, so only the lot lock can stop a double receipt.
+        'client_lot_complete' => ClientLot::complete(SourcingLot::findOrFail($args['lot']), ['arrived_on' => $args['date'], 'reference' => 'GRN-'.$args['n']], auth()->user())['lot']->exists,
         'client_create' => Client::create(['name' => 'Race client '.$args['n'], 'mobile' => '017'])->sb_number,
         'otp_verify' => ClientInformationOtp::verify(ClientApiIntegration::findOrFail($args['integration']), $args['sb'], $args['request_id'], $args['code']) !== null,
         'portal_verify' => ClientPortalOtp::verify($args['nonce'], $args['code'], $args['binding']) !== null,

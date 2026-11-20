@@ -170,7 +170,10 @@ class Sourcing
      * Add a cost segment. A cost added after pricing approval is automatically flagged unexpected.
      * With $replacesId it records the ACTUAL for an estimate, which then stops counting (never both).
      *
-     * @param  array{category: string, description?: ?string, amount: int, kind: string, incurred_on: string, line_id?: ?int, payee?: ?string, reference?: ?string, is_unexpected?: bool, replaces_id?: ?int}  $data
+     * A cost marked "planned" (the delivery charge confirmed when a client lot is put in order) is part of the plan, not a surprise, so it is
+     * not flagged unexpected even though pricing is already approved.
+     *
+     * @param  array{category: string, description?: ?string, amount: int, kind: string, incurred_on: string, line_id?: ?int, payee?: ?string, reference?: ?string, is_unexpected?: bool, replaces_id?: ?int, planned?: bool}  $data
      */
     public static function addCost(SourcingLot $lot, array $data, User $user): SourcingLotCost
     {
@@ -198,7 +201,7 @@ class Sourcing
             $cost = $lot->costs()->create([
                 'sourcing_lot_line_id' => $data['line_id'] ?? null, 'replaces_id' => $replacesId, 'category' => $data['category'],
                 'description' => $data['description'] ?? null, 'amount' => $data['amount'], 'kind' => $data['kind'],
-                'is_unexpected' => ($data['is_unexpected'] ?? false) || ($afterApproval && ! $replacesId && $data['kind'] === 'actual'),
+                'is_unexpected' => ($data['is_unexpected'] ?? false) || ($afterApproval && ! $replacesId && $data['kind'] === 'actual' && empty($data['planned'])),
                 'incurred_on' => $data['incurred_on'], 'payee' => $data['payee'] ?? null, 'reference' => $data['reference'] ?? null,
                 'created_by' => $user->id,
             ]);
@@ -311,11 +314,14 @@ class Sourcing
     /**
      * Agree quantities (or a cost recovery) with a client project. Cannot exceed the usable quantity of a line.
      *
+     * $budgetPrice: the unit price was derived from the lot's approved client budget (billing a client lot), so it is the approved price and
+     * needs no separate pricing approval.
+     *
      * @param  array{project_id: int, line_id?: ?int, kind: string, quantity?: ?string, unit_price?: ?int, description?: ?string}  $data
      */
-    public static function allocate(SourcingLot $lot, array $data, User $user): SourcingAllocation
+    public static function allocate(SourcingLot $lot, array $data, User $user, bool $budgetPrice = false): SourcingAllocation
     {
-        return self::locked($lot, function (SourcingLot $lot) use ($data, $user) {
+        return self::locked($lot, function (SourcingLot $lot) use ($data, $user, $budgetPrice) {
             if (! in_array($lot->status, ['approved', 'in_progress', 'completed'], true)) {
                 throw new RuntimeException('Pricing must be approved before a lot is allocated to a client.');
             }
@@ -341,7 +347,10 @@ class Sourcing
                 throw new RuntimeException('Only '.bcsub((string) $line->usable_quantity, $already, 2).' '.$line->unit.' of '.$line->description.' remain unallocated.');
             }
             $price = $data['unit_price'] ?? $line->approved_price;
-            if ($price !== $line->approved_price && ! $user->can('sourcing.price.approve')) {
+            if ($budgetPrice && $lot->client_budget === null) {
+                throw new RuntimeException('Only a lot with a client budget can be billed from its budget.');
+            }
+            if (! $budgetPrice && $price !== $line->approved_price && ! $user->can('sourcing.price.approve')) {
                 throw new RuntimeException('Only a pricing approver can agree a price different from the approved one.');
             }
             self::log($lot, 'allocated', $line->description.' x'.$quantity.' to project '.$project->id);
@@ -443,7 +452,10 @@ class Sourcing
         return DB::transaction(function () use ($lot, $projectId, $user) {
             $invoiceId = null;
             $invoice = null;
-            foreach ($lot->lines()->get() as $line) {
+            if ($lot->client_budget !== null && $lot->lines()->count() === 1) {
+                $invoice = self::billBudget($lot, $projectId, $user);
+            }
+            foreach ($invoice ? [] : $lot->lines()->get() as $line) {
                 $left = bcsub((string) $line->usable_quantity, (string) $lot->allocations()->where('kind', 'sale')->where('sourcing_lot_line_id', $line->id)->sum('quantity'), 2);
                 if (bccomp($left, '0', 2) <= 0) {
                     continue;
@@ -460,6 +472,39 @@ class Sourcing
 
             return $invoice ?? throw new RuntimeException('Everything in this lot is already billed.');
         });
+    }
+
+    /**
+     * Bill what is left of a client-lot budget on one new invoice, to the paisa. A budget rarely divides evenly by the quantity, so the units are
+     * split into at most two price tiers that add up exactly: e.g. BDT 10,000.00 for 3 units = 2 × 3,333.33 + 1 × 3,333.34. Allocations still go
+     * through allocate(), so the quantity can never be over-billed, and a second call finds nothing left (it never bills twice).
+     */
+    private static function billBudget(SourcingLot $lot, int $projectId, User $user): ?Invoice
+    {
+        $line = $lot->lines()->firstOrFail();
+        $sales = $lot->allocations()->where('kind', 'sale')->where('sourcing_lot_line_id', $line->id)->get();
+        $allocatedQty = (string) $sales->reduce(fn (string $carry, SourcingAllocation $a) => bcadd($carry, (string) $a->quantity, 2), '0.00');
+        $left = bcsub((string) $line->usable_quantity, $allocatedQty, 2);
+        if (bccomp($left, '0', 2) <= 0) {
+            return null;
+        }
+        $amount = LotFinancials::budgetValue((int) $lot->client_budget, (string) $line->quantity, $allocatedQty, (int) $sales->sum(fn ($a) => $a->amount()), $left);
+        if (bccomp($left, bcadd($left, '0', 0), 2) !== 0) {
+            throw new RuntimeException('A part unit is left to bill on this lot; bill it from the detailed Client billing view.');
+        }
+        $units = (int) $left;
+        $base = intdiv($amount, $units);
+        $extra = $amount - $base * $units; // this many units carry one more paisa
+        $invoice = null;
+        foreach ([[$units - $extra, $base], [$extra, $base + 1]] as [$quantity, $price]) {
+            if ($quantity <= 0) {
+                continue;
+            }
+            $allocation = self::allocate($lot, ['project_id' => $projectId, 'line_id' => $line->id, 'kind' => 'sale', 'quantity' => (string) $quantity, 'unit_price' => $price], $user, budgetPrice: true);
+            $invoice = self::bill($allocation, null, $invoice?->id, $user);
+        }
+
+        return $invoice;
     }
 
     /** Finish a fully paid lot: completes it and settles it financially in one step (the normal settlement rules still apply). */

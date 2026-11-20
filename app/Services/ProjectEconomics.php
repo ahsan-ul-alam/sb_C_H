@@ -105,6 +105,11 @@ class ProjectEconomics
                 continue;
             }
             $investment += (int) $billed->sum(fn ($a) => $a->amount());
+            $margin += $lot->client_budget === null ? (int) LotFinancials::for($lot)['profit'] : 0; // a client lot's margin is counted below, once
+        }
+        // Client lots: once completed, their profit (the budget entered by the admin minus the real cost) is the project's sourcing margin,
+        // whether or not anything was invoiced. The client-facing investment above still follows verified ownership, price and billing.
+        foreach (SourcingLot::where('project_id', $project->id)->whereNotNull('client_budget')->whereIn('status', SourcingLot::STAGE_STATUSES['completed'])->get() as $lot) {
             $margin += (int) LotFinancials::for($lot)['profit'];
         }
         if ($pendingLots > 0) {

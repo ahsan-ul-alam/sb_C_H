@@ -6,6 +6,7 @@ use App\Http\Controllers\AutomationController;
 use App\Http\Controllers\CapitalController;
 use App\Http\Controllers\CashAllocationController;
 use App\Http\Controllers\ClientController;
+use App\Http\Controllers\ClientLotController;
 use App\Http\Controllers\ClientPortalController;
 use App\Http\Controllers\ClientProfitController;
 use App\Http\Controllers\DashboardController;
@@ -166,6 +167,13 @@ Route::middleware('auth')->group(function () {
         Route::post('lots/{lot}/bill-client', [SourcingLotController::class, 'billClient'])->name('lots.bill-client')->middleware('can:sourcing.manage');
         Route::post('lots/{lot}/client-payment', [SourcingLotController::class, 'clientPayment'])->name('lots.client-payment')->middleware('can:clienthub');
         Route::post('lots/{lot}/close', [SourcingLotController::class, 'close'])->name('lots.close')->middleware('can:sourcing.settle');
+
+        // The client-lot workflow: create (Processing) → Mark In order with the delivery charge → Mark as Completed when the goods arrive.
+        Route::middleware('can:sourcing.manage')->group(function () {
+            Route::post('client-lots', [ClientLotController::class, 'store'])->name('client-lots.store');
+            Route::post('lots/{lot}/order', [ClientLotController::class, 'order'])->name('lots.order');
+            Route::post('lots/{lot}/complete', [ClientLotController::class, 'complete'])->name('lots.complete');
+        });
 
         Route::middleware('can:sourcing.manage')->group(function () {
             Route::post('lots/{lot}/lines', [SourcingLotController::class, 'addLine'])->name('lots.lines.store');

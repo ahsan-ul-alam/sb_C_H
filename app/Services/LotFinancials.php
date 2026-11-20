@@ -35,6 +35,9 @@ class LotFinancials
             : $purchases;
         $shared = Costing::allocateShared($sharedTotal, $weights);
 
+        // A client-lot budget is agreed for the whole lot, so its single line earns the budget exactly (not quantity × a rounded unit price).
+        $budgetLot = $lot->client_budget !== null && $lot->lines->count() === 1;
+
         $lines = [];
         foreach ($lot->lines as $line) {
             $purchase = $purchases[$line->id];
@@ -51,7 +54,9 @@ class LotFinancials
                 $allocatedValue += $a->amount();
             }
             $unallocatedQty = bccomp($usable, $allocatedQty, 2) > 0 ? bcsub($usable, $allocatedQty, 2) : '0.00';
-            $unallocatedValue = $price !== null ? Money::multiply($unallocatedQty, $price) : 0;
+            $unallocatedValue = $budgetLot
+                ? self::budgetValue((int) $lot->client_budget, (string) $line->quantity, $allocatedQty, $allocatedValue, $unallocatedQty)
+                : ($price !== null ? Money::multiply($unallocatedQty, $price) : 0);
             $damagedQty = bcsub((string) $line->quantity, $usable, 2);
             $revenue = $allocatedValue + $unallocatedValue;
 
@@ -146,5 +151,23 @@ class LotFinancials
             'received' => $received,
             'receivable' => $billed - $received,
         ];
+    }
+
+    /**
+     * The part of a client-lot budget still carried by units not yet allocated to the client: the budget left after what is already allocated,
+     * in proportion to the units that remain. When every ordered unit is usable this is exactly the remaining budget, so allocated plus
+     * unallocated always adds up to the budget to the paisa; a shortage accepted at arrival reduces it pro rata (rounded down).
+     */
+    public static function budgetValue(int $budget, string $quantity, string $allocatedQty, int $allocatedValue, string $unallocatedQty): int
+    {
+        $remainingQty = bcsub($quantity, $allocatedQty, 2);
+        if (bccomp($remainingQty, '0', 2) <= 0 || bccomp($unallocatedQty, '0', 2) <= 0) {
+            return 0;
+        }
+        if (bccomp($unallocatedQty, $remainingQty, 2) >= 0) {
+            return max(0, $budget - $allocatedValue);
+        }
+
+        return (int) bcdiv(bcmul((string) max(0, $budget - $allocatedValue), $unallocatedQty, 2), $remainingQty, 0);
     }
 }

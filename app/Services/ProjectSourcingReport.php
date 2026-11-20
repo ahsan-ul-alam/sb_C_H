@@ -87,6 +87,9 @@ class ProjectSourcingReport
     {
         $blank = array_fill_keys(self::FIELDS, 0) + ['quantity' => '0.00'];
         $b = ['unallocated' => $blank];
+        // A client lot belongs to its own project from the start and earns the budget the admin entered, with or without an invoice: what is not
+        // allocated to a client goes to that project rather than to "unallocated". Other lots are attributed by their allocations, as before.
+        $home = $lot->client_budget !== null && $lot->project_id ? (int) $lot->project_id : 'unallocated';
 
         // 1. Landed cost of every line over the quantities it is allocated to.
         foreach ($f['lines'] as $lineId => $row) {
@@ -94,9 +97,9 @@ class ProjectSourcingReport
             foreach ($lot->allocations->where('kind', 'sale')->where('sourcing_lot_line_id', $lineId) as $a) {
                 $weights[$a->project_id] = ($weights[$a->project_id] ?? 0) + (int) bcmul((string) $a->quantity, '100', 0);
             }
-            $weights['unallocated'] = (int) bcmul((string) $row['unallocated_qty'], '100', 0);
+            $weights[$home] = ($weights[$home] ?? 0) + (int) bcmul((string) $row['unallocated_qty'], '100', 0);
             if (array_sum($weights) <= 0) {
-                $weights = ['unallocated' => 1];
+                $weights = [$home => 1];
             }
             foreach (Costing::allocateShared((int) $row['landed'], $weights) as $key => $share) {
                 $b[$key] ??= $blank;
@@ -116,6 +119,13 @@ class ProjectSourcingReport
             if ($a->kind === 'sale') {
                 $b[$a->project_id]['quantity'] = bcadd($b[$a->project_id]['quantity'], (string) $a->quantity, 2);
             }
+        }
+        // The part of a client-lot budget that no allocation carries yet (all of it, for a lot that was never billed). Counted once: an
+        // allocated part is already in "agreed" above.
+        if ($home !== 'unallocated') {
+            $b[$home] ??= $blank;
+            $b[$home]['agreed'] += max(0, (int) $f['revenue'] - (int) $lot->allocations->sum(fn ($a) => $a->amount()));
+            $b[$home]['quantity'] = bcadd($b[$home]['quantity'], (string) collect($f['lines'])->reduce(fn (string $c, array $r) => bcadd($c, (string) $r['unallocated_qty'], 2), '0.00'), 2);
         }
         foreach ($lot->allocations->whereNotNull('billed_invoice_id')->groupBy(fn ($a) => $a->project_id.'|'.$a->billed_invoice_id) as $group) {
             $part = (int) $group->sum(fn ($a) => $a->amount());
