@@ -69,3 +69,27 @@ it('withdraws email verification when the address changes and lets staff verify 
     $client->fresh()->update(['email' => 'new@example.test']);
     expect($client->fresh()->hasVerifiedEmail())->toBeFalse();
 });
+
+it('verifies the email in the same save only when staff tick that it belongs to the client', function () {
+    $co = SellbeesCompany::boot($this);
+    $client = Client::create(['name' => 'Tick Co', 'mobile' => '017']);
+    $form = ['name' => 'Tick Co', 'mobile' => '017', 'email' => 'owner@example.test'];
+
+    $co->as('clients')->put(route('clients.update', $client), $form)->assertSessionHas('status', 'Client updated.');
+    expect($client->fresh()->hasVerifiedEmail())->toBeFalse();
+
+    $co->as('clients')->put(route('clients.update', $client), $form + ['email_confirmed' => '1'])->assertSessionHas('status', 'Client updated. Email address marked as verified.');
+    $fresh = $client->fresh();
+    expect($fresh->hasVerifiedEmail())->toBeTrue()->and($fresh->email_verified_by)->not->toBeNull()
+        ->and(DB::table('audit_logs')->where('action', 'client.email_verified')->where('subject', 'client '.$client->id)->exists())->toBeTrue();
+
+    // Changing the address without the tick withdraws the verification; the box cannot verify an empty address.
+    $co->as('clients')->put(route('clients.update', $client), ['email' => 'someone-else@example.test'] + $form);
+    expect($client->fresh()->hasVerifiedEmail())->toBeFalse();
+    $co->as('clients')->put(route('clients.update', $client), ['name' => 'Tick Co', 'mobile' => '017', 'email' => '', 'email_confirmed' => '1']);
+    expect($client->fresh()->hasVerifiedEmail())->toBeFalse();
+
+    // A new client can be created already verified.
+    $co->as('clients')->post(route('clients.store'), ['name' => 'New Co', 'mobile' => '018', 'email' => 'new@example.test', 'email_confirmed' => '1']);
+    expect(Client::where('name', 'New Co')->first()->hasVerifiedEmail())->toBeTrue();
+});

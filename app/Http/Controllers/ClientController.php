@@ -39,8 +39,9 @@ class ClientController extends Controller
     public function store(Request $request): RedirectResponse
     {
         $client = Client::create($this->validated($request));
+        $verified = $this->confirmEmailIfTicked($request, $client);
 
-        return redirect()->route('clients.show', $client)->with('status', 'Client created.');
+        return redirect()->route('clients.show', $client)->with('status', 'Client created.'.($verified ? ' Email address marked as verified.' : ''));
     }
 
     public function show(Request $request, Client $client): View
@@ -86,8 +87,9 @@ class ClientController extends Controller
     public function update(Request $request, Client $client): RedirectResponse
     {
         $client->update($this->validated($request));
+        $verified = $this->confirmEmailIfTicked($request, $client);
 
-        return redirect()->route('clients.show', $client)->with('status', 'Client updated.');
+        return redirect()->route('clients.show', $client)->with('status', 'Client updated.'.($verified ? ' Email address marked as verified.' : ''));
     }
 
     public function destroy(Client $client): RedirectResponse
@@ -117,10 +119,29 @@ class ClientController extends Controller
         if (! $client->email) {
             return back()->with('error', 'This client has no email address to verify.');
         }
-        $client->forceFill(['email_verified_at' => now(), 'email_verified_by' => $request->user()->id])->save();
-        Audit::log('client.email_verified', 'client '.$client->id, $client->sb_number);
+        $this->markEmailVerified($request, $client);
 
         return back()->with('status', 'Email address marked as verified.');
+    }
+
+    /**
+     * The client form's "this address belongs to the client" box: the same staff confirmation as the Mark verified button, made in the same save.
+     * Only an address that is on file and not verified yet is confirmed; an unticked box leaves the verification as the model rules left it.
+     */
+    private function confirmEmailIfTicked(Request $request, Client $client): bool
+    {
+        if (! $request->boolean('email_confirmed') || ! $client->email || $client->hasVerifiedEmail()) {
+            return false;
+        }
+        $this->markEmailVerified($request, $client);
+
+        return true;
+    }
+
+    private function markEmailVerified(Request $request, Client $client): void
+    {
+        $client->forceFill(['email_verified_at' => now(), 'email_verified_by' => $request->user()->id])->save();
+        Audit::log('client.email_verified', 'client '.$client->id, $client->sb_number.' '.$client->email);
     }
 
     /**

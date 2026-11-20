@@ -35,6 +35,13 @@
                     <label for="email">Email <span class="opt">(optional)</span></label>
                     <input type="email" id="email" name="email" value="{{ old('email', $client->email) }}" placeholder="name@example.com" @class(['is-invalid' => $errors->has('email')])>
                     @error('email') <span class="error">{{ $message }}</span> @enderror
+                    @if ($editing && $client->hasVerifiedEmail())
+                        <span class="hint">Verified {{ $client->email_verified_at->format('j M Y') }}. Changing the address removes the verification.</span>
+                    @endif
+                    <label class="checkbox" style="margin-top:.4rem">
+                        <input type="checkbox" name="email_confirmed" value="1" @checked(old('email_confirmed'))>
+                        This email belongs to the client and they can read it (mark as verified, so portal login codes can be sent)
+                    </label>
                 </div>
             </div>
         </div>
