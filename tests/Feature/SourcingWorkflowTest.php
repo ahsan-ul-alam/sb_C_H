@@ -244,7 +244,7 @@ it('runs the lot workflow end to end through the screens: create, receive, docum
         $co->as('finance')->get(route('sourcing.lots.show', [$lot, 'tab' => $tab]))->assertOk();
     }
     $co->as('finance')->get(route('sourcing.lots.show', [$lot, 'tab' => 'receiving']))->assertSee('Receive and inspect goods')->assertSee('Supplier proforma')->assertSee('DN-SCREEN')->assertSee('Damaged / rejected');
-    $co->as('finance')->get(route('sourcing.lots.create'))->assertOk()->assertSee('Purchase order no.')->assertSee('Screen project');
+    $co->as('finance')->get(route('sourcing.lots.create'))->assertOk()->assertSee('Screen project'); // the simple six-field client-lot form
     $co->as('finance')->get(route('sourcing.advances'))->assertOk();
     $co->as('board')->get(route('finance.approvals'))->assertOk();
 

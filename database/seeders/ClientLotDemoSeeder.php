@@ -29,7 +29,7 @@ use RuntimeException;
 
 /**
  * LOCAL DEMO DATA for the client-lot workflow: a small company with staff, partner capital, two client projects, three suppliers and lots in
- * every stage (Processing, In order, Completed — profit and loss, settled and open). Everything is created THROUGH THE APPLICATION'S OWN
+ * every stage (Processing, In order, Completed — profit and loss, paid and unpaid). Everything is created THROUGH THE APPLICATION'S OWN
  * SERVICES (lot workflow, supplier payments, receiving, Board verification), so the ledger, stock and payment records are real and consistent;
  * nothing is written to the books directly.
  *
@@ -134,14 +134,14 @@ class ClientLotDemoSeeder extends Seeder
         $lots[] = $this->create($tote, $acme, 200, 220, 52_000);
         // In order — supplier paid in full, awaiting the goods.
         $lots[] = $this->order($this->create($notebook, $acme, 300, 120, 45_000), 1_200, supplierPaidOn: 6);
-        // In order — expected LOSS (cost 17,600 against a 15,000 budget) and the supplier not paid yet, so it cannot be completed until paid.
+        // In order — expected LOSS (cost 17,600 against a 15,000 budget); the supplier is not paid yet, which never blocks the lot.
         $lots[] = $this->order($this->create($apron, $cafe, 50, 340, 15_000), 600);
-        // Completed and settled — the reference example: 100 × 150 + 800 delivery = 15,800 cost, 20,000 budget, profit 4,200.
+        // Completed — the reference example: 100 × 150 + 800 delivery = 15,800 cost, 20,000 budget, profit 4,200. Payments entered separately.
         $lots[] = $this->complete($this->order($this->create($mug, $cafe, 100, 150, 20_000), 800, supplierPaidOn: 9), deliveryPaid: true, grn: 'GRN-1001');
-        // Completed, books still open — the delivery charge is not paid yet.
+        // Completed — the delivery charge is not paid yet.
         $lots[] = $this->complete($this->order($this->create($cup, $cafe, 400, 95, 48_000), 1_500, supplierPaidOn: 8), deliveryPaid: false, grn: 'GRN-1002');
-        // Completed with a LOSS — 30 × 340 + 700 = 10,900 cost against a 9,500 budget: loss 1,400. Supplier and delivery paid at completion.
-        $lots[] = $this->complete($this->order($this->create($apron, $acme, 30, 340, 9_500), 700), deliveryPaid: true, grn: 'GRN-1003', supplierAtCompletion: true);
+        // Completed with a LOSS — 30 × 340 + 700 = 10,900 cost against a 9,500 budget: loss 1,400.
+        $lots[] = $this->complete($this->order($this->create($apron, $acme, 30, 340, 9_500), 700, supplierPaidOn: 2), deliveryPaid: true, grn: 'GRN-1003');
 
         $this->verifyPendingExpenses(); // the Board verifies the payments, so they reach the ledger
 
@@ -181,11 +181,16 @@ class ClientLotDemoSeeder extends Seeder
         return $lot->refresh();
     }
 
-    private function complete(SourcingLot $lot, bool $deliveryPaid, string $grn, bool $supplierAtCompletion = false): SourcingLot
+    /** The delivery payment is entered separately, the way the admins record payments, and the goods are then received (completion records no money). */
+    private function complete(SourcingLot $lot, bool $deliveryPaid, string $grn): SourcingLot
     {
         Auth::setUser($this->finance);
-        ClientLot::complete($lot, ['arrived_on' => $this->day(2), 'reference' => $grn, 'supplier_paid' => $supplierAtCompletion, 'delivery_paid' => $deliveryPaid,
-            'paid_on' => $this->day(2), 'payment_reference' => 'DEMO-'.$grn], $this->finance);
+        if ($deliveryPaid) {
+            foreach ($lot->costs()->where('kind', 'actual')->get() as $cost) {
+                SourcingPayments::payCost($cost, $this->day(2), $this->finance, $this->cash->id);
+            }
+        }
+        ClientLot::complete($lot, ['arrived_on' => $this->day(2), 'reference' => $grn], $this->finance);
 
         return $lot->refresh();
     }

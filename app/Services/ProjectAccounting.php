@@ -2,7 +2,6 @@
 
 namespace App\Services;
 
-use App\Models\AuditLog;
 use App\Models\Expense;
 use App\Models\ImpairedStockEvent;
 use App\Models\InventoryHandover;
@@ -13,7 +12,6 @@ use App\Models\Project;
 use App\Models\RevenueEvent;
 use App\Models\SourcingLot;
 use App\Models\SupplierReturn;
-use Illuminate\Support\Str;
 
 /**
  * One project result, built from the same journal lines the company statements read, so the sum of the projects and the company can be reconciled instead of argued about.
@@ -38,8 +36,6 @@ class ProjectAccounting
             'impaired_stock_event' => ($c = ImpairedStockEvent::whereKey($id)->value('inventory_loss_case_id')) && ($h = InventoryLossCase::whereKey($c)->value('inventory_handover_id')) ? InventoryHandover::whereKey($h)->value('project_id') : null,
             'supplier_return' => SourcingLot::whereKey(SupplierReturn::whereKey($id)->value('sourcing_lot_id'))->value('project_id'),
             'expense' => Expense::whereKey($id)->value('project_id'),
-            // A lot correction's adjustment of a posted expense belongs where that expense belongs (its audit row names the expense).
-            'expense_rewrite' => Expense::whereKey((int) Str::after((string) AuditLog::whereKey($id)->value('subject'), 'expense '))->value('project_id'),
             default => null,
         };
     }

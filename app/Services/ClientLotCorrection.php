@@ -2,59 +2,52 @@
 
 namespace App\Services;
 
-use App\Models\AuditLog;
-use App\Models\Expense;
-use App\Models\JournalEntry;
-use App\Models\JournalLine;
+use App\Models\ClientOrderItem;
+use App\Models\InventoryHandover;
 use App\Models\Project;
+use App\Models\SourcingArrivalEvent;
 use App\Models\SourcingLot;
 use App\Models\SourcingLotCost;
-use App\Models\StockMovement;
-use App\Models\SupplierPayment;
+use App\Models\SourcingLotLine;
+use App\Models\StockLocation;
+use App\Models\Supplier;
+use App\Models\SupplierProduct;
 use App\Models\User;
 use App\Support\Money;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
 /**
- * A super administrator's correction of a client lot at ANY stage, closed or settled included: the client budget, quantity, unit base cost,
- * delivery charge, project and stage. Everything the system shows is derived from these records (LotFinancials, ProjectEconomics, the project
- * report, the client portal), so a correction is reflected everywhere at once. Records that would otherwise disagree are re-synced in the same
- * transaction, and only those:
+ * "Edit lot": an admin changes a client lot at ANY stage — Processing, In order or Completed, after the goods were received too. The admin controls
+ * the lot; the stage never locks it.
  *
- *   - the lot's approval snapshot (approved cost / approved revenue) and the line's indicative unit price follow the new figures;
- *   - received stock follows the new quantity: the receipt movements are brought to the accepted quantity (a reduction is refused when the
- *     units are no longer in stock);
- *   - money already posted is REWRITTEN to the new amounts, as the owner decided: a lot that was paid in full stays paid in full at the new
- *     cost (supplier payments are rewritten, newest first), a supplier is never shown paid more than the new cost, and a delivery charge that
- *     was paid is rewritten with it. Posted journal entries stay immutable: the ledger receives one adjusting entry for the difference (sourced
- *     from the audit row of the rewrite), so cash and the expense accounts end exactly at the new amount. An amount rewritten to zero withdraws
- *     the payment (its expense rejected, the payment voided) and its adjustment takes the whole amount back out of the accounts.
- *     A month that is closed is never rewritten, and a payment that has corrections, advance settlements or an accrual classification is
- *     refused with a reason (those positions are owned by their own reviewed workflows).
- *   - the stage is set exactly as chosen; stock and money are not moved by a stage change.
+ * Every figure the system shows is calculated from the lot's own records (LotFinancials, ProjectEconomics, the project report, the client portal),
+ * so changing them is enough for profit, project profitability and the reports to follow. Only the records that would otherwise disagree with the
+ * corrected values are reconciled, in the same transaction, through the existing inventory code:
  *
- * Every field's before → after and the reason are written to the audit log.
+ *   - quantity after receiving: the receipt movements are brought to the corrected quantity (Inventory::syncReceipt posts only the difference) and
+ *     the arrival record follows; a reduction of units that were already sold, reserved or moved out is refused with an explanation;
+ *   - stock location after receiving: the units still available are moved with the existing stock transfer;
+ *   - received date and delivery note / GRN: the arrival record and the line;
+ *   - supplier or product after receiving: the line is relabelled (its stock is the line's stock, so nothing is received again); refused once units
+ *     of it were sold, reserved or handed over, because those records name the original product.
+ *
+ * Nothing here records, rewrites or reverses a payment, an expense, an invoice or a journal entry: payments are managed separately in the existing
+ * financial screens. Each edit is delta-based, so repeating it changes nothing ("Nothing was changed."), and the lot row is locked for the whole
+ * edit, so simultaneous edits apply one after the other on the current values. Every field's before → after is written to the activity history.
  */
 class ClientLotCorrection
 {
-    /** Positions owned by the accrual workflows (advances, payables, capitalised inventory, prepayments): never rewritten here. */
-    private const ACCRUAL_CLASSIFICATIONS = ['supplier_advance', 'supplier_payable', 'acquisition', 'transport_prepayment', 'prepaid'];
-
-    public const STAGE_STATUS = ['processing' => 'approved', 'in_order' => 'in_progress', 'completed' => 'completed', 'settled' => 'settled', 'cancelled' => 'cancelled'];
+    public const STAGE_STATUS = ['processing' => 'approved', 'in_order' => 'in_progress', 'completed' => 'completed'];
 
     /**
-     * @param  array{client_budget: int, quantity: string, unit_cost: int, delivery_charge: int, stage: string, project_id: int, reason: string}  $data
+     * @param  array{supplier_id: int, supplier_product_id: int, project_id: int, quantity: string, unit_cost: int, client_budget: int, delivery_charge: int, stage: string, arrived_on?: ?string, reference?: ?string, location_id?: ?int, notes?: ?string, reason?: ?string}  $data
      * @return list<string> what was changed, in plain words
      */
     public static function apply(SourcingLot $lot, array $data, User $user): array
     {
-        if (! $user->hasRole('super_admin')) {
-            throw new RuntimeException('Only a super administrator can correct a lot after it was created.');
-        }
-        $reason = trim($data['reason']);
-        if (mb_strlen($reason) < 5) {
-            throw new RuntimeException('Give the reason for the correction (at least 5 characters).');
+        if (! $user->can('sourcing.manage')) {
+            throw new RuntimeException('You are not allowed to edit lots.');
         }
         if (! preg_match('/^[1-9]\d{0,9}$/', $data['quantity'])) {
             throw new RuntimeException('Quantity must be a whole number greater than zero.');
@@ -66,224 +59,233 @@ class ClientLotCorrection
             throw new RuntimeException('The delivery charge cannot be negative (enter 0 for free delivery).');
         }
         if (! array_key_exists($data['stage'], self::STAGE_STATUS)) {
-            throw new RuntimeException('Choose one of the stages.');
+            throw new RuntimeException('Choose Processing, In order or Completed.');
         }
 
-        return DB::transaction(function () use ($lot, $data, $user, $reason) {
+        return DB::transaction(function () use ($lot, $data, $user) {
             $lot = SourcingLot::whereKey($lot->id)->lockForUpdate()->firstOrFail();
             if (! $lot->hasClientBudget()) {
-                throw new RuntimeException('Only a lot made on the simple client-lot form can be corrected here; manage this lot from the detailed view.');
+                throw new RuntimeException('Only a lot made on the simple client-lot form can be edited here; manage this lot from the detailed view.');
             }
             $line = $lot->lines()->firstOrFail();
             $before = LotFinancials::for($lot);
             $changes = [];
 
-            if ((int) $data['project_id'] !== (int) $lot->project_id) {
-                $project = Project::whereKey($data['project_id'])->whereNull('archived_at')->first() ?? throw new RuntimeException('Choose an active client project.');
-                $changes[] = 'project '.($lot->project?->name ?? '—').' → '.$project->name;
-                $lot->update(['project_id' => $project->id]);
+            self::project($lot, (int) $data['project_id'], $changes);
+            self::product($line, (int) $data['supplier_id'], (int) $data['supplier_product_id'], $changes);
+            self::quantityAndCost($line, $data['quantity'], $data['unit_cost'], $user, $changes);
+            if ($line->refresh()->received_quantity !== null) {
+                self::receiving($line, $data, $user, $changes);
             }
-
-            // Quantity and unit cost: the line, and the stock already received.
-            $oldQty = (string) $line->quantity;
-            $newQty = bcadd($data['quantity'], '0', 2);
-            if (bccomp($oldQty, $newQty, 2) !== 0 || (int) $line->unit_price !== $data['unit_cost']) {
-                $shortfall = bcsub($oldQty, (string) $line->usable_quantity, 2); // units accepted short or damaged at arrival stay short
-                $usable = bccomp(bcsub($newQty, $shortfall, 2), '0', 2) > 0 ? bcsub($newQty, $shortfall, 2) : $newQty;
-                $attributes = ['quantity' => $newQty, 'usable_quantity' => $usable, 'unit_price' => $data['unit_cost']];
-                if ($line->received_quantity !== null) {
-                    $attributes['received_quantity'] = $newQty;
-                }
-                if (bccomp($oldQty, $newQty, 2) !== 0) {
-                    $changes[] = 'quantity '.self::qty($oldQty).' → '.self::qty($newQty);
-                }
-                if ((int) $line->unit_price !== $data['unit_cost']) {
-                    $changes[] = 'unit base cost '.Money::format((int) $line->unit_price).' → '.Money::format($data['unit_cost']);
-                }
-                $line->update($attributes);
-                if ($line->received_quantity !== null) {
-                    $location = StockMovement::where('sourcing_lot_line_id', $line->id)->where('type', 'receipt')->whereNotNull('stock_location_id')->latest('id')->value('stock_location_id');
-                    Inventory::syncReceipt($line, $user, null, $location);
-                }
-            }
-
             if ((int) $lot->client_budget !== $data['client_budget']) {
                 $changes[] = 'client budget '.Money::format((int) $lot->client_budget).' → '.Money::format($data['client_budget']);
                 $lot->update(['client_budget' => $data['client_budget']]);
             }
-            $unit = intdiv((int) $lot->client_budget, max(1, (int) $line->refresh()->quantity));
-            $line->update(['sell_price' => $unit, 'approved_price' => $unit]);
-
-            $delivery = self::syncDelivery($lot, $data['delivery_charge'], $user, $reason);
-            if ($delivery !== null) {
-                $changes[] = $delivery;
+            self::delivery($lot, $data['delivery_charge'], $user, $changes);
+            self::stage($lot, $line->refresh(), $data['stage'], $user, $changes);
+            $notes = trim((string) ($data['notes'] ?? ''));
+            if ($notes !== trim((string) $lot->notes)) {
+                $changes[] = 'notes updated';
+                $lot->update(['notes' => $notes !== '' ? $notes : null]);
             }
-            $supplier = self::syncSupplierPayments($lot->refresh(), $before, $reason);
-            if ($supplier !== null) {
-                $changes[] = $supplier;
-            }
-
-            $status = self::STAGE_STATUS[$data['stage']];
-            if ($status !== $lot->status) {
-                $changes[] = 'stage '.$lot->stageLabel().($lot->status === 'settled' ? ' (books closed)' : '').' → '.SourcingLot::STAGES[$data['stage'] === 'settled' ? 'completed' : $data['stage']].($status === 'settled' ? ' (books closed)' : '');
-                $lot->update(self::stageAttributes($lot, $status, $user, $reason));
-            }
-
-            $after = LotFinancials::for($lot->refresh());
-            $lot->update(['approved_cost' => $after['landed'], 'approved_revenue' => (int) $lot->client_budget]);
-            InventoryValuation::syncLot($lot->id);
 
             if ($changes === []) {
                 throw new RuntimeException('Nothing was changed.');
             }
-            Audit::log('sourcing.client_lot.corrected', 'lot '.$lot->number, implode('; ', $changes).' | profit '.Money::format($before['profit']).' → '.Money::format($after['profit']).' | reason: '.$reason);
+            // The indicative unit price and the lot's snapshot follow the corrected figures, so every report reads the same numbers.
+            $unit = intdiv((int) $lot->client_budget, max(1, (int) $line->quantity));
+            $line->update(['sell_price' => $unit, 'approved_price' => $unit]);
+            $after = LotFinancials::for($lot->refresh());
+            $lot->update(['approved_cost' => $after['landed'], 'approved_revenue' => (int) $lot->client_budget]);
+            InventoryValuation::syncLot($lot->id);
+
+            $reason = trim((string) ($data['reason'] ?? ''));
+            Audit::log('sourcing.client_lot.edited', 'lot '.$lot->number, implode('; ', $changes).' | profit '.Money::format($before['profit']).' → '.Money::format($after['profit']).($reason !== '' ? ' | note: '.$reason : ''));
 
             return $changes;
         });
     }
 
-    /**
-     * The stage exactly as chosen. Reaching a stage for the first time stamps it; leaving "settled" or "cancelled" clears what only that state means.
-     * Earlier timestamps (ordered, completed) are history and are kept.
-     *
-     * @return array<string, mixed>
-     */
-    private static function stageAttributes(SourcingLot $lot, string $status, User $user, string $reason): array
+    /** @param  list<string>  $changes */
+    private static function project(SourcingLot $lot, int $projectId, array &$changes): void
     {
-        $attributes = ['status' => $status];
-        if (in_array($status, ['in_progress', 'completed', 'settled'], true) && $lot->ordered_at === null) {
-            $attributes += ['ordered_at' => now(), 'ordered_by' => $user->id];
+        if ($projectId === (int) $lot->project_id) {
+            return;
         }
-        if (in_array($status, ['completed', 'settled'], true) && $lot->completed_at === null) {
-            $attributes += ['completed_at' => now(), 'completed_by' => $user->id];
-        }
-        $attributes += $status === 'settled' ? ['settled_at' => $lot->settled_at ?? now(), 'settled_by' => $lot->settled_by ?? $user->id] : ['settled_at' => null, 'settled_by' => null];
-        $attributes += $status === 'cancelled' ? ['cancelled_at' => now(), 'cancel_reason' => $reason] : ['cancelled_at' => null, 'cancel_reason' => null];
-
-        return $attributes;
+        $project = Project::whereKey($projectId)->whereNull('archived_at')->first() ?? throw new RuntimeException('Choose an active client project.');
+        $changes[] = 'project '.($lot->project?->name ?? '—').' → '.$project->name;
+        $lot->update(['project_id' => $project->id]);
     }
 
-    /** The delivery charge: the lot's current Delivery cost is set to the new amount (created, changed or removed), its paid expense rewritten with it. */
-    private static function syncDelivery(SourcingLot $lot, int $amount, User $user, string $reason): ?string
+    /**
+     * Supplier and product. The line's stock is the line's own, so relabelling it never receives anything again. Once units of it were sold,
+     * reserved, delivered or handed over, those records name the original product, so the change is refused with the way to correct it.
+     *
+     * @param  list<string>  $changes
+     */
+    private static function product(SourcingLotLine $line, int $supplierId, int $productId, array &$changes): void
+    {
+        if ($supplierId === (int) $line->supplier_id && $productId === (int) $line->supplier_product_id) {
+            return;
+        }
+        $supplier = Supplier::find($supplierId) ?? throw new RuntimeException('Choose a supplier.');
+        $product = SupplierProduct::where('supplier_id', $supplier->id)->find($productId) ?? throw new RuntimeException('Choose a product supplied by '.$supplier->name.'.');
+        if ($line->received_quantity !== null && self::consumed($line)) {
+            throw new RuntimeException('Units of '.$line->description.' were already sold, reserved or handed over, and those records name this product. Keep the product, '
+                .'or create a new lot for the correct product and remove these units with a stock adjustment.');
+        }
+        if ($supplierId !== (int) $line->supplier_id) {
+            $changes[] = 'supplier '.($line->supplier?->name ?? '—').' → '.$supplier->name;
+        }
+        if ($productId !== (int) $line->supplier_product_id) {
+            $changes[] = 'product '.$line->description.' → '.$product->label();
+        }
+        $line->update(['supplier_id' => $supplier->id, 'supplier_product_id' => $product->id, 'description' => $product->label(), 'unit' => $product->unit ?: $line->unit]);
+    }
+
+    /**
+     * Quantity and unit base cost. After receiving, the stock follows the corrected quantity through the existing receipt sync (only the difference is
+     * posted, so repeating the edit posts nothing), and the arrival record carries the same total.
+     *
+     * @param  list<string>  $changes
+     */
+    private static function quantityAndCost(SourcingLotLine $line, string $quantity, int $unitCost, User $user, array &$changes): void
+    {
+        $oldQty = (string) $line->quantity;
+        $newQty = bcadd($quantity, '0', 2);
+        $qtyChanged = bccomp($oldQty, $newQty, 2) !== 0;
+        if ((int) $line->unit_price !== $unitCost) {
+            $changes[] = 'unit base cost '.Money::format((int) $line->unit_price).' → '.Money::format($unitCost);
+            $line->update(['unit_price' => $unitCost]);
+        }
+        if (! $qtyChanged) {
+            return;
+        }
+        $changes[] = 'quantity '.self::qty($oldQty).' → '.self::qty($newQty);
+        $shortfall = bcsub($oldQty, (string) $line->usable_quantity, 2); // units accepted short at arrival stay short
+        $usable = bccomp(bcsub($newQty, $shortfall, 2), '0', 2) > 0 ? bcsub($newQty, $shortfall, 2) : $newQty;
+        if ($line->received_quantity === null) {
+            $line->update(['quantity' => $newQty, 'usable_quantity' => $usable]);
+
+            return;
+        }
+        $delta = bcsub($usable, (string) $line->usable_quantity, 2);
+        $available = Inventory::balances($line)['available'];
+        if (bccomp($delta, '0', 2) < 0 && bccomp(bcadd($available, $delta, 2), '0', 2) < 0) {
+            throw new RuntimeException('Only '.self::qty($available).' of '.$line->description.' are still in stock (the rest were sold, reserved or moved out), so the quantity cannot go down by '
+                .self::qty(ltrim($delta, '-')).'. Lower it by at most '.self::qty($available).', or correct the orders first.');
+        }
+        $line->update(['quantity' => $newQty, 'usable_quantity' => $usable, 'received_quantity' => bcadd((string) $line->received_quantity, bcsub($newQty, $oldQty, 2), 2)]);
+        $event = SourcingArrivalEvent::where('sourcing_lot_line_id', $line->id)->latest('id')->first();
+        $event?->update(['received_quantity' => bcadd((string) $event->received_quantity, bcsub($newQty, $oldQty, 2), 2), 'accepted_quantity' => bcadd((string) $event->accepted_quantity, $delta, 2)]);
+        Inventory::syncReceipt($line, $user, $event?->id, $event?->stock_location_id);
+    }
+
+    /**
+     * Received date, delivery note / GRN and stock location of a received lot. A new location moves the units still available there with the existing
+     * stock transfer (out of the old place, into the new one), so the stock total never changes.
+     *
+     * @param  array<string, mixed>  $data
+     * @param  list<string>  $changes
+     */
+    private static function receiving(SourcingLotLine $line, array $data, User $user, array &$changes): void
+    {
+        $event = SourcingArrivalEvent::where('sourcing_lot_line_id', $line->id)->latest('id')->first();
+        $arrivedOn = ($data['arrived_on'] ?? null) ?: $line->arrived_on?->toDateString();
+        if ($arrivedOn !== null && $arrivedOn !== $line->arrived_on?->toDateString()) {
+            if ($arrivedOn > today()->toDateString()) {
+                throw new RuntimeException('The received date cannot be in the future.');
+            }
+            $changes[] = 'received date '.($line->arrived_on?->format('j M Y') ?? '—').' → '.date('j M Y', strtotime($arrivedOn));
+            $line->update(['arrived_on' => $arrivedOn]);
+            $event?->update(['arrived_on' => $arrivedOn]);
+        }
+        $reference = trim((string) ($data['reference'] ?? ''));
+        if ($reference !== '' && $event !== null && $reference !== $event->reference) {
+            if (SourcingArrivalEvent::where('sourcing_lot_line_id', $line->id)->where('reference', $reference)->whereKeyNot($event->id)->exists()) {
+                throw new RuntimeException('Delivery note '.$reference.' is already recorded for this product.');
+            }
+            $changes[] = 'delivery note / GRN '.$event->reference.' → '.$reference;
+            $event->update(['reference' => $reference]);
+            $line->update(['acceptance_reference' => $reference]);
+        }
+        $locationId = (int) ($data['location_id'] ?? 0);
+        $from = $event?->stock_location_id;
+        if ($locationId > 0 && $locationId !== (int) $from) {
+            $to = StockLocation::where('is_active', true)->findOrFail($locationId);
+            $movable = StockLocations::availableAt($line, $from);
+            if (bccomp($movable, '0', 2) > 0) {
+                $transfer = StockLocations::request($line, null, $from, $to->id, $movable, 'Lot edit: stock location corrected', $user);
+                StockLocations::complete($transfer, $user);
+            }
+            $changes[] = 'stock location '.(StockLocation::whereKey($from)->value('name') ?? '—').' → '.$to->name.(bccomp($movable, '0', 2) > 0 ? ' ('.self::qty($movable).' moved)' : '');
+            $event?->update(['stock_location_id' => $to->id]);
+        }
+    }
+
+    /**
+     * The delivery charge is the lot's Delivery cost: changed, added or removed. A cost the admins have already paid separately keeps its payment
+     * record untouched (it is never rewritten here) and only its amount on the lot follows.
+     *
+     * @param  list<string>  $changes
+     */
+    private static function delivery(SourcingLot $lot, int $amount, User $user, array &$changes): void
     {
         $replaced = $lot->costs()->whereNotNull('replaces_id')->pluck('replaces_id')->all();
-        $costs = $lot->costs()->with('expense')->where('kind', 'actual')->where('category', 'Delivery')->whereNotIn('id', $replaced)->orderBy('id')->get();
+        $costs = $lot->costs()->where('kind', 'actual')->where('category', 'Delivery')->whereNotIn('id', $replaced)->orderBy('id')->get();
         $old = (int) $costs->sum('amount');
         if ($old === $amount) {
-            return null;
+            return;
         }
         $last = $costs->last();
         $others = $old - (int) ($last?->amount ?? 0);
         if ($last === null) {
-            // Created directly: the normal cost entry refuses closed lots and re-opens pricing, and a correction must do neither.
-            SourcingLotCost::create(['sourcing_lot_id' => $lot->id, 'category' => 'Delivery', 'description' => 'Delivery charge (set by correction)', 'amount' => $amount,
+            SourcingLotCost::create(['sourcing_lot_id' => $lot->id, 'category' => 'Delivery', 'description' => 'Delivery charge', 'amount' => $amount,
                 'kind' => 'actual', 'is_unexpected' => false, 'incurred_on' => today()->toDateString(), 'created_by' => $user->id]);
         } elseif ($amount < $others) {
-            throw new RuntimeException('This lot has several delivery costs; the new delivery charge cannot be below the earlier ones ('.Money::format($others).'). Correct them in the detailed view.');
+            throw new RuntimeException('This lot has several delivery costs; the delivery charge cannot be below the earlier ones ('.Money::format($others).').');
+        } elseif ($amount - $others === 0 && $last->expense_id === null) {
+            $last->delete();
         } else {
-            $newLast = $amount - $others;
-            if ($last->expense) {
-                self::rewriteExpense($last->expense, $newLast, $reason);
-            }
-            $newLast === 0 ? $last->delete() : $last->update(['amount' => $newLast]);
+            $last->update(['amount' => $amount - $others]);
         }
-
-        return 'delivery charge '.Money::format($old).' → '.Money::format($amount);
+        $changes[] = 'delivery charge '.Money::format($old).' → '.Money::format($amount);
     }
 
     /**
-     * Supplier payments after a cost change: a lot that was paid in full stays paid in full at the new cost, and no lot stays paid more than its cost.
-     * The difference is applied to the newest live payments first.
+     * The stage as chosen. Completed means the goods were received, so a lot is completed with "Mark Completed" (which receives them) the first time;
+     * after that it can be moved between the stages freely without moving stock or money. A lot whose books were closed keeps that when it stays Completed.
      *
-     * @param  array<string, mixed>  $before
+     * @param  list<string>  $changes
      */
-    private static function syncSupplierPayments(SourcingLot $lot, array $before, string $reason): ?string
+    private static function stage(SourcingLot $lot, SourcingLotLine $line, string $stage, User $user, array &$changes): void
     {
-        $purchase = LotFinancials::for($lot)['purchase'];
-        $payments = SupplierPayment::where('sourcing_lot_id', $lot->id)->whereNull('voided_at')->with(['expense', 'corrections'])->orderByDesc('id')->get();
-        $paid = SourcingPayments::paidTotal($payments);
-        $wasPaidInFull = $before['purchase'] > 0 && $before['supplier_paid'] >= $before['purchase'];
-        $target = $wasPaidInFull ? $purchase : min($paid, $purchase);
-        if ($target === $paid || $payments->isEmpty()) {
-            return null;
-        }
-        $difference = $target - $paid;
-        foreach ($payments as $payment) {
-            if ($difference === 0) {
-                break;
-            }
-            $current = (int) $payment->amount;
-            $new = max(0, $current + $difference);
-            self::rewriteExpense($payment->expense, $new, $reason, $payment);
-            $difference -= $new - $current;
-        }
-
-        return 'supplier paid '.Money::format($paid).' → '.Money::format($target).' (payments rewritten)';
-    }
-
-    /**
-     * Rewrite a posted (or pending) expense to a new amount. Its one journal entry is rebuilt from the same rules that posted it, so it stays balanced;
-     * zero withdraws it (the expense is rejected, the payment voided and the entry removed).
-     */
-    private static function rewriteExpense(Expense $expense, int $amount, string $reason, ?SupplierPayment $payment = null): void
-    {
-        $expense = Expense::whereKey($expense->id)->lockForUpdate()->firstOrFail();
-        if ((int) $expense->amount === $amount) {
+        if ($stage === $lot->stage()) {
             return;
         }
-        if ($expense->reverses_id !== null || Expense::where('reverses_id', $expense->id)->where('status', '!=', 'rejected')->exists()) {
-            throw new RuntimeException('Expense #'.$expense->id.' has a correction recorded against it; resolve that correction first.');
+        if ($stage === 'completed' && $line->received_quantity === null) {
+            throw new RuntimeException('Use Mark Completed to receive the goods; the lot becomes Completed then.');
         }
-        if (in_array($expense->classification, self::ACCRUAL_CLASSIFICATIONS, true) || in_array($expense->payment_status, ['unpaid', 'partial'], true)) {
-            throw new RuntimeException('Expense #'.$expense->id.' is an accrual advance or payable; correct it through its own settlement workflow.');
+        $status = self::STAGE_STATUS[$stage];
+        $attributes = ['status' => $status, 'settled_at' => null, 'settled_by' => null, 'cancelled_at' => null, 'cancel_reason' => null];
+        if ($status !== 'approved' && $lot->ordered_at === null) {
+            $attributes += ['ordered_at' => now(), 'ordered_by' => $user->id];
         }
-        if ($payment !== null && AdvanceSettlementService::settledAmount($payment) > 0) {
-            throw new RuntimeException('Supplier payment #'.$payment->id.' is already settled against accepted goods; it cannot be rewritten.');
-        }
-        AccountingService::assertOpen($expense->spent_on->toDateString(), 'the payment being rewritten');
-
-        $old = (int) $expense->amount;
-        $entry = JournalEntry::where('source_type', 'expense')->where('source_id', $expense->id)->with('lines')->first();
-        if ($entry !== null && $amount > $old) {
-            AccountingService::assertCanSpend(AccountingService::resolveAccountId($expense->financial_account_id), $amount - $old);
-        }
-        // The audit row is the source of the ledger adjustment, so each rewrite is posted once and traceable to its reason.
-        $audit = AuditLog::create(['user_id' => auth()->id(), 'action' => 'expense.rewritten', 'subject' => 'expense '.$expense->id,
-            'details' => Money::format($old).' → '.Money::format($amount).' (lot correction: '.$reason.')']);
-
-        if ($entry !== null) {
-            Ledger::post($entry->entry_date->toDateString(), ($amount === 0 ? 'Withdrawn' : 'Rewritten').' by lot correction: expense #'.$expense->id.' '.Money::format($old).' → '.Money::format($amount).' — '.$reason,
-                'expense_rewrite', $audit->id, self::adjustmentLines($entry, $old, $amount), auth()->id());
-        }
-        if ($amount === 0) {
-            $expense->update(['status' => 'rejected']);
-            $payment?->update(['voided_at' => now(), 'voided_by' => auth()->id(), 'void_reason' => 'Lot correction: '.$reason]);
-        } else {
-            $expense->update(['amount' => $amount] + ($expense->payment_status === 'paid' ? ['paid_amount' => $amount] : []));
-            $payment?->update(['amount' => $amount]);
-        }
-        if ($entry !== null) {
-            InventoryValuation::onExpensePosted($expense);
-        }
+        $changes[] = 'stage '.$lot->stageLabel().' → '.SourcingLot::STAGES[$stage];
+        $lot->update($attributes);
     }
 
-    /**
-     * The entry that turns an expense currently standing at $old (its posting plus earlier rewrites) into one of $new: every line of the original
-     * posting moves by the difference on its own side (a reduction moves to the opposite side), so posted entries are never edited and the
-     * accounts end exactly where a posting of $new would have put them. Only a plain posting (every line the same amount) is adjusted this way.
-     *
-     * @return list<array{0: string, 1: int|null, 2: int, 3: int, 4: int|null}>
-     */
-    private static function adjustmentLines(JournalEntry $entry, int $old, int $new): array
+    /** Whether units of the line already left the shelf or were promised: sold, reserved, delivered, returned, damaged, handed over or on an order. */
+    private static function consumed(SourcingLotLine $line): bool
     {
-        if ($entry->isReversed() || $entry->lines->map(fn (JournalLine $l) => (int) $l->debit + (int) $l->credit)->unique()->count() !== 1) {
-            throw new RuntimeException('Journal entry '.$entry->reference().' is split or already reversed; correct this payment through the expense correction workflow.');
+        $b = Inventory::balances($line);
+        foreach (['reserved', 'dispatched', 'delivered', 'returned', 'damaged'] as $bucket) {
+            if (bccomp($b[$bucket], '0', 2) !== 0) {
+                return true;
+            }
         }
-        $delta = $new - $old;
 
-        return $entry->lines->map(fn (JournalLine $l) => (int) $l->debit > 0
-            ? [$l->account, $l->partner_id, max(0, $delta), max(0, -$delta), $l->financial_account_id]
-            : [$l->account, $l->partner_id, max(0, -$delta), max(0, $delta), $l->financial_account_id])->all();
+        return ClientOrderItem::where('sourcing_lot_line_id', $line->id)->exists() || InventoryHandover::where('sourcing_lot_line_id', $line->id)->exists();
     }
 
     private static function qty(string $q): string

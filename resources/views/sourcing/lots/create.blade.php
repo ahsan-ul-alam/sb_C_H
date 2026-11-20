@@ -33,12 +33,6 @@
             <p class="muted" style="margin-top:.6rem">Total base cost = quantity × unit base cost. Estimated profit = client budget − total base cost (delivery is added when the lot is put in order).
                 The budget is what the client agreed to pay for the lot — it is <strong>not</strong> recorded as money received.</p>
 
-            <details style="margin-top:.5rem"><summary>Optional details</summary>
-                <div class="form-grid" style="margin-top:.7rem">
-                    <div class="field"><label for="c-po">Purchase order no.</label><input name="purchase_order" id="c-po" value="{{ old('purchase_order') }}"></div>
-                    <div class="field"><label for="c-notes">Notes</label><input name="notes" id="c-notes" value="{{ old('notes') }}"></div>
-                </div>
-            </details>
             <button class="btn btn-primary" style="margin-top:.9rem">Create lot</button>
         </form>
     </section>

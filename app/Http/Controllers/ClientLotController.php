@@ -73,45 +73,42 @@ class ClientLotController extends Controller
             'reference' => ['required', 'string', 'max:120'],
             'location_id' => ['nullable', 'integer', 'exists:stock_locations,id'],
             'notes' => ['nullable', 'string', 'max:255'],
-            'paid_on' => ['nullable', 'date', 'before_or_equal:today'],
-            'payment_reference' => ['nullable', 'string', 'max:120'],
         ], ['reference.required' => 'Enter the delivery note or GRN number so the goods cannot be received twice.']);
 
-        try {
-            $result = ClientLot::complete($lot, $data + ['supplier_paid' => $request->boolean('supplier_paid'), 'delivery_paid' => $request->boolean('delivery_paid')], $request->user());
-        } catch (RuntimeException $e) {
-            return back()->with('error', $e->getMessage())->withInput();
-        }
-        $message = 'Lot completed: goods received into stock'.($result['settled'] ? ' and financially settled.' : '.');
-
-        $response = back()->with('status', $message);
-
-        return $result['notes'] ? $response->with('warning', implode(' ', $result['notes'])) : $response;
+        return $this->attempt(fn () => ClientLot::complete($lot, $data, $request->user()), 'Lot completed: goods received into stock.');
     }
 
-    /** A super administrator corrects the lot at any stage; every figure, posted payment and stock count follows (ClientLotCorrection). */
+    /** Edit lot: an admin changes anything at any stage; the figures, project profitability and stock follow (ClientLotCorrection). */
     public function correct(Request $request, SourcingLot $lot): RedirectResponse
     {
-        abort_unless($request->user()->hasRole('super_admin'), 403);
         $data = $request->validate([
-            'client_budget' => ['required', 'regex:'.Money::AMOUNT_REGEX],
+            'supplier_id' => ['required', 'integer', 'exists:suppliers,id'],
+            'supplier_product_id' => ['required', 'integer', 'exists:supplier_products,id'],
+            'project_id' => ['required', 'integer', 'exists:projects,id'],
             'quantity' => ['required', 'regex:/^[1-9]\d{0,9}$/'],
             'unit_cost' => ['required', 'regex:'.Money::AMOUNT_REGEX],
+            'client_budget' => ['required', 'regex:'.Money::AMOUNT_REGEX],
             'delivery_charge' => ['required', 'regex:'.Money::AMOUNT_REGEX],
             'stage' => ['required', 'in:'.implode(',', array_keys(ClientLotCorrection::STAGE_STATUS))],
-            'project_id' => ['required', 'integer', 'exists:projects,id'],
-            'reason' => ['required', 'string', 'min:5', 'max:500'],
+            'arrived_on' => ['nullable', 'date', 'before_or_equal:today'],
+            'reference' => ['nullable', 'string', 'max:120'],
+            'location_id' => ['nullable', 'integer', 'exists:stock_locations,id'],
+            'notes' => ['nullable', 'string', 'max:5000'],
+            'reason' => ['nullable', 'string', 'max:500'],
         ], ['quantity.regex' => 'Quantity must be a whole number greater than zero.']);
 
         try {
             $changes = ClientLotCorrection::apply($lot, [
-                'client_budget' => Money::toMinor($data['client_budget']), 'quantity' => $data['quantity'], 'unit_cost' => Money::toMinor($data['unit_cost']),
-                'delivery_charge' => Money::toMinor($data['delivery_charge']), 'stage' => $data['stage'], 'project_id' => (int) $data['project_id'], 'reason' => $data['reason'],
+                'supplier_id' => (int) $data['supplier_id'], 'supplier_product_id' => (int) $data['supplier_product_id'], 'project_id' => (int) $data['project_id'],
+                'quantity' => $data['quantity'], 'unit_cost' => Money::toMinor($data['unit_cost']), 'client_budget' => Money::toMinor($data['client_budget']),
+                'delivery_charge' => Money::toMinor($data['delivery_charge']), 'stage' => $data['stage'], 'arrived_on' => $data['arrived_on'] ?? null,
+                'reference' => $data['reference'] ?? null, 'location_id' => isset($data['location_id']) ? (int) $data['location_id'] : null,
+                'notes' => $data['notes'] ?? null, 'reason' => $data['reason'] ?? null,
             ], $request->user());
         } catch (RuntimeException $e) {
             return back()->with('error', $e->getMessage())->withInput();
         }
 
-        return back()->with('status', 'Lot corrected: '.implode('; ', $changes).'. Every report, the project figures and the client portal now use the new numbers.');
+        return back()->with('status', 'Lot updated: '.implode('; ', $changes).'.');
     }
 }

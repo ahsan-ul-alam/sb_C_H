@@ -111,13 +111,14 @@ it('shows only the simple six-field form, with no advanced lot forms', function 
         ->assertSee('Corporate Gifts — Acme Retail')->assertSee('Dhaka Ceramics');
 });
 
-it('shows a client lot page with only the three steps, its numbers and its money: no advanced sections or reopen form', function () {
-    $lot = clComplete(clOrder(clCreate()), ['supplier_paid' => '1', 'delivery_paid' => '1']) ? SourcingLot::latest('id')->first() : null;
+it('shows a client lot page with only the steps, the financial summary, Edit and the activity: no advance, payment, billing or settlement', function () {
+    $lot = clOrder(clCreate());
+    clComplete($lot)->assertSessionMissing('error');
 
     $this->co->as('finance')->get(route('sourcing.lots.show', $lot))->assertOk()
-        ->assertSee('Processing')->assertSee('In order')->assertSee('Completed')->assertSee('Financial summary')->assertSee('Money')
-        ->assertDontSee('Advanced')->assertDontSee('Emergency Fund')->assertDontSee('Reason for audited adjustment')->assertDontSee('Edit lot');
-    $this->co->as('super')->get(route('sourcing.lots.show', $lot))->assertOk()->assertSee('Edit lot');
+        ->assertSee('Processing')->assertSee('In order')->assertSee('Completed')->assertSee('Financial summary')->assertSee('Edit lot')->assertSee('Activity')
+        ->assertDontSee('Advanced')->assertDontSee('Emergency Fund')->assertDontSee('Reason for audited adjustment')->assertDontSee('Record a payment')
+        ->assertDontSee('Close lot')->assertDontSee('Bill client')->assertDontSee('Advance settlement')->assertDontSee('name="supplier_paid"', false);
 });
 
 it('does not create a second lot when the same form is submitted twice', function () {
@@ -187,14 +188,11 @@ it('requires a whole positive quantity and every field of the form', function (a
     'invalid budget' => [['client_budget' => '-5'], 'client_budget', 'Enter the client lot budget as an amount, e.g. 20000.'],
 ]);
 
-it('lets only a user with the override right buy at a cost different from the catalog price', function () {
+it('takes the unit base cost the admin enters, whatever the catalog price, with no override approval', function () {
     $this->co->post('clients', 'sourcing.client-lots.store', ['supplier_id' => $this->supplier->id, 'supplier_product_id' => $this->product->id, 'project_id' => $this->project->id,
-        'quantity' => '10', 'unit_cost' => '140', 'client_budget' => '2000'])->assertSessionHas('error', 'You are not allowed to override the supplier price for a lot.');
-    expect(SourcingLot::count())->toBe(0);
+        'quantity' => '10', 'unit_cost' => '140', 'client_budget' => '2000', 'submission_key' => (string) Str::uuid()])->assertSessionMissing('error');
 
-    $lot = clCreate(['unit_cost' => '140']); // Finance holds sourcing.override
-
-    expect($lot->lines()->sole()->unit_price)->toBe(14_000);
+    expect(SourcingLot::sole()->lines()->sole()->unit_price)->toBe(14_000)->and(SourcingLot::sole()->stage())->toBe('processing');
 });
 
 // ---------------------------------------------------------------- In order
@@ -239,8 +237,8 @@ it('shows a lot in order as awaiting product receiving, with the completion popu
     $lot = clOrder(clCreate());
 
     $this->co->as('finance')->get(route('sourcing.lots.show', $lot))->assertOk()
-        ->assertSee('Awaiting product receiving')->assertSee('Mark Completed')->assertSee('Supplier has been paid the remaining')->assertSee('15,800.00')->assertSee('4,200.00')
-        ->assertSee('<input type="checkbox" name="supplier_paid" value="1" >', false)->assertSee('<input type="checkbox" name="delivery_paid" value="1" >', false) // unticked by default
+        ->assertSee('Awaiting product receiving')->assertSee('Mark Completed')->assertSee('Received on')->assertSee('Delivery note / GRN no.')->assertSee('15,800.00')->assertSee('4,200.00')
+        ->assertDontSee('name="supplier_paid"', false)->assertDontSee('name="delivery_paid"', false)->assertDontSee('Supplier has been paid') // no payment questions
         ->assertDontSee('Mark In order')->assertDontSee('Bill client');
 });
 
@@ -262,13 +260,13 @@ it('refuses the workflow actions to a user without the sourcing management right
 
 // ---------------------------------------------------------------- Completion
 
-it('refuses to complete before the supplier is paid in full', function () {
+it('completes a lot whose supplier is not paid at all: payment never blocks the lot and none is recorded', function () {
     $lot = clOrder(clCreate());
-    clPaySupplier($lot, '10000');
 
-    clComplete($lot)->assertSessionHas('error', 'Pay the supplier in full before receiving the goods (5,000.00 still to pay).');
+    clComplete($lot)->assertSessionMissing('error')->assertSessionHas('status', 'Lot completed: goods received into stock.');
 
-    expect($lot->refresh()->stage())->toBe('in_order')->and(StockMovement::count())->toBe(0);
+    expect($lot->refresh()->stage())->toBe('completed')->and(Inventory::onHand($lot->lines()->sole()))->toBe('100.00')
+        ->and(SupplierPayment::count())->toBe(0)->and(Expense::count())->toBe(0)->and(AdvanceSettlement::count())->toBe(0)->and(Invoice::count())->toBe(0);
 });
 
 it('completes the lot: receives the stock and realises a profit of 4,200 without invoicing anything', function () {
@@ -321,21 +319,20 @@ it('records a loss as a negative result, never as zero', function () {
     $this->co->as('finance')->get(route('sourcing.lots.show', $lot))->assertOk()->assertSee('Final loss')->assertSee('-800.00');
 });
 
-it('settles the books on completion when everything is paid', function () {
+it('never runs a settlement on completion, even when everything was paid separately', function () {
     $lot = clOrder(clCreate());
     clPaySupplier($lot);
     $this->co->post('finance', 'sourcing.costs.pay', ['paid_on' => '2026-11-06'], $lot->costs()->sole())->assertSessionMissing('error');
 
-    clComplete($lot)->assertSessionHas('status', fn ($s) => str_contains($s, 'financially settled'));
+    clComplete($lot)->assertSessionHas('status', 'Lot completed: goods received into stock.');
 
-    expect($lot->refresh()->status)->toBe('settled')->and($lot->stage())->toBe('completed');
+    expect($lot->refresh()->status)->toBe('completed')->and($lot->stage())->toBe('completed')->and($lot->settled_at)->toBeNull();
 });
 
-it('completes but leaves settlement open while the delivery charge is unpaid, and says why', function () {
+it('completes with the delivery charge unpaid and shows no settlement warning', function () {
     $lot = clOrder(clCreate());
-    clPaySupplier($lot);
 
-    clComplete($lot)->assertSessionHas('warning', fn ($w) => str_contains($w, 'Financial settlement waits'));
+    clComplete($lot)->assertSessionMissing('warning')->assertSessionMissing('error');
 
     expect($lot->refresh()->status)->toBe('completed');
 });
@@ -350,38 +347,32 @@ it('does not settle for a user who may complete lots but not settle them', funct
     expect($lot->refresh()->status)->toBe('completed');
 });
 
-it('records the supplier and delivery payments the admin confirms in the completion step, once, and closes the books', function () {
+it('records no supplier or delivery payment on completion, even when payment fields are sent', function () {
     $lot = clOrder(clCreate());
 
     clComplete($lot, ['supplier_paid' => '1', 'delivery_paid' => '1', 'paid_on' => '2026-11-08', 'payment_reference' => 'BKASH-9'])->assertSessionMissing('error');
 
-    $payment = SupplierPayment::sole();
-    expect($payment->amount)->toBe(1_500_000)->and($payment->reference)->toBe('BKASH-9')->and($payment->paid_on->toDateString())->toBe('2026-11-08')
-        ->and($lot->costs()->sole()->isPaid())->toBeTrue()->and(Expense::count())->toBe(2)
-        ->and($lot->refresh()->status)->toBe('settled');
-
-    clComplete($lot, ['supplier_paid' => '1', 'delivery_paid' => '1', 'reference' => 'GRN-101'])->assertSessionHas('error');
-    expect(SupplierPayment::count())->toBe(1)->and(Expense::count())->toBe(2);
+    expect(SupplierPayment::count())->toBe(0)->and(Expense::count())->toBe(0)->and($lot->costs()->sole()->expense_id)->toBeNull()
+        ->and($lot->refresh()->status)->toBe('completed');
 });
 
-it('treats a recorded supplier payment as paid even before its internal verification', function () {
+it('leaves a supplier payment entered separately untouched and does not depend on its verification', function () {
     $lot = clOrder(clCreate());
     clPaySupplier($lot);
 
-    expect(SupplierPayment::sole()->expense->status)->toBe('pending')->and(LotFinancials::for($lot)['supplier_outstanding'])->toBe(0);
-    $this->co->as('finance')->get(route('sourcing.lots.show', $lot))->assertOk()
-        ->assertDontSee('Supplier has been paid the remaining')->assertDontSee('awaiting verification')
-        ->assertSeeInOrder(['<td>Supplier</td>', '15,000.00', '15,000.00', '0.00', 'badge-paid', 'Paid'], false);
+    expect(SupplierPayment::sole()->expense->status)->toBe('pending');
     clComplete($lot)->assertSessionMissing('error');
+    expect(SupplierPayment::count())->toBe(1)->and(SupplierPayment::sole()->amount)->toBe(1_500_000)->and(SupplierPayment::sole()->expense->status)->toBe('pending')
+        ->and($lot->refresh()->stage())->toBe('completed');
 });
 
-it('pays only the remaining supplier balance when part was paid earlier', function () {
+it('adds no payment on completion when part of the supplier price was paid earlier', function () {
     $lot = clOrder(clCreate());
     clPaySupplier($lot, '10000');
 
     clComplete($lot, ['supplier_paid' => '1'])->assertSessionMissing('error');
 
-    expect(SupplierPayment::orderBy('id')->pluck('amount')->all())->toBe([1_000_000, 500_000])->and(LotFinancials::for($lot)['supplier_outstanding'])->toBe(0);
+    expect(SupplierPayment::orderBy('id')->pluck('amount')->all())->toBe([1_000_000])->and(LotFinancials::for($lot)['supplier_outstanding'])->toBe(500_000);
 });
 
 it('puts a completed lot\'s profit into the project\'s profitability without any invoice', function () {
@@ -496,7 +487,7 @@ it('refuses a second completion that arrives with a stale copy of the lot', func
 
     expect(fn () => ClientLot::complete($stale, ['arrived_on' => '2026-11-09', 'reference' => 'GRN-B', 'delivery_paid' => true], $finance))
         ->toThrow(RuntimeException::class, 'This lot is already completed; nothing was received, billed or posted again.');
-    expect(SourcingArrivalEvent::count())->toBe(1)->and(Expense::where('category', 'Sourcing: Delivery')->count())->toBe(1)->and(Inventory::onHand($lot->lines()->sole()))->toBe('100.00');
+    expect(SourcingArrivalEvent::count())->toBe(1)->and(Expense::where('category', 'Sourcing: Delivery')->count())->toBe(0)->and(Inventory::onHand($lot->lines()->sole()))->toBe('100.00');
 });
 
 it('refuses invalid stage jumps', function () {
@@ -507,20 +498,16 @@ it('refuses invalid stage jumps', function () {
     expect($lot->refresh()->stage())->toBe('processing')->and(StockMovement::count())->toBe(0);
 });
 
-it('under the accrual basis treats the supplier payment as an advance and proposes its settlement for the Board on completion', function () {
+it('under the accrual basis completes without proposing any advance settlement or Board step', function () {
     config(['finance.sourcing_basis' => 'accrual', 'finance.sourcing_accrual_from' => '2026-11-01']);
     $lot = clOrder(clCreate(['purchase_order' => 'PO-77']), '0');
-    clPaySupplier($lot);
+    clPaySupplier($lot); // a payment the admins entered separately (an advance under this basis) is left as it is
     $this->co->verifyAllExpenses();
     $journals = JournalEntry::count();
 
-    clComplete($lot)->assertSessionHas('warning', fn ($w) => str_contains($w, 'awaits Board verification'));
+    clComplete($lot)->assertSessionMissing('warning')->assertSessionMissing('error');
 
-    $settlement = AdvanceSettlement::sole();
-    expect(Expense::sole()->classification)->toBe('supplier_advance')
-        ->and($settlement->status)->toBe('pending')->and($settlement->amount)->toBe(1_500_000)
-        ->and($lot->refresh()->status)->toBe('completed')
-        ->and(JournalEntry::count())->toBe($journals); // nothing is posted until the Board verifies the settlement
+    expect(AdvanceSettlement::count())->toBe(0)->and($lot->refresh()->status)->toBe('completed')->and(JournalEntry::count())->toBe($journals);
 });
 
 // ---------------------------------------------------------------- Existing lots

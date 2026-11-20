@@ -13,20 +13,16 @@ use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
 /**
- * The simple client-lot workflow: one supplier product, a quantity, a unit base cost and a client budget agreed for the whole lot, moved
- * through three operational stages — Processing → In order → Completed.
+ * The simple client lot, controlled by the admin: one supplier product, a quantity, a unit base cost and a client budget agreed for the whole
+ * lot, moved through exactly three stages — Processing → In order → Completed. Changes afterwards go through ClientLotCorrection ("Edit lot").
  *
- * It is a thin layer over the existing sourcing engine, never a parallel one. A lot is an ordinary SourcingLot with one line; the delivery
- * charge is an ordinary lot cost; receiving goes through Receiving (stock movement, valuation, duplicate-reference guard); billing goes through
- * the normal allocation and invoice code; settlement uses the normal settlement rules. Nothing here writes a journal entry:
+ * It is a thin layer over the existing sourcing records, never a parallel engine. A lot is an ordinary SourcingLot with one line; the delivery
+ * charge is an ordinary lot cost; receiving goes through Receiving (stock movement, duplicate-reference guard). The workflow is independent of
+ * payments, advances, approvals, invoices and settlement: no step requires, records or proposes any of them, and nothing here writes a journal
+ * entry, an expense, an invoice or a cash movement. Payments are entered separately by the admins in the existing financial screens.
  *
- *  - Revenue reaches the books the way the company already books it — when the client actually pays (cash basis), or as a Board-approved
- *    revenue event (accrual revenue). Billing the client creates a receivable (an invoice), never cash or income by itself.
- *  - Cost reaches the books through the supplier payment and the delivery payment (verified expenses; under the accrual sourcing basis an
- *    advance and capitalised inventory, released by the Board's cost recognition). Completing a lot adds no cost of its own.
- *  - Profit is the calculated difference (LotFinancials), shown and reported, never posted as income.
- *
- * So completing a lot can never count revenue or cost a second time.
+ *   Total base cost = quantity × unit base cost; total lot cost = base cost + delivery charge; profit or loss = client budget − total lot cost.
+ * Profit is calculated (LotFinancials), shown and reported, never posted as income.
  */
 class ClientLot
 {
@@ -43,9 +39,8 @@ class ClientLot
     }
 
     /**
-     * Create a lot in the Processing stage. The budget is the lot's agreed revenue, not money received: no payment, invoice or journal is made.
-     * Pricing is approved automatically only under the Board's standing policy for ordinary lots (cost within its limit and the budget not
-     * below cost); otherwise the lot waits for the normal pricing approval by someone other than its creator.
+     * Create a lot in the Processing stage, with the unit base cost the admin entered. The budget is the lot's agreed revenue, not money
+     * received: no payment, invoice or journal is made, and nothing waits for an approval.
      *
      * @param  array{supplier_id: int, supplier_product_id: int, project_id: int, quantity: string, unit_cost: int, client_budget: int, purchase_order?: ?string, notes?: ?string}  $data
      */
@@ -80,8 +75,9 @@ class ClientLot
                 'purchase_order' => $data['purchase_order'] ?? null, 'project_id' => $project->id, 'notes' => $data['notes'] ?? null,
             ], $user);
             $lot->update(['client_budget' => $data['client_budget']]);
-            // The supplier price is snapshotted on the line; a cost different from the catalog price needs the override permission (addLine checks).
-            $line = Sourcing::addLine($lot, ['supplier_id' => $supplier->id, 'supplier_product_id' => $product->id, 'quantity' => $quantity, 'unit_price' => $data['unit_cost']], $user);
+            // The admin's unit base cost is the lot's cost as entered (the catalog price is only suggested on the form).
+            $lot->lines()->create(['supplier_id' => $supplier->id, 'supplier_product_id' => $product->id, 'description' => $product->label(), 'unit' => $product->unit ?: 'pcs',
+                'quantity' => $quantity, 'usable_quantity' => $quantity, 'unit_price' => $data['unit_cost'], 'reference_price' => (int) $product->reference_price, 'position' => 1]);
 
             $f = self::figures($quantity, $data['unit_cost'], $data['client_budget']);
             self::approveBudget($lot, $user);
@@ -92,9 +88,9 @@ class ClientLot
     }
 
     /**
-     * The client budget is a price the admin has already agreed with the client before entering it, so it is the lot's approved price from the
-     * start (a budget below cost is allowed: it is an expected loss, shown as such). The admin who entered it is recorded as approver, and the
-     * frozen cost/revenue snapshot is taken exactly as a normal pricing approval takes it. Lots priced per line keep their own approval.
+     * The client budget is a price the admin already agreed with the client, so it is the lot's price from the start — no approval step (a budget
+     * below cost is allowed: it is an expected loss, shown as such). The status stays in the Processing stage; the cost/revenue snapshot is kept
+     * so the existing reports read the lot like any other.
      */
     private static function approveBudget(SourcingLot $lot, User $user): void
     {
@@ -139,41 +135,27 @@ class ClientLot
     }
 
     /**
-     * What stops the lot from being completed now (empty = it can be). Company policy: the supplier is paid in full before goods are received.
+     * What stops the lot from being completed now (empty = it can be). Only the stage matters: payments, advances and approvals never do.
      *
      * @return list<string>
      */
     public static function completionBlockers(SourcingLot $lot): array
     {
-        $blockers = [];
         if ($lot->status !== 'in_progress') {
-            $blockers[] = in_array($lot->status, ['completed', 'settled'], true) ? 'This lot is already completed.' : 'Mark the lot In order first.';
-
-            return $blockers;
-        }
-        $f = LotFinancials::for($lot);
-        if ($f['supplier_outstanding'] > 0) {
-            $blockers[] = 'Pay the supplier in full before receiving the goods ('.Money::format($f['supplier_outstanding']).' still to pay).';
-        }
-        if (! $lot->project_id) {
-            $blockers[] = 'Choose the client project of this lot.';
+            return [in_array($lot->status, ['completed', 'settled'], true) ? 'This lot is already completed.' : 'Mark the lot In order first.'];
         }
 
-        return $blockers;
+        return $lot->project_id ? [] : ['Choose the client project of this lot.'];
     }
 
     /**
-     * In order → Completed, in one transaction:
-     *  1. the money the admin confirms has already moved is recorded through the normal payment code — the rest of the supplier price
-     *     (company policy: the supplier is paid in full before goods are received) and the unpaid delivery charge — each once;
-     *  2. every unit still expected is received into stock (Receiving: stock movement, valuation, a delivery reference that cannot be used twice);
-     *  3. the lot is completed. Nothing is invoiced: client lots are independent of client billing. The budget entered by the admin is the
-     *     lot's revenue, and the project reports take the completed lot's profit from it directly (ProjectSourcingReport, ProjectEconomics);
-     *  4. the lot is financially settled when nothing is left to pay.
+     * In order → Completed, in one transaction: every unit still expected is received into stock through the existing receiving (stock movement,
+     * a delivery reference that cannot be used twice), and the lot is completed. Nothing else happens: no payment, advance, settlement, invoice,
+     * expense or journal entry is created, and none is required. The final profit is the client budget minus the total lot cost.
      * Any failure rolls everything back. Idempotent: the lot row is locked and its status re-read first, so a second or simultaneous request
      * finds it completed and changes nothing.
      *
-     * @param  array{arrived_on: string, reference: string, location_id?: ?int, notes?: ?string, supplier_paid?: bool, delivery_paid?: bool, paid_on?: ?string, payment_reference?: ?string}  $data
+     * @param  array{arrived_on: string, reference: string, location_id?: ?int, notes?: ?string}  $data
      * @return array{lot: SourcingLot, settled: bool, notes: list<string>}
      */
     public static function complete(SourcingLot $lot, array $data, User $user): array
@@ -184,10 +166,6 @@ class ClientLot
             if (in_array($lot->status, ['completed', 'settled'], true)) {
                 throw new RuntimeException('This lot is already completed; nothing was received, billed or posted again.');
             }
-            if ($lot->status !== 'in_progress') {
-                throw new RuntimeException('Mark the lot In order first.');
-            }
-            self::recordConfirmedPayments($lot, $data, $user);
             if ($blockers = self::completionBlockers($lot)) {
                 throw new RuntimeException($blockers[0]);
             }
@@ -205,72 +183,8 @@ class ClientLot
             $f = LotFinancials::for($lot->refresh());
             Audit::log('sourcing.client_lot.completed', 'lot '.$lot->number, 'received; total cost '.$f['landed'].' budget '.$f['revenue'].' '.($f['profit'] < 0 ? 'loss '.(-$f['profit']) : 'profit '.$f['profit']));
 
-            $notes = self::followUps($lot, $user);
-            $lot->refresh();
-
-            return ['lot' => $lot, 'settled' => $lot->status === 'settled', 'notes' => $notes];
+            return ['lot' => $lot->refresh(), 'settled' => false, 'notes' => []];
         });
-    }
-
-    /**
-     * Record, through the normal payment code, the payments the admin confirms have already been made: the rest of the supplier price and the
-     * unpaid delivery / lot costs. Each is recorded once — a supplier payment under a key tied to this lot, a cost only while it has no live
-     * payment — so retrying never pays twice.
-     *
-     * @param  array{supplier_paid?: bool, delivery_paid?: bool, paid_on?: ?string, payment_reference?: ?string}  $data
-     */
-    private static function recordConfirmedPayments(SourcingLot $lot, array $data, User $user): void
-    {
-        $paidOn = ($data['paid_on'] ?? null) ?: today()->toDateString();
-        $reference = trim((string) ($data['payment_reference'] ?? ''));
-        if ($data['supplier_paid'] ?? false) {
-            $outstanding = LotFinancials::for($lot)['supplier_outstanding'];
-            if ($outstanding > 0) {
-                SourcingPayments::recordSupplierPayment($lot, ['supplier_id' => (int) $lot->lines()->value('supplier_id'), 'amount' => $outstanding, 'paid_on' => $paidOn,
-                    'reference' => $reference ?: null, 'evidence_reference' => $reference ?: null, 'purchase_order' => $lot->purchase_order ?: $lot->number,
-                    'notes' => 'Paid in full before receiving (confirmed when the lot was completed)', 'idempotency_key' => 'client-lot-'.$lot->id.'-supplier-'.$outstanding], $user);
-            }
-        }
-        if ($data['delivery_paid'] ?? false) {
-            foreach ($lot->costs()->where('kind', 'actual')->with('expense')->get() as $cost) {
-                if ($cost->remainingUnpaid() > 0 && ($cost->expense_id === null || $cost->expense?->status === 'rejected')) {
-                    SourcingPayments::payCost($cost, $paidOn, $user);
-                }
-            }
-        }
-    }
-
-    /**
-     * The next governed steps after completion. Each runs in its own savepoint: one that cannot happen yet is reported, not forced, and never
-     * undoes the completion. Nothing here is approved on the Board's behalf.
-     *
-     * @return list<string>
-     */
-    private static function followUps(SourcingLot $lot, User $user): array
-    {
-        $notes = [];
-        foreach (AdvanceSettlementService::advancePayments($lot)->pluck('supplier_id')->unique() as $supplierId) {
-            if (AdvanceSettlementService::unsettled($lot, (int) $supplierId) <= 0 || AdvanceSettlementService::pendingSettlements($lot, (int) $supplierId) > 0) {
-                continue;
-            }
-            try {
-                if (AdvanceSettlementService::propose($lot, (int) $supplierId, $user)->isNotEmpty()) {
-                    $notes[] = 'The supplier advance settlement was proposed and awaits Board verification.';
-                }
-            } catch (RuntimeException $e) {
-                $notes[] = 'Supplier advance not settled yet: '.$e->getMessage();
-            }
-        }
-        if (! $user->can('sourcing.settle')) {
-            return $notes;
-        }
-        try {
-            Sourcing::settle($lot, $user);
-        } catch (RuntimeException $e) {
-            $notes[] = 'Financial settlement waits: '.$e->getMessage();
-        }
-
-        return $notes;
     }
 
     /**

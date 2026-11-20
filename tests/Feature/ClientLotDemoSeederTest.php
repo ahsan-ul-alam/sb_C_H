@@ -24,7 +24,7 @@ it('seeds a consistent demo company with client lots in every stage', function (
 
     $lots = SourcingLot::orderBy('id')->get();
     $profit = fn (SourcingLot $lot) => LotFinancials::for($lot)['profit'];
-    expect($lots->map(fn ($l) => $l->status)->all())->toBe(['approved', 'approved', 'in_progress', 'in_progress', 'settled', 'completed', 'settled'])
+    expect($lots->map(fn ($l) => $l->status)->all())->toBe(['approved', 'approved', 'in_progress', 'in_progress', 'completed', 'completed', 'completed']) // completion never settles
         ->and($lots->map($profit)->all())->toBe([500_000, 800_000, 780_000, -260_000, 420_000, 850_000, -140_000])
         // Completed lots are received into stock exactly once and nothing is invoiced.
         ->and($lots->filter(fn ($l) => $l->stage() === 'completed')->every(fn ($l) => Inventory::onHand($l->lines()->sole()) === bcadd((string) $l->lines()->sole()->quantity, '0', 2)))->toBeTrue()
