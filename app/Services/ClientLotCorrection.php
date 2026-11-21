@@ -41,7 +41,10 @@ class ClientLotCorrection
     public const STAGE_STATUS = ['processing' => 'approved', 'in_order' => 'in_progress', 'completed' => 'completed'];
 
     /**
-     * @param  array{supplier_id: int, supplier_product_id: int, project_id: int, quantity: string, unit_cost: int, client_budget: int, delivery_charge: int, stage: string, arrived_on?: ?string, reference?: ?string, location_id?: ?int, notes?: ?string, reason?: ?string}  $data
+     * The products are given per line as lines[line id] => {supplier_product_id, quantity, unit_cost}; a one-product lot may instead give
+     * supplier_product_id / quantity / unit_cost for its line. A line left out is not changed. The supplier applies to every line.
+     *
+     * @param  array{supplier_id: int, project_id: int, client_budget: int, delivery_charge: int, stage: string, lines?: array<int, array{supplier_product_id: int, quantity: string, unit_cost: int}>, supplier_product_id?: int, quantity?: string, unit_cost?: int, arrived_on?: ?string, reference?: ?string, location_id?: ?int, notes?: ?string, reason?: ?string}  $data
      * @return list<string> what was changed, in plain words
      */
     public static function apply(SourcingLot $lot, array $data, User $user): array
@@ -49,10 +52,15 @@ class ClientLotCorrection
         if (! $user->can('sourcing.manage')) {
             throw new RuntimeException('You are not allowed to edit lots.');
         }
-        if (! preg_match('/^[1-9]\d{0,9}$/', $data['quantity'])) {
-            throw new RuntimeException('Quantity must be a whole number greater than zero.');
+        foreach ($data['lines'] ?? [['quantity' => $data['quantity'] ?? '', 'unit_cost' => $data['unit_cost'] ?? 0]] as $edit) {
+            if (! preg_match('/^[1-9]\d{0,9}$/', (string) $edit['quantity'])) {
+                throw new RuntimeException('Quantity must be a whole number greater than zero.');
+            }
+            if ((int) $edit['unit_cost'] <= 0) {
+                throw new RuntimeException('The unit base cost and the client budget must be above zero.');
+            }
         }
-        if ($data['unit_cost'] <= 0 || $data['client_budget'] <= 0) {
+        if ($data['client_budget'] <= 0) {
             throw new RuntimeException('The unit base cost and the client budget must be above zero.');
         }
         if ($data['delivery_charge'] < 0) {
@@ -67,22 +75,41 @@ class ClientLotCorrection
             if (! $lot->hasClientBudget()) {
                 throw new RuntimeException('Only a lot made on the simple client-lot form can be edited here; manage this lot from the detailed view.');
             }
-            $line = $lot->lines()->firstOrFail();
+            $lines = $lot->lines()->orderBy('position')->orderBy('id')->get();
+            if ($lines->isEmpty()) {
+                throw new RuntimeException('This lot has no products.');
+            }
+            $edits = $data['lines'] ?? [$lines->first()->id => ['supplier_product_id' => $data['supplier_product_id'] ?? 0, 'quantity' => $data['quantity'] ?? '', 'unit_cost' => $data['unit_cost'] ?? 0]];
+            if (array_diff(array_keys($edits), $lines->pluck('id')->all()) !== []) {
+                throw new RuntimeException('A product row does not belong to this lot; reload the page and try again.');
+            }
+            $productIds = $lines->mapWithKeys(fn ($l) => [$l->id => (int) ($edits[$l->id]['supplier_product_id'] ?? $l->supplier_product_id)])->all();
+            if (count(array_unique($productIds)) !== count($productIds)) {
+                throw new RuntimeException('Each product can be on the lot only once; change its quantity instead.');
+            }
             $before = LotFinancials::for($lot);
             $changes = [];
+            $several = $lines->count() > 1;
 
             self::project($lot, (int) $data['project_id'], $changes);
-            self::product($line, (int) $data['supplier_id'], (int) $data['supplier_product_id'], $changes);
-            self::quantityAndCost($line, $data['quantity'], $data['unit_cost'], $user, $changes);
-            if ($line->refresh()->received_quantity !== null) {
-                self::receiving($line, $data, $user, $changes);
+            foreach ($lines as $line) {
+                $edit = $edits[$line->id] ?? ['supplier_product_id' => $line->supplier_product_id, 'quantity' => self::qty((string) $line->quantity), 'unit_cost' => (int) $line->unit_price];
+                $label = $line->description;
+                $lineChanges = [];
+                self::product($line, (int) $data['supplier_id'], (int) $edit['supplier_product_id'], $lineChanges);
+                self::quantityAndCost($line, (string) $edit['quantity'], (int) $edit['unit_cost'], $user, $lineChanges);
+                if ($line->refresh()->received_quantity !== null) {
+                    self::receiving($line, $data, $user, $lineChanges);
+                }
+                // On a lot with several products, every change names the product it was made to.
+                $changes = [...$changes, ...($several ? array_map(fn ($c) => $label.': '.$c, $lineChanges) : $lineChanges)];
             }
             if ((int) $lot->client_budget !== $data['client_budget']) {
                 $changes[] = 'client budget '.Money::format((int) $lot->client_budget).' → '.Money::format($data['client_budget']);
                 $lot->update(['client_budget' => $data['client_budget']]);
             }
             self::delivery($lot, $data['delivery_charge'], $user, $changes);
-            self::stage($lot, $line->refresh(), $data['stage'], $user, $changes);
+            self::stage($lot, ! $lot->lines()->whereNull('received_quantity')->exists(), $data['stage'], $user, $changes);
             $notes = trim((string) ($data['notes'] ?? ''));
             if ($notes !== trim((string) $lot->notes)) {
                 $changes[] = 'notes updated';
@@ -92,9 +119,8 @@ class ClientLotCorrection
             if ($changes === []) {
                 throw new RuntimeException('Nothing was changed.');
             }
-            // The indicative unit price and the lot's snapshot follow the corrected figures, so every report reads the same numbers.
-            $unit = intdiv((int) $lot->client_budget, max(1, (int) $line->quantity));
-            $line->update(['sell_price' => $unit, 'approved_price' => $unit]);
+            // The indicative unit prices and the lot's snapshot follow the corrected figures, so every report reads the same numbers.
+            ClientLot::syncIndicativePrices($lot);
             $after = LotFinancials::for($lot->refresh());
             $lot->update(['approved_cost' => $after['landed'], 'approved_revenue' => (int) $lot->client_budget]);
             InventoryValuation::syncLot($lot->id);
@@ -258,12 +284,12 @@ class ClientLotCorrection
      *
      * @param  list<string>  $changes
      */
-    private static function stage(SourcingLot $lot, SourcingLotLine $line, string $stage, User $user, array &$changes): void
+    private static function stage(SourcingLot $lot, bool $received, string $stage, User $user, array &$changes): void
     {
         if ($stage === $lot->stage()) {
             return;
         }
-        if ($stage === 'completed' && $line->received_quantity === null) {
+        if ($stage === 'completed' && ! $received) {
             throw new RuntimeException('Use Mark Completed to receive the goods; the lot becomes Completed then.');
         }
         $status = self::STAGE_STATUS[$stage];

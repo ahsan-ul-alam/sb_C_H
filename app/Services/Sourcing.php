@@ -452,7 +452,7 @@ class Sourcing
         return DB::transaction(function () use ($lot, $projectId, $user) {
             $invoiceId = null;
             $invoice = null;
-            if ($lot->client_budget !== null && $lot->lines()->count() === 1) {
+            if ($lot->client_budget !== null && $lot->lines()->exists()) {
                 $invoice = self::billBudget($lot, $projectId, $user);
             }
             foreach ($invoice ? [] : $lot->lines()->get() as $line) {
@@ -481,27 +481,30 @@ class Sourcing
      */
     private static function billBudget(SourcingLot $lot, int $projectId, User $user): ?Invoice
     {
-        $line = $lot->lines()->firstOrFail();
-        $sales = $lot->allocations()->where('kind', 'sale')->where('sourcing_lot_line_id', $line->id)->get();
-        $allocatedQty = (string) $sales->reduce(fn (string $carry, SourcingAllocation $a) => bcadd($carry, (string) $a->quantity, 2), '0.00');
-        $left = bcsub((string) $line->usable_quantity, $allocatedQty, 2);
-        if (bccomp($left, '0', 2) <= 0) {
-            return null;
-        }
-        $amount = LotFinancials::budgetValue((int) $lot->client_budget, (string) $line->quantity, $allocatedQty, (int) $sales->sum(fn ($a) => $a->amount()), $left);
-        if (bccomp($left, bcadd($left, '0', 0), 2) !== 0) {
-            throw new RuntimeException('A part unit is left to bill on this lot; bill it from the detailed Client billing view.');
-        }
-        $units = (int) $left;
-        $base = intdiv($amount, $units);
-        $extra = $amount - $base * $units; // this many units carry one more paisa
+        $lines = $lot->lines()->orderBy('position')->orderBy('id')->get();
+        $shares = LotFinancials::budgetShares($lot->setRelation('lines', $lines));
         $invoice = null;
-        foreach ([[$units - $extra, $base], [$extra, $base + 1]] as [$quantity, $price]) {
-            if ($quantity <= 0) {
+        foreach ($lines as $line) {
+            $sales = $lot->allocations()->where('kind', 'sale')->where('sourcing_lot_line_id', $line->id)->get();
+            $allocatedQty = (string) $sales->reduce(fn (string $carry, SourcingAllocation $a) => bcadd($carry, (string) $a->quantity, 2), '0.00');
+            $left = bcsub((string) $line->usable_quantity, $allocatedQty, 2);
+            if (bccomp($left, '0', 2) <= 0) {
                 continue;
             }
-            $allocation = self::allocate($lot, ['project_id' => $projectId, 'line_id' => $line->id, 'kind' => 'sale', 'quantity' => (string) $quantity, 'unit_price' => $price], $user, budgetPrice: true);
-            $invoice = self::bill($allocation, null, $invoice?->id, $user);
+            $amount = LotFinancials::budgetValue($shares[$line->id], (string) $line->quantity, $allocatedQty, (int) $sales->sum(fn ($a) => $a->amount()), $left);
+            if (bccomp($left, bcadd($left, '0', 0), 2) !== 0) {
+                throw new RuntimeException('A part unit is left to bill on this lot; bill it from the detailed Client billing view.');
+            }
+            $units = (int) $left;
+            $base = intdiv($amount, $units);
+            $extra = $amount - $base * $units; // this many units carry one more paisa
+            foreach ([[$units - $extra, $base], [$extra, $base + 1]] as [$quantity, $price]) {
+                if ($quantity <= 0) {
+                    continue;
+                }
+                $allocation = self::allocate($lot, ['project_id' => $projectId, 'line_id' => $line->id, 'kind' => 'sale', 'quantity' => (string) $quantity, 'unit_price' => $price], $user, budgetPrice: true);
+                $invoice = self::bill($allocation, null, $invoice?->id, $user);
+            }
         }
 
         return $invoice;

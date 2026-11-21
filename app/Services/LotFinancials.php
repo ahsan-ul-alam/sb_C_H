@@ -35,8 +35,9 @@ class LotFinancials
             : $purchases;
         $shared = Costing::allocateShared($sharedTotal, $weights);
 
-        // A client-lot budget is agreed for the whole lot, so its single line earns the budget exactly (not quantity × a rounded unit price).
-        $budgetLot = $lot->client_budget !== null && $lot->lines->count() === 1;
+        // A client-lot budget is agreed for the whole lot, so its lines earn the budget exactly (not quantity × a rounded unit price).
+        $budgetShares = self::budgetShares($lot);
+        $budgetLot = $budgetShares !== [];
 
         $lines = [];
         foreach ($lot->lines as $line) {
@@ -55,7 +56,7 @@ class LotFinancials
             }
             $unallocatedQty = bccomp($usable, $allocatedQty, 2) > 0 ? bcsub($usable, $allocatedQty, 2) : '0.00';
             $unallocatedValue = $budgetLot
-                ? self::budgetValue((int) $lot->client_budget, (string) $line->quantity, $allocatedQty, $allocatedValue, $unallocatedQty)
+                ? self::budgetValue($budgetShares[$line->id], (string) $line->quantity, $allocatedQty, $allocatedValue, $unallocatedQty)
                 : ($price !== null ? Money::multiply($unallocatedQty, $price) : 0);
             $damagedQty = bcsub((string) $line->quantity, $usable, 2);
             $revenue = $allocatedValue + $unallocatedValue;
@@ -151,6 +152,21 @@ class LotFinancials
             'received' => $received,
             'receivable' => $billed - $received,
         ];
+    }
+
+    /**
+     * A client-lot budget split across the lot's lines in proportion to each line's base cost (largest remainder, so the shares always add up
+     * to the budget to the paisa). A one-product lot's line carries the whole budget. Empty for a lot without a client budget or without lines.
+     *
+     * @return array<int, int> line id => budget share in paisa
+     */
+    public static function budgetShares(SourcingLot $lot): array
+    {
+        if ($lot->client_budget === null || $lot->lines->isEmpty()) {
+            return [];
+        }
+
+        return Costing::allocateShared((int) $lot->client_budget, $lot->lines->mapWithKeys(fn ($l) => [$l->id => $l->purchaseCost()])->all());
     }
 
     /**

@@ -2,7 +2,10 @@
 @php
     // The simple client-lot page: progress, the one action for the current stage, the lot, its numbers, an always-available Edit and the
     // activity history. Every figure comes from LotFinancials ($f), the same numbers the reports use.
-    $line = $lot->lines->first();
+    $lines = $lot->lines->sortBy([['position', 'asc'], ['id', 'asc']])->values();
+    $line = $lines->first();
+    $several = $lines->count() > 1;
+    $fmtQty = fn ($q) => rtrim(rtrim((string) $q, '0'), '.');
     $stage = $lot->stage();
     $replaced = $lot->costs->pluck('replaces_id')->filter()->all();
     $delivery = (int) $lot->costs->reject(fn ($c) => in_array($c->id, $replaced, true))->where('kind', 'actual')->where('category', 'Delivery')->sum('amount');
@@ -61,11 +64,15 @@
         <div class="panel-head"><h2>Lot information</h2></div>
         <div class="panel-body"><table class="lot-figures">
             <tr><td>Supplier</td><td>{{ $line?->supplier?->name ?? '—' }}</td></tr>
-            <tr><td>Product</td><td>{{ $line?->description ?? '—' }}</td></tr>
+            @if ($several)
+                <tr><td>Products</td><td>{{ $lines->count() }} products <span class="muted">· listed below</span></td></tr>
+            @else
+                <tr><td>Product</td><td>{{ $line?->description ?? '—' }}</td></tr>
+            @endif
             <tr><td>Project</td><td>{{ $lot->project?->name ?? '—' }}@if ($lot->project?->client) <span class="muted">· {{ $lot->project->client->name }}</span>@endif</td></tr>
-            <tr><td>Quantity</td><td>{{ $qty }} {{ $line?->unit }}</td></tr>
+            @unless ($several)<tr><td>Quantity</td><td>{{ $qty }} {{ $line?->unit }}</td></tr>@endunless
             @if ($line?->received_quantity !== null)
-                <tr><td>Received</td><td>{{ rtrim(rtrim((string) $line->received_quantity, '0'), '.') }} · {{ $line->arrived_on?->format('j M Y') }}</td></tr>
+                @unless ($several)<tr><td>Received</td><td>{{ rtrim(rtrim((string) $line->received_quantity, '0'), '.') }} · {{ $line->arrived_on?->format('j M Y') }}</td></tr>@endunless
                 @if ($arrival)<tr><td>Delivery note / GRN</td><td>{{ $arrival->reference }}@if ($arrival->location) <span class="muted">· {{ $arrival->location->name }}</span>@endif</td></tr>@endif
             @endif
             @if ($lot->notes)<tr><td>Notes</td><td>{{ $lot->notes }}</td></tr>@endif
@@ -75,7 +82,7 @@
     <section class="panel">
         <div class="panel-head"><h2>Financial summary</h2></div>
         <div class="panel-body"><table class="lot-figures">
-            <tr><td>Total base cost <span class="muted">({{ $qty }} × {{ Money::format((int) $line?->unit_price) }})</span></td><td>{{ Money::format($f['purchase']) }}</td></tr>
+            <tr><td>Total base cost @unless ($several)<span class="muted">({{ $qty }} × {{ Money::format((int) $line?->unit_price) }})</span>@else<span class="muted">({{ $lines->count() }} products)</span>@endunless</td><td>{{ Money::format($f['purchase']) }}</td></tr>
             <tr><td>Delivery charge</td><td>{{ $lot->ordered_at || $delivery > 0 ? Money::format($delivery) : 'Added when ordered' }}</td></tr>
             @if ($otherCosts !== 0)<tr><td>Other costs</td><td>{{ Money::format($otherCosts) }}</td></tr>@endif
             <tr><td><strong>Total lot cost</strong></td><td><strong>{{ Money::format($f['landed']) }}</strong></td></tr>
@@ -84,6 +91,22 @@
         </table></div>
     </section>
 </div>
+
+@if ($several)
+<section class="panel">
+    <div class="panel-head"><h2>Products</h2></div>
+    <div class="table-wrap"><table class="table">
+        <thead><tr><th>Product</th><th class="num">Quantity</th><th class="num">Unit base cost</th><th class="num">Base cost</th><th class="num">Received</th></tr></thead>
+        <tbody>
+        @foreach ($lines as $l)
+            <tr><td>{{ $l->description }}</td><td class="num">{{ $fmtQty($l->quantity) }} {{ $l->unit }}</td><td class="num">{{ Money::format((int) $l->unit_price) }}</td>
+                <td class="num">{{ Money::format($l->purchaseCost()) }}</td>
+                <td class="num">{{ $l->received_quantity !== null ? $fmtQty($l->received_quantity).' · '.$l->arrived_on?->format('j M Y') : '—' }}</td></tr>
+        @endforeach
+        </tbody>
+    </table></div>
+</section>
+@endif
 
 <section class="panel">
     <div class="panel-head"><h2>Activity</h2></div>
@@ -106,8 +129,12 @@
         <div class="dlg-body">
             <h2 id="order-title">Mark In order</h2>
             <table class="lot-figures">
+                @if ($several)
+                    @foreach ($lines as $l)<tr><td>{{ $l->description }}</td><td>{{ $fmtQty($l->quantity) }} × {{ Money::format((int) $l->unit_price) }}</td></tr>@endforeach
+                @else
                 <tr><td>Product base cost</td><td>{{ Money::format((int) $line->unit_price) }} / unit</td></tr>
                 <tr><td>Quantity</td><td>{{ $qty }}</td></tr>
+                @endif
                 <tr><td>Total base cost</td><td>{{ Money::format($f['purchase']) }}</td></tr>
             </table>
             <div class="field"><label for="delivery_charge">Delivery charge (BDT)</label>
@@ -134,7 +161,9 @@
         <div class="dlg-body">
             <h2 id="complete-title">Mark Completed</h2>
             <table class="lot-figures">
-                <tr><td>{{ $line->description }}</td><td>{{ rtrim(rtrim(\App\Services\Receiving::expected($line), '0'), '.') ?: $qty }} {{ $line->unit }}</td></tr>
+                @foreach ($lines as $l)
+                <tr><td>{{ $l->description }}</td><td>{{ $fmtQty(\App\Services\Receiving::expected($l)) ?: $fmtQty($l->quantity) }} {{ $l->unit }}</td></tr>
+                @endforeach
                 <tr><td><strong>Total lot cost</strong></td><td><strong>{{ Money::format($f['landed']) }}</strong></td></tr>
                 <tr><td>Client budget</td><td>{{ Money::format($f['revenue']) }}</td></tr>
                 <tr class="total"><td>{{ $isLoss ? 'Final loss' : 'Final profit' }}</td><td @class(['is-loss' => $isLoss, 'is-profit' => ! $isLoss])>{{ Money::format($f['profit']) }}</td></tr>
@@ -165,8 +194,8 @@
 {{-- Edit lot: everything, at any stage. Profit, project figures and reports follow; received stock is reconciled, never received twice. --}}
 @if ($canManage && $stage !== 'cancelled')
 @php
-    $editProducts = \App\Models\SupplierProduct::with('supplier:id,name')->where(fn ($q) => $q->where('is_active', true)->orWhere('id', $line?->supplier_product_id))->orderBy('name')->get();
-    $editSuppliers = \App\Models\Supplier::where(fn ($q) => $q->where('is_active', true)->orWhere('id', $line?->supplier_id))->orderBy('name')->get(['id', 'name']);
+    $editProducts = \App\Models\SupplierProduct::with('supplier:id,name')->where(fn ($q) => $q->where('is_active', true)->orWhereIn('id', $lines->pluck('supplier_product_id')->filter()))->orderBy('name')->get();
+    $editSuppliers = \App\Models\Supplier::where(fn ($q) => $q->where('is_active', true)->orWhereIn('id', $lines->pluck('supplier_id')->filter()))->orderBy('name')->get(['id', 'name']);
     $editProjects = \App\Models\Project::with('client:id,name')->where(fn ($q) => $q->whereNull('archived_at')->orWhere('id', $lot->project_id))->orderBy('name')->get();
 @endphp
 <dialog class="confirm lot-dialog" id="edit-dialog" aria-labelledby="edit-title">
@@ -176,12 +205,16 @@
             <div class="form-grid">
                 <div class="field"><label for="e_supplier">Supplier</label>
                     <select id="e_supplier" name="supplier_id">@foreach ($editSuppliers as $s)<option value="{{ $s->id }}" @selected((int) old('supplier_id', $line?->supplier_id) === $s->id)>{{ $s->name }}</option>@endforeach</select></div>
+                @unless ($several)
                 <div class="field"><label for="e_product">Product</label>
-                    <select id="e_product" name="supplier_product_id">@foreach ($editProducts as $p)<option value="{{ $p->id }}" data-supplier="{{ $p->supplier_id }}" @selected((int) old('supplier_product_id', $line?->supplier_product_id) === $p->id)>{{ $p->label() }}</option>@endforeach</select></div>
+                    <select id="e_product" name="supplier_product_id" data-product-select>@foreach ($editProducts as $p)<option value="{{ $p->id }}" data-supplier="{{ $p->supplier_id }}" @selected((int) old('supplier_product_id', $line?->supplier_product_id) === $p->id)>{{ $p->label() }}</option>@endforeach</select></div>
+                @endunless
                 <div class="field"><label for="e_project">Project</label>
                     <select id="e_project" name="project_id">@foreach ($editProjects as $p)<option value="{{ $p->id }}" @selected((int) old('project_id', $lot->project_id) === $p->id)>{{ $p->name }}{{ $p->client ? ' — '.$p->client->name : '' }}</option>@endforeach</select></div>
+                @unless ($several)
                 <div class="field"><label for="e_quantity">Quantity</label><input id="e_quantity" name="quantity" inputmode="numeric" required value="{{ old('quantity', $qty) }}">@error('quantity')<span class="error text-danger">{{ $message }}</span>@enderror</div>
                 <div class="field"><label for="e_unit">Unit base cost (BDT)</label><input id="e_unit" name="unit_cost" inputmode="decimal" required value="{{ old('unit_cost', Money::toDecimal((int) $line?->unit_price)) }}">@error('unit_cost')<span class="error text-danger">{{ $message }}</span>@enderror</div>
+                @endunless
                 <div class="field"><label for="e_budget">Client budget (BDT)</label><input id="e_budget" name="client_budget" inputmode="decimal" required value="{{ old('client_budget', Money::toDecimal((int) $lot->client_budget)) }}">@error('client_budget')<span class="error text-danger">{{ $message }}</span>@enderror</div>
                 <div class="field"><label for="e_delivery">Delivery charge (BDT)</label><input id="e_delivery" name="delivery_charge" inputmode="decimal" required value="{{ old('delivery_charge', Money::toDecimal($delivery)) }}">@error('delivery_charge')<span class="error text-danger">{{ $message }}</span>@enderror</div>
                 <div class="field"><label for="e_stage">Stage</label>
@@ -193,6 +226,23 @@
                     <div class="field"><label for="e_location">Stock location</label>
                         <select id="e_location" name="location_id">@foreach ($locations as $loc)<option value="{{ $loc->id }}" @selected((int) old('location_id', $arrival?->stock_location_id) === $loc->id)>{{ $loc->name }}</option>@endforeach</select></div>
                     @endif
+                @endif
+                @if ($several)
+                <div class="field full"><div class="table-wrap"><table class="table">
+                    <thead><tr><th>Product</th><th class="num">Quantity</th><th class="num">Unit base cost (BDT)</th></tr></thead>
+                    <tbody>
+                    @foreach ($lines as $l)
+                        <tr>
+                            <td><select name="lines[{{ $l->id }}][supplier_product_id]" data-product-select aria-label="Product">@foreach ($editProducts as $p)<option value="{{ $p->id }}" data-supplier="{{ $p->supplier_id }}" @selected((int) old("lines.{$l->id}.supplier_product_id", $l->supplier_product_id) === $p->id)>{{ $p->label() }}</option>@endforeach</select>
+                                @error("lines.{$l->id}.supplier_product_id")<span class="error text-danger">{{ $message }}</span>@enderror</td>
+                            <td class="num"><input name="lines[{{ $l->id }}][quantity]" inputmode="numeric" required size="8" aria-label="Quantity" value="{{ old("lines.{$l->id}.quantity", $fmtQty($l->quantity)) }}">
+                                @error("lines.{$l->id}.quantity")<span class="error text-danger">{{ $message }}</span>@enderror</td>
+                            <td class="num"><input name="lines[{{ $l->id }}][unit_cost]" inputmode="decimal" required size="10" aria-label="Unit base cost (BDT)" value="{{ old("lines.{$l->id}.unit_cost", Money::toDecimal((int) $l->unit_price)) }}">
+                                @error("lines.{$l->id}.unit_cost")<span class="error text-danger">{{ $message }}</span>@enderror</td>
+                        </tr>
+                    @endforeach
+                    </tbody>
+                </table></div></div>
                 @endif
                 <div class="field full"><label for="e_notes">Notes</label><input id="e_notes" name="notes" maxlength="5000" value="{{ old('notes', $lot->notes) }}"></div>
                 <div class="field full"><label for="e_reason">Note for the activity history <span class="opt">(optional)</span></label><input id="e_reason" name="reason" maxlength="500" value="{{ old('reason') }}" placeholder="e.g. supplier gave a discount"></div>
@@ -237,11 +287,13 @@
     var edit = document.getElementById('edit-dialog');
     if (edit) {
         // Only the chosen supplier's products are offered.
-        var sup = edit.querySelector('#e_supplier'), prod = edit.querySelector('#e_product');
+        var sup = edit.querySelector('#e_supplier');
         var filter = function () {
-            var first = null;
-            Array.prototype.forEach.call(prod.options, function (o) { var show = o.dataset.supplier === sup.value; o.hidden = !show; o.disabled = !show; if (show && !first) { first = o; } });
-            if (prod.selectedOptions.length === 0 || prod.selectedOptions[0].disabled) { if (first) { first.selected = true; } }
+            edit.querySelectorAll('[data-product-select]').forEach(function (prod) {
+                var first = null;
+                Array.prototype.forEach.call(prod.options, function (o) { var show = o.dataset.supplier === sup.value; o.hidden = !show; o.disabled = !show; if (show && !first) { first = o; } });
+                if (prod.selectedOptions.length === 0 || prod.selectedOptions[0].disabled) { if (first) { first.selected = true; } }
+            });
         };
         sup.addEventListener('change', filter); filter();
         @if (old('stage') !== null && $errors->any()) edit.showModal(); @endif

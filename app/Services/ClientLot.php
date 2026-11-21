@@ -13,10 +13,11 @@ use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
 /**
- * The simple client lot, controlled by the admin: one supplier product, a quantity, a unit base cost and a client budget agreed for the whole
- * lot, moved through exactly three stages — Processing → In order → Completed. Changes afterwards go through ClientLotCorrection ("Edit lot").
+ * The simple client lot, controlled by the admin: one supplier, one or more of its products (each with a quantity and a unit base cost) and a
+ * client budget agreed for the whole lot, moved through exactly three stages — Processing → In order → Completed. Changes afterwards go through
+ * ClientLotCorrection ("Edit lot").
  *
- * It is a thin layer over the existing sourcing records, never a parallel engine. A lot is an ordinary SourcingLot with one line; the delivery
+ * It is a thin layer over the existing sourcing records, never a parallel engine. A lot is an ordinary SourcingLot with one line per product; the delivery
  * charge is an ordinary lot cost; receiving goes through Receiving (stock movement, duplicate-reference guard). The workflow is independent of
  * payments, advances, approvals, invoices and settlement: no step requires, records or proposes any of them, and nothing here writes a journal
  * entry, an expense, an invoice or a cash movement. Payments are entered separately by the admins in the existing financial screens.
@@ -39,49 +40,70 @@ class ClientLot
     }
 
     /**
-     * Create a lot in the Processing stage, with the unit base cost the admin entered. The budget is the lot's agreed revenue, not money
-     * received: no payment, invoice or journal is made, and nothing waits for an approval.
+     * Create a lot in the Processing stage with one or more products of the same supplier, each with the quantity and unit base cost the admin
+     * entered. The budget is agreed for the whole lot and is the lot's agreed revenue, not money received: no payment, invoice or journal is
+     * made, and nothing waits for an approval. A single product may still be given as supplier_product_id / quantity / unit_cost.
      *
-     * @param  array{supplier_id: int, supplier_product_id: int, project_id: int, quantity: string, unit_cost: int, client_budget: int, purchase_order?: ?string, notes?: ?string}  $data
+     * @param  array{supplier_id: int, project_id: int, client_budget: int, items?: list<array{supplier_product_id: int, quantity: string, unit_cost: int}>, supplier_product_id?: int, quantity?: string, unit_cost?: int, purchase_order?: ?string, notes?: ?string}  $data
      */
     public static function create(array $data, User $user): SourcingLot
     {
-        $quantity = trim($data['quantity']);
-        if (! preg_match('/^[1-9]\d{0,9}$/', $quantity)) {
-            throw new RuntimeException('Quantity must be a whole number greater than zero.');
+        $items = $data['items'] ?? [['supplier_product_id' => $data['supplier_product_id'] ?? 0, 'quantity' => $data['quantity'] ?? '', 'unit_cost' => $data['unit_cost'] ?? 0]];
+        if ($items === []) {
+            throw new RuntimeException('Add at least one product.');
         }
-        if ($data['unit_cost'] <= 0) {
-            throw new RuntimeException('Enter the unit base cost (above zero).');
+        foreach ($items as $i => $item) {
+            $items[$i]['quantity'] = trim((string) $item['quantity']);
+            if (! preg_match('/^[1-9]\d{0,9}$/', $items[$i]['quantity'])) {
+                throw new RuntimeException('Quantity must be a whole number greater than zero.');
+            }
+            if ((int) $item['unit_cost'] <= 0) {
+                throw new RuntimeException('Enter the unit base cost (above zero).');
+            }
+        }
+        if (count(array_unique(array_map(fn ($item) => (int) $item['supplier_product_id'], $items))) !== count($items)) {
+            throw new RuntimeException('Each product can be added only once; change its quantity instead.');
         }
         if ($data['client_budget'] <= 0) {
             throw new RuntimeException('Enter the client lot budget (above zero).');
         }
 
-        return DB::transaction(function () use ($data, $quantity, $user) {
+        return DB::transaction(function () use ($data, $items, $user) {
             $supplier = Supplier::findOrFail($data['supplier_id']);
             if (! $supplier->is_active) {
                 throw new RuntimeException('That supplier is archived.');
             }
-            $product = SupplierProduct::where('supplier_id', $supplier->id)->find($data['supplier_product_id'])
-                ?? throw new RuntimeException('Choose a product supplied by '.$supplier->name.'.');
-            if (! $product->is_active) {
-                throw new RuntimeException($product->label().' is inactive.');
+            $products = [];
+            foreach ($items as $item) {
+                $product = SupplierProduct::where('supplier_id', $supplier->id)->find((int) $item['supplier_product_id'])
+                    ?? throw new RuntimeException('Choose a product supplied by '.$supplier->name.'.');
+                if (! $product->is_active) {
+                    throw new RuntimeException($product->label().' is inactive.');
+                }
+                $products[] = $product;
             }
             $project = Project::with('client')->whereNull('archived_at')->find($data['project_id'])
                 ?? throw new RuntimeException('Choose an active client project.');
 
+            $title = count($items) === 1 ? $products[0]->label().' × '.$items[0]['quantity'] : $products[0]->label().' + '.(count($items) - 1).' more';
             $lot = Sourcing::createLot([
-                'title' => $product->label().' × '.$quantity.' — '.$project->name, 'allocation_basis' => 'value',
+                'title' => $title.' — '.$project->name, 'allocation_basis' => 'value',
                 'purchase_order' => $data['purchase_order'] ?? null, 'project_id' => $project->id, 'notes' => $data['notes'] ?? null,
             ], $user);
             $lot->update(['client_budget' => $data['client_budget']]);
-            // The admin's unit base cost is the lot's cost as entered (the catalog price is only suggested on the form).
-            $lot->lines()->create(['supplier_id' => $supplier->id, 'supplier_product_id' => $product->id, 'description' => $product->label(), 'unit' => $product->unit ?: 'pcs',
-                'quantity' => $quantity, 'usable_quantity' => $quantity, 'unit_price' => $data['unit_cost'], 'reference_price' => (int) $product->reference_price, 'position' => 1]);
+            $base = 0;
+            $details = [];
+            foreach ($items as $i => $item) {
+                $product = $products[$i];
+                // The admin's unit base cost is the lot's cost as entered (the catalog price is only suggested on the form).
+                $lot->lines()->create(['supplier_id' => $supplier->id, 'supplier_product_id' => $product->id, 'description' => $product->label(), 'unit' => $product->unit ?: 'pcs',
+                    'quantity' => $item['quantity'], 'usable_quantity' => $item['quantity'], 'unit_price' => (int) $item['unit_cost'], 'reference_price' => (int) $product->reference_price, 'position' => $i + 1]);
+                $base += Money::multiply($item['quantity'], (int) $item['unit_cost']);
+                $details[] = $product->label().' qty '.$item['quantity'].' unit cost '.(int) $item['unit_cost'];
+            }
 
-            $f = self::figures($quantity, $data['unit_cost'], $data['client_budget']);
             self::approveBudget($lot, $user);
-            Audit::log('sourcing.client_lot.created', 'lot '.$lot->number, 'qty '.$quantity.' unit cost '.$data['unit_cost'].' base '.$f['base'].' budget '.$data['client_budget'].' estimated profit '.$f['profit']);
+            Audit::log('sourcing.client_lot.created', 'lot '.$lot->number, implode('; ', $details).' | base '.$base.' budget '.$data['client_budget'].' estimated profit '.($data['client_budget'] - $base));
 
             return $lot->refresh();
         });
@@ -94,11 +116,23 @@ class ClientLot
      */
     private static function approveBudget(SourcingLot $lot, User $user): void
     {
-        $line = $lot->lines()->firstOrFail();
-        $unitPrice = intdiv((int) $lot->client_budget, max(1, (int) $line->quantity)); // indicative; the invoice bills the budget itself to the paisa
-        $line->update(['sell_price' => $unitPrice, 'approved_price' => $unitPrice]);
+        self::syncIndicativePrices($lot);
         $lot->update(['pricing_method' => 'fixed', 'pricing_value' => 0, 'priced_by' => $lot->priced_by ?? $user->id, 'status' => 'approved',
             'approved_by' => $user->id, 'approved_at' => now(), 'approved_cost' => LotFinancials::for($lot)['landed'], 'approved_revenue' => (int) $lot->client_budget]);
+    }
+
+    /**
+     * Each line's indicative unit price: its share of the budget (split by base cost) divided by its quantity. Indicative only — the figures and
+     * the invoice use the budget itself, to the paisa.
+     */
+    public static function syncIndicativePrices(SourcingLot $lot): void
+    {
+        $lot->load('lines');
+        foreach (LotFinancials::budgetShares($lot) as $lineId => $share) {
+            $line = $lot->lines->firstWhere('id', $lineId);
+            $unitPrice = intdiv($share, max(1, (int) $line->quantity));
+            $line->update(['sell_price' => $unitPrice, 'approved_price' => $unitPrice]);
+        }
     }
 
     /**
@@ -170,10 +204,11 @@ class ClientLot
                 throw new RuntimeException($blockers[0]);
             }
 
-            $locationId = ($data['location_id'] ?? null) ?: self::onlyWarehouse();
-            foreach ($lot->lines()->get() as $line) {
+            foreach ($lot->lines()->orderBy('position')->orderBy('id')->get() as $line) {
                 $left = Receiving::expected($line);
                 if (bccomp($left, '0', 2) > 0) {
+                    // Re-read per product: the first receipt may have just created the only warehouse.
+                    $locationId = ($data['location_id'] ?? null) ?: self::onlyWarehouse();
                     Receiving::receive($line, $left, $left, '0', $data['arrived_on'], $locationId, $data['reference'], null, $data['notes'] ?? null, $user);
                 }
             }
