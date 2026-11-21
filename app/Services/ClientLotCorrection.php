@@ -41,10 +41,11 @@ class ClientLotCorrection
     public const STAGE_STATUS = ['processing' => 'approved', 'in_order' => 'in_progress', 'completed' => 'completed'];
 
     /**
-     * The products are given per line as lines[line id] => {supplier_product_id, quantity, unit_cost}; a one-product lot may instead give
-     * supplier_product_id / quantity / unit_cost for its line. A line left out is not changed. The supplier applies to every line.
+     * The products are given per line as lines[line id] => {supplier_id, supplier_product_id, quantity, unit_cost}, so each line keeps or changes
+     * its own supplier; a one-product lot may instead give supplier_id / supplier_product_id / quantity / unit_cost for its line. A line left
+     * out is not changed. A line without its own supplier_id uses the lot-level supplier_id, else keeps its supplier.
      *
-     * @param  array{supplier_id: int, project_id: int, client_budget: int, delivery_charge: int, stage: string, lines?: array<int, array{supplier_product_id: int, quantity: string, unit_cost: int}>, supplier_product_id?: int, quantity?: string, unit_cost?: int, arrived_on?: ?string, reference?: ?string, location_id?: ?int, notes?: ?string, reason?: ?string}  $data
+     * @param  array{project_id: int, client_budget: int, delivery_charge: int, stage: string, supplier_id?: int, lines?: array<int, array{supplier_id?: int, supplier_product_id: int, quantity: string, unit_cost: int}>, supplier_product_id?: int, quantity?: string, unit_cost?: int, arrived_on?: ?string, reference?: ?string, location_id?: ?int, notes?: ?string, reason?: ?string}  $data
      * @return list<string> what was changed, in plain words
      */
     public static function apply(SourcingLot $lot, array $data, User $user): array
@@ -96,7 +97,7 @@ class ClientLotCorrection
                 $edit = $edits[$line->id] ?? ['supplier_product_id' => $line->supplier_product_id, 'quantity' => self::qty((string) $line->quantity), 'unit_cost' => (int) $line->unit_price];
                 $label = $line->description;
                 $lineChanges = [];
-                self::product($line, (int) $data['supplier_id'], (int) $edit['supplier_product_id'], $lineChanges);
+                self::product($line, (int) ($edit['supplier_id'] ?? $data['supplier_id'] ?? $line->supplier_id), (int) $edit['supplier_product_id'], $lineChanges);
                 self::quantityAndCost($line, (string) $edit['quantity'], (int) $edit['unit_cost'], $user, $lineChanges);
                 if ($line->refresh()->received_quantity !== null) {
                     self::receiving($line, $data, $user, $lineChanges);

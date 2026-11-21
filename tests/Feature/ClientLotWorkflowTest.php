@@ -106,7 +106,7 @@ it('creates a Processing lot with the base cost and estimated profit, and record
 
 it('shows only the simple form with product rows, with no advanced lot forms', function () {
     $this->co->as('finance')->get(route('sourcing.lots.create'))->assertOk()
-        ->assertSeeInOrder(['Supplier', 'Project', 'Product', 'Quantity', 'Unit base cost (BDT)', 'Add another product', 'Client lot budget (BDT)', 'Create lot'])
+        ->assertSeeInOrder(['Project', 'Supplier', 'Product', 'Quantity', 'Unit base cost (BDT)', 'Add another product', 'Client lot budget (BDT)', 'Create lot'])
         ->assertDontSee('Advanced')->assertDontSee('empty lot')
         ->assertSee('Corporate Gifts — Acme Retail')->assertSee('Dhaka Ceramics');
 });
@@ -163,29 +163,49 @@ it('refuses a product that the chosen supplier does not supply', function () {
     expect(SourcingLot::count())->toBe(0);
 });
 
-it('creates one lot with several products, splitting the budget across them exactly', function () {
-    $plate = SupplierProduct::create(['supplier_id' => $this->supplier->id, 'name' => 'Dinner Plate', 'unit' => 'pcs', 'reference_price' => 25_000]);
+/** A second supplier with its own product, for lots that mix suppliers. */
+function clPlate(): SupplierProduct
+{
+    $glass = Supplier::create(['name' => 'Chittagong Glassware']);
+
+    return SupplierProduct::create(['supplier_id' => $glass->id, 'name' => 'Dinner Plate', 'unit' => 'pcs', 'reference_price' => 25_000]);
+}
+
+it('creates one lot with several products from different suppliers, splitting the budget across them exactly', function () {
+    $plate = clPlate();
 
     $lot = clCreate(['items' => [
-        ['supplier_product_id' => $this->product->id, 'quantity' => '100', 'unit_cost' => '150'],
-        ['supplier_product_id' => $plate->id, 'quantity' => '40', 'unit_cost' => '250'],
+        ['supplier_id' => $this->supplier->id, 'supplier_product_id' => $this->product->id, 'quantity' => '100', 'unit_cost' => '150'],
+        ['supplier_id' => $plate->supplier_id, 'supplier_product_id' => $plate->id, 'quantity' => '40', 'unit_cost' => '250'],
     ], 'client_budget' => '30000']);
 
     $f = LotFinancials::for($lot);
     expect($lot->lines()->count())->toBe(2)
         ->and($lot->lines()->orderBy('position')->pluck('supplier_product_id')->all())->toBe([$this->product->id, $plate->id])
+        ->and($lot->lines()->orderBy('position')->pluck('supplier_id')->all())->toBe([$this->supplier->id, $plate->supplier_id])
         ->and($f['purchase'])->toBe(2_500_000)->and($f['revenue'])->toBe(3_000_000)->and($f['profit'])->toBe(500_000)
         ->and(array_sum(LotFinancials::budgetShares($lot)))->toBe(3_000_000)
         ->and($lot->status)->toBe('approved');
 
-    $this->co->as('finance')->get(route('sourcing.lots.show', $lot))->assertOk()->assertSee('Coffee Mug')->assertSee('Dinner Plate')->assertSee('2 products');
+    $this->co->as('finance')->get(route('sourcing.lots.show', $lot))->assertOk()->assertSee('Coffee Mug')->assertSee('Dinner Plate')->assertSee('2 products')
+        ->assertSee('Suppliers')->assertSee('Dhaka Ceramics')->assertSee('Chittagong Glassware');
 });
 
-it('receives every product of a multi-product lot on completion and bills the whole budget to the paisa', function () {
-    $plate = SupplierProduct::create(['supplier_id' => $this->supplier->id, 'name' => 'Dinner Plate', 'unit' => 'pcs', 'reference_price' => 25_000]);
+it('refuses a row whose product is not supplied by that row\'s supplier', function () {
+    $plate = clPlate();
+
+    $this->co->post('finance', 'sourcing.client-lots.store', ['project_id' => $this->project->id, 'client_budget' => '2000', 'items' => [
+        ['supplier_id' => $this->supplier->id, 'supplier_product_id' => $plate->id, 'quantity' => '5', 'unit_cost' => '250'],
+    ]])->assertSessionHas('error', 'Choose a product supplied by Dhaka Ceramics.');
+
+    expect(SourcingLot::count())->toBe(0);
+});
+
+it('receives every product of a multi-supplier lot on completion and bills the whole budget to the paisa', function () {
+    $plate = clPlate();
     $lot = clOrder(clCreate(['items' => [
-        ['supplier_product_id' => $this->product->id, 'quantity' => '3', 'unit_cost' => '150'],
-        ['supplier_product_id' => $plate->id, 'quantity' => '7', 'unit_cost' => '250'],
+        ['supplier_id' => $this->supplier->id, 'supplier_product_id' => $this->product->id, 'quantity' => '3', 'unit_cost' => '150'],
+        ['supplier_id' => $plate->supplier_id, 'supplier_product_id' => $plate->id, 'quantity' => '7', 'unit_cost' => '250'],
     ], 'client_budget' => '10000']));
 
     clComplete($lot)->assertSessionMissing('error');
@@ -198,29 +218,32 @@ it('receives every product of a multi-product lot on completion and bills the wh
 });
 
 it('refuses the same product twice on one lot', function () {
-    $this->co->post('finance', 'sourcing.client-lots.store', ['supplier_id' => $this->supplier->id, 'project_id' => $this->project->id, 'client_budget' => '2000', 'items' => [
-        ['supplier_product_id' => $this->product->id, 'quantity' => '5', 'unit_cost' => '150'],
-        ['supplier_product_id' => $this->product->id, 'quantity' => '5', 'unit_cost' => '150'],
+    $this->co->post('finance', 'sourcing.client-lots.store', ['project_id' => $this->project->id, 'client_budget' => '2000', 'items' => [
+        ['supplier_id' => $this->supplier->id, 'supplier_product_id' => $this->product->id, 'quantity' => '5', 'unit_cost' => '150'],
+        ['supplier_id' => $this->supplier->id, 'supplier_product_id' => $this->product->id, 'quantity' => '5', 'unit_cost' => '150'],
     ]])->assertSessionHasErrors(['items.0.supplier_product_id' => 'Each product can be added only once; change its quantity instead.']);
 
     expect(SourcingLot::count())->toBe(0);
 });
 
-it('edits every product of a multi-product lot', function () {
-    $plate = SupplierProduct::create(['supplier_id' => $this->supplier->id, 'name' => 'Dinner Plate', 'unit' => 'pcs', 'reference_price' => 25_000]);
+it('edits every product of a multi-supplier lot, including moving a product to another supplier', function () {
+    $plate = clPlate();
+    $bowl = SupplierProduct::create(['supplier_id' => $this->supplier->id, 'name' => 'Soup Bowl', 'unit' => 'pcs', 'reference_price' => 20_000]);
     $lot = clCreate(['items' => [
-        ['supplier_product_id' => $this->product->id, 'quantity' => '100', 'unit_cost' => '150'],
-        ['supplier_product_id' => $plate->id, 'quantity' => '40', 'unit_cost' => '250'],
+        ['supplier_id' => $this->supplier->id, 'supplier_product_id' => $this->product->id, 'quantity' => '100', 'unit_cost' => '150'],
+        ['supplier_id' => $plate->supplier_id, 'supplier_product_id' => $plate->id, 'quantity' => '40', 'unit_cost' => '250'],
     ], 'client_budget' => '30000']);
     [$mug, $plateLine] = $lot->lines()->orderBy('position')->get()->all();
 
-    $this->co->post('finance', 'sourcing.lots.correct', ['supplier_id' => $this->supplier->id, 'project_id' => $this->project->id, 'client_budget' => '30000',
+    $this->co->post('finance', 'sourcing.lots.correct', ['project_id' => $this->project->id, 'client_budget' => '30000',
         'delivery_charge' => '0', 'stage' => 'processing', 'lines' => [
-            $mug->id => ['supplier_product_id' => $this->product->id, 'quantity' => '100', 'unit_cost' => '150'],
-            $plateLine->id => ['supplier_product_id' => $plate->id, 'quantity' => '50', 'unit_cost' => '240'],
+            $mug->id => ['supplier_id' => $this->supplier->id, 'supplier_product_id' => $this->product->id, 'quantity' => '100', 'unit_cost' => '150'],
+            $plateLine->id => ['supplier_id' => $this->supplier->id, 'supplier_product_id' => $bowl->id, 'quantity' => '50', 'unit_cost' => '240'],
         ]], $lot)->assertSessionHasNoErrors()->assertSessionMissing('error');
 
-    expect((string) $plateLine->refresh()->quantity)->toBe('50.00')->and((int) $plateLine->unit_price)->toBe(24_000)
+    $plateLine->refresh();
+    expect((string) $plateLine->quantity)->toBe('50.00')->and((int) $plateLine->unit_price)->toBe(24_000)
+        ->and($plateLine->supplier_id)->toBe($this->supplier->id)->and($plateLine->supplier_product_id)->toBe($bowl->id)
         ->and(LotFinancials::for($lot->refresh())['purchase'])->toBe(2_700_000);
 });
 

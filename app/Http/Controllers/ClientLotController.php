@@ -20,9 +20,10 @@ class ClientLotController extends Controller
 {
     public function store(Request $request): RedirectResponse
     {
-        // The form sends one row per product (items[]); a single product sent as plain fields is still accepted.
+        // The form sends one row per product, each with its own supplier (items[]); a single product sent as plain fields is still accepted.
         if (! $request->has('items')) {
             $single = $request->validate([
+                'supplier_id' => ['required', 'integer', 'exists:suppliers,id'],
                 'supplier_product_id' => ['required', 'integer', 'exists:supplier_products,id'],
                 'quantity' => ['required', 'regex:/^[1-9]\d{0,9}$/'],
                 'unit_cost' => ['required', 'regex:'.Money::AMOUNT_REGEX],
@@ -33,9 +34,9 @@ class ClientLotController extends Controller
             $request->merge(['items' => [$single]]);
         }
         $data = $request->validate([
-            'supplier_id' => ['required', 'integer', 'exists:suppliers,id'],
             'project_id' => ['required', 'integer', 'exists:projects,id'],
             'items' => ['required', 'array', 'min:1', 'max:100'],
+            'items.*.supplier_id' => ['required', 'integer', 'exists:suppliers,id'],
             'items.*.supplier_product_id' => ['required', 'integer', 'distinct', 'exists:supplier_products,id'],
             'items.*.quantity' => ['required', 'regex:/^[1-9]\d{0,9}$/'],
             'items.*.unit_cost' => ['required', 'regex:'.Money::AMOUNT_REGEX],
@@ -45,6 +46,7 @@ class ClientLotController extends Controller
             'submission_key' => ['nullable', 'uuid'],
         ], [
             'items.required' => 'Add at least one product.',
+            'items.*.supplier_id.required' => 'Choose a supplier on every row.',
             'items.*.supplier_product_id.required' => 'Choose a product on every row.',
             'items.*.supplier_product_id.distinct' => 'Each product can be added only once; change its quantity instead.',
             'items.*.quantity.required' => 'Enter a quantity on every row.',
@@ -62,9 +64,9 @@ class ClientLotController extends Controller
                     return redirect()->route('sourcing.lots.show', $existing)->with('warning', 'This lot was already saved; nothing was duplicated.');
                 }
                 $lot = ClientLot::create([
-                    'supplier_id' => (int) $data['supplier_id'], 'project_id' => (int) $data['project_id'],
+                    'project_id' => (int) $data['project_id'],
                     'items' => array_map(fn (array $item) => [
-                        'supplier_product_id' => (int) $item['supplier_product_id'], 'quantity' => $item['quantity'], 'unit_cost' => Money::toMinor($item['unit_cost']),
+                        'supplier_id' => (int) $item['supplier_id'], 'supplier_product_id' => (int) $item['supplier_product_id'], 'quantity' => $item['quantity'], 'unit_cost' => Money::toMinor($item['unit_cost']),
                     ], array_values($data['items'])),
                     'client_budget' => Money::toMinor($data['client_budget']),
                     'purchase_order' => $data['purchase_order'] ?? null, 'notes' => $data['notes'] ?? null,
@@ -103,15 +105,16 @@ class ClientLotController extends Controller
     /** Edit lot: an admin changes anything at any stage; the figures, project profitability and stock follow (ClientLotCorrection). */
     public function correct(Request $request, SourcingLot $lot): RedirectResponse
     {
-        // One row per product (lines[line id][…]); a one-product lot may still send the plain fields.
+        // One row per product, each with its own supplier (lines[line id][…]); a one-product lot may still send the plain fields.
         $perLine = $request->has('lines');
         $data = $request->validate([
-            'supplier_id' => ['required', 'integer', 'exists:suppliers,id'],
+            'supplier_id' => [Rule::requiredIf(! $perLine), 'integer', 'exists:suppliers,id'],
             'supplier_product_id' => [Rule::requiredIf(! $perLine), 'integer', 'exists:supplier_products,id'],
             'project_id' => ['required', 'integer', 'exists:projects,id'],
             'quantity' => [Rule::requiredIf(! $perLine), 'regex:/^[1-9]\d{0,9}$/'],
             'unit_cost' => [Rule::requiredIf(! $perLine), 'regex:'.Money::AMOUNT_REGEX],
             'lines' => ['sometimes', 'array', 'min:1'],
+            'lines.*.supplier_id' => ['required', 'integer', 'exists:suppliers,id'],
             'lines.*.supplier_product_id' => ['required', 'integer', 'distinct', 'exists:supplier_products,id'],
             'lines.*.quantity' => ['required', 'regex:/^[1-9]\d{0,9}$/'],
             'lines.*.unit_cost' => ['required', 'regex:'.Money::AMOUNT_REGEX],
@@ -130,13 +133,13 @@ class ClientLotController extends Controller
             'lines.*.supplier_product_id.distinct' => 'Each product can be on the lot only once; change its quantity instead.',
         ]);
         $products = $perLine
-            ? collect($data['lines'])->map(fn (array $line) => ['supplier_product_id' => (int) $line['supplier_product_id'], 'quantity' => $line['quantity'], 'unit_cost' => Money::toMinor($line['unit_cost'])])->all()
+            ? collect($data['lines'])->map(fn (array $line) => ['supplier_id' => (int) $line['supplier_id'], 'supplier_product_id' => (int) $line['supplier_product_id'], 'quantity' => $line['quantity'], 'unit_cost' => Money::toMinor($line['unit_cost'])])->all()
             : null;
 
         try {
             $changes = ClientLotCorrection::apply($lot, [
-                'supplier_id' => (int) $data['supplier_id'], 'project_id' => (int) $data['project_id'],
-                ...($products !== null ? ['lines' => $products] : ['supplier_product_id' => (int) $data['supplier_product_id'], 'quantity' => $data['quantity'], 'unit_cost' => Money::toMinor($data['unit_cost'])]),
+                'project_id' => (int) $data['project_id'],
+                ...($products !== null ? ['lines' => $products] : ['supplier_id' => (int) $data['supplier_id'], 'supplier_product_id' => (int) $data['supplier_product_id'], 'quantity' => $data['quantity'], 'unit_cost' => Money::toMinor($data['unit_cost'])]),
                 'client_budget' => Money::toMinor($data['client_budget']),
                 'delivery_charge' => Money::toMinor($data['delivery_charge']), 'stage' => $data['stage'], 'arrived_on' => $data['arrived_on'] ?? null,
                 'reference' => $data['reference'] ?? null, 'location_id' => isset($data['location_id']) ? (int) $data['location_id'] : null,

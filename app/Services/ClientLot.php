@@ -13,7 +13,7 @@ use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
 /**
- * The simple client lot, controlled by the admin: one supplier, one or more of its products (each with a quantity and a unit base cost) and a
+ * The simple client lot, controlled by the admin: one or more products, from one or several suppliers (each with a quantity and a unit base cost) and a
  * client budget agreed for the whole lot, moved through exactly three stages — Processing → In order → Completed. Changes afterwards go through
  * ClientLotCorrection ("Edit lot").
  *
@@ -40,11 +40,12 @@ class ClientLot
     }
 
     /**
-     * Create a lot in the Processing stage with one or more products of the same supplier, each with the quantity and unit base cost the admin
-     * entered. The budget is agreed for the whole lot and is the lot's agreed revenue, not money received: no payment, invoice or journal is
-     * made, and nothing waits for an approval. A single product may still be given as supplier_product_id / quantity / unit_cost.
+     * Create a lot in the Processing stage with one or more products, each from its own supplier (suppliers may differ within a lot), with the
+     * quantity and unit base cost the admin entered. The budget is agreed for the whole lot and is the lot's agreed revenue, not money received:
+     * no payment, invoice or journal is made, and nothing waits for an approval. A single product may still be given as supplier_id /
+     * supplier_product_id / quantity / unit_cost; an item without its own supplier_id uses the lot-level supplier_id.
      *
-     * @param  array{supplier_id: int, project_id: int, client_budget: int, items?: list<array{supplier_product_id: int, quantity: string, unit_cost: int}>, supplier_product_id?: int, quantity?: string, unit_cost?: int, purchase_order?: ?string, notes?: ?string}  $data
+     * @param  array{project_id: int, client_budget: int, supplier_id?: int, items?: list<array{supplier_id?: int, supplier_product_id: int, quantity: string, unit_cost: int}>, supplier_product_id?: int, quantity?: string, unit_cost?: int, purchase_order?: ?string, notes?: ?string}  $data
      */
     public static function create(array $data, User $user): SourcingLot
     {
@@ -53,6 +54,7 @@ class ClientLot
             throw new RuntimeException('Add at least one product.');
         }
         foreach ($items as $i => $item) {
+            $items[$i]['supplier_id'] = (int) ($item['supplier_id'] ?? $data['supplier_id'] ?? 0);
             $items[$i]['quantity'] = trim((string) $item['quantity']);
             if (! preg_match('/^[1-9]\d{0,9}$/', $items[$i]['quantity'])) {
                 throw new RuntimeException('Quantity must be a whole number greater than zero.');
@@ -69,12 +71,12 @@ class ClientLot
         }
 
         return DB::transaction(function () use ($data, $items, $user) {
-            $supplier = Supplier::findOrFail($data['supplier_id']);
-            if (! $supplier->is_active) {
-                throw new RuntimeException('That supplier is archived.');
-            }
             $products = [];
             foreach ($items as $item) {
+                $supplier = Supplier::find($item['supplier_id']) ?? throw new RuntimeException('Choose a supplier on every row.');
+                if (! $supplier->is_active) {
+                    throw new RuntimeException($supplier->name.' is archived.');
+                }
                 $product = SupplierProduct::where('supplier_id', $supplier->id)->find((int) $item['supplier_product_id'])
                     ?? throw new RuntimeException('Choose a product supplied by '.$supplier->name.'.');
                 if (! $product->is_active) {
@@ -96,7 +98,7 @@ class ClientLot
             foreach ($items as $i => $item) {
                 $product = $products[$i];
                 // The admin's unit base cost is the lot's cost as entered (the catalog price is only suggested on the form).
-                $lot->lines()->create(['supplier_id' => $supplier->id, 'supplier_product_id' => $product->id, 'description' => $product->label(), 'unit' => $product->unit ?: 'pcs',
+                $lot->lines()->create(['supplier_id' => $product->supplier_id, 'supplier_product_id' => $product->id, 'description' => $product->label(), 'unit' => $product->unit ?: 'pcs',
                     'quantity' => $item['quantity'], 'usable_quantity' => $item['quantity'], 'unit_price' => (int) $item['unit_cost'], 'reference_price' => (int) $product->reference_price, 'position' => $i + 1]);
                 $base += Money::multiply($item['quantity'], (int) $item['unit_cost']);
                 $details[] = $product->label().' qty '.$item['quantity'].' unit cost '.(int) $item['unit_cost'];

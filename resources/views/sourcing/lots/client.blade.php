@@ -63,7 +63,7 @@
     <section class="panel">
         <div class="panel-head"><h2>Lot information</h2></div>
         <div class="panel-body"><table class="lot-figures">
-            <tr><td>Supplier</td><td>{{ $line?->supplier?->name ?? '—' }}</td></tr>
+            <tr><td>{{ $lines->pluck('supplier_id')->unique()->count() > 1 ? 'Suppliers' : 'Supplier' }}</td><td>{{ $lines->map(fn ($l) => $l->supplier?->name)->filter()->unique()->implode(', ') ?: '—' }}</td></tr>
             @if ($several)
                 <tr><td>Products</td><td>{{ $lines->count() }} products <span class="muted">· listed below</span></td></tr>
             @else
@@ -96,10 +96,10 @@
 <section class="panel">
     <div class="panel-head"><h2>Products</h2></div>
     <div class="table-wrap"><table class="table">
-        <thead><tr><th>Product</th><th class="num">Quantity</th><th class="num">Unit base cost</th><th class="num">Base cost</th><th class="num">Received</th></tr></thead>
+        <thead><tr><th>Product</th><th>Supplier</th><th class="num">Quantity</th><th class="num">Unit base cost</th><th class="num">Base cost</th><th class="num">Received</th></tr></thead>
         <tbody>
         @foreach ($lines as $l)
-            <tr><td>{{ $l->description }}</td><td class="num">{{ $fmtQty($l->quantity) }} {{ $l->unit }}</td><td class="num">{{ Money::format((int) $l->unit_price) }}</td>
+            <tr><td>{{ $l->description }}</td><td>{{ $l->supplier?->name ?? '—' }}</td><td class="num">{{ $fmtQty($l->quantity) }} {{ $l->unit }}</td><td class="num">{{ Money::format((int) $l->unit_price) }}</td>
                 <td class="num">{{ Money::format($l->purchaseCost()) }}</td>
                 <td class="num">{{ $l->received_quantity !== null ? $fmtQty($l->received_quantity).' · '.$l->arrived_on?->format('j M Y') : '—' }}</td></tr>
         @endforeach
@@ -203,9 +203,9 @@
         <div class="dlg-body">
             <h2 id="edit-title">Edit lot {{ $lot->number }}</h2>
             <div class="form-grid">
-                <div class="field"><label for="e_supplier">Supplier</label>
-                    <select id="e_supplier" name="supplier_id">@foreach ($editSuppliers as $s)<option value="{{ $s->id }}" @selected((int) old('supplier_id', $line?->supplier_id) === $s->id)>{{ $s->name }}</option>@endforeach</select></div>
                 @unless ($several)
+                <div class="field"><label for="e_supplier">Supplier</label>
+                    <select id="e_supplier" name="supplier_id" data-supplier-select>@foreach ($editSuppliers as $s)<option value="{{ $s->id }}" @selected((int) old('supplier_id', $line?->supplier_id) === $s->id)>{{ $s->name }}</option>@endforeach</select></div>
                 <div class="field"><label for="e_product">Product</label>
                     <select id="e_product" name="supplier_product_id" data-product-select>@foreach ($editProducts as $p)<option value="{{ $p->id }}" data-supplier="{{ $p->supplier_id }}" @selected((int) old('supplier_product_id', $line?->supplier_product_id) === $p->id)>{{ $p->label() }}</option>@endforeach</select></div>
                 @endunless
@@ -229,10 +229,11 @@
                 @endif
                 @if ($several)
                 <div class="field full"><div class="table-wrap"><table class="table">
-                    <thead><tr><th>Product</th><th class="num">Quantity</th><th class="num">Unit base cost (BDT)</th></tr></thead>
+                    <thead><tr><th>Supplier</th><th>Product</th><th class="num">Quantity</th><th class="num">Unit base cost (BDT)</th></tr></thead>
                     <tbody>
                     @foreach ($lines as $l)
                         <tr>
+                            <td><select name="lines[{{ $l->id }}][supplier_id]" data-supplier-select aria-label="Supplier">@foreach ($editSuppliers as $s)<option value="{{ $s->id }}" @selected((int) old("lines.{$l->id}.supplier_id", $l->supplier_id) === $s->id)>{{ $s->name }}</option>@endforeach</select></td>
                             <td><select name="lines[{{ $l->id }}][supplier_product_id]" data-product-select aria-label="Product">@foreach ($editProducts as $p)<option value="{{ $p->id }}" data-supplier="{{ $p->supplier_id }}" @selected((int) old("lines.{$l->id}.supplier_product_id", $l->supplier_product_id) === $p->id)>{{ $p->label() }}</option>@endforeach</select>
                                 @error("lines.{$l->id}.supplier_product_id")<span class="error text-danger">{{ $message }}</span>@enderror</td>
                             <td class="num"><input name="lines[{{ $l->id }}][quantity]" inputmode="numeric" required size="8" aria-label="Quantity" value="{{ old("lines.{$l->id}.quantity", $fmtQty($l->quantity)) }}">
@@ -286,16 +287,16 @@
     @if ($errors->hasAny(['arrived_on', 'reference', 'location_id']) && old('stage') === null) if (complete) { complete.showModal(); } @endif
     var edit = document.getElementById('edit-dialog');
     if (edit) {
-        // Only the chosen supplier's products are offered.
-        var sup = edit.querySelector('#e_supplier');
-        var filter = function () {
-            edit.querySelectorAll('[data-product-select]').forEach(function (prod) {
+        // Each product list offers only the products of the supplier chosen beside it (its row, or the single-product supplier field).
+        edit.querySelectorAll('[data-product-select]').forEach(function (prod) {
+            var row = prod.closest('tr'), sup = row ? row.querySelector('[data-supplier-select]') : edit.querySelector('#e_supplier');
+            var filter = function () {
                 var first = null;
                 Array.prototype.forEach.call(prod.options, function (o) { var show = o.dataset.supplier === sup.value; o.hidden = !show; o.disabled = !show; if (show && !first) { first = o; } });
                 if (prod.selectedOptions.length === 0 || prod.selectedOptions[0].disabled) { if (first) { first.selected = true; } }
-            });
-        };
-        sup.addEventListener('change', filter); filter();
+            };
+            sup.addEventListener('change', filter); filter();
+        });
         @if (old('stage') !== null && $errors->any()) edit.showModal(); @endif
     }
 })();
